@@ -10,13 +10,13 @@ import platform
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
 
 from . import util
 from .capture import FramePacer, Monitor, ScreenCapture
-from .transport import Candidate, LinkStats, PeerLink
+from .transport import LinkStats, PeerLink
 
 log = logging.getLogger("peerdesk.session")
 
@@ -78,8 +78,8 @@ class HostSession:
         link: PeerLink,
         code: str,
         *,
-        settings: Optional[VideoSettings] = None,
-        on_event: Optional[Callable[[dict], None]] = None,
+        settings: VideoSettings | None = None,
+        on_event: Callable[[dict], None] | None = None,
         allow_input: bool = True,
     ) -> None:
         self.link = link
@@ -88,7 +88,7 @@ class HostSession:
         self.on_event = on_event or (lambda e: None)
         self.allow_input = allow_input
         self.monitors: list[Monitor] = []
-        self.current_monitor: Optional[Monitor] = None
+        self.current_monitor: Monitor | None = None
         self.pacer = FramePacer(self.settings.quality)
         self._force_keyframe = True
         self._running = False
@@ -339,8 +339,8 @@ class ViewerSession:
         self,
         link: PeerLink,
         *,
-        on_frame: Optional[Callable[[bytes, dict], None]] = None,
-        on_message: Optional[Callable[[dict], None]] = None,
+        on_frame: Callable[[bytes, dict], None] | None = None,
+        on_message: Callable[[dict], None] | None = None,
     ) -> None:
         self.link = link
         self.on_frame = on_frame or (lambda data, meta: None)

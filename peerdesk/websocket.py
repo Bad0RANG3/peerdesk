@@ -12,7 +12,6 @@ import base64
 import hashlib
 import logging
 import struct
-from typing import Optional
 
 log = logging.getLogger("peerdesk.ws")
 
@@ -122,7 +121,7 @@ class WSConnection:
             except Exception:
                 pass
 
-    async def recv(self) -> Optional[tuple[int, bytes]]:
+    async def recv(self) -> tuple[int, bytes] | None:
         """Return ``(opcode, payload)`` for complete messages, or None on close."""
         buffer = b""
         opcode_first = None

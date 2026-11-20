@@ -17,7 +17,6 @@ import os
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 from . import stun, util
 from .transport import RELAY_MAGIC
@@ -36,9 +35,9 @@ class Peer:
     name: str = ""
     cands: list[dict] = field(default_factory=list)
     sid: str = ""
-    partner: Optional["Peer"] = None
+    partner: Peer | None = None
     relay_tag: int = 0
-    udp_addr: Optional[tuple[str, int]] = None
+    udp_addr: tuple[str, int] | None = None
     last_seen: float = field(default_factory=time.monotonic)
 
     def send(self, obj: dict) -> None:
@@ -59,9 +58,9 @@ class Pair:
 
 
 class RelayProtocol(asyncio.DatagramProtocol):
-    def __init__(self, server: "SignalingServer") -> None:
+    def __init__(self, server: SignalingServer) -> None:
         self.server = server
-        self.transport: Optional[asyncio.DatagramTransport] = None
+        self.transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport) -> None:
         self.transport = transport
@@ -95,7 +94,7 @@ class SignalingServer:
         self.registry: dict[str, Peer] = {}
         self.pairs: dict[str, Pair] = {}
         self.tag_map: dict[int, Pair] = {}
-        self.relay: Optional[RelayProtocol] = None
+        self.relay: RelayProtocol | None = None
         self.public_host = ""
         self.started = time.monotonic()
 

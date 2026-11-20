@@ -116,13 +116,13 @@ class VideoPathTest(unittest.TestCase):
         rx, frames, _ = self._receiver()
 
         dropped = False
-        for typ, flags, body in packets:
+        for typ, _flags, body in packets:
             if typ == wire.TYPE_DATA:
                 fid, idx, cnt, chunk = wire.unpack_video_fragment(body)
                 if idx == 3 and not dropped:
                     dropped = True
                     continue  # 丢掉第 4 片
-                rx.on_fragment(fid, idx, cnt, chunk, bool(flags & wire.FLAG_KEYFRAME))
+                rx.on_fragment(fid, idx, cnt, chunk, bool(_flags & wire.FLAG_KEYFRAME))
             else:
                 fid, gidx, shards, parity = split_parity(body)
                 rx.on_parity(fid, gidx, shards, parity)
@@ -139,7 +139,7 @@ class VideoPathTest(unittest.TestCase):
         rx, frames, _ = self._receiver()
 
         held: list[tuple[int, int, int, bytes]] = []
-        for typ, flags, body in packets:
+        for typ, _flags, body in packets:
             if typ == wire.TYPE_DATA:
                 fid, idx, cnt, chunk = wire.unpack_video_fragment(body)
                 if idx in (1, 2):  # 同组丢两片，parity 也救不回来
@@ -159,7 +159,7 @@ class VideoPathTest(unittest.TestCase):
 
         # 重传路径：VideoSender 缓存仍能给出缺失片
         fid, missing = reqs[0]
-        for typ, flags, body in sender.retransmit(fid, missing):
+        for _typ, _flags, body in sender.retransmit(fid, missing):
             f, idx, cnt, chunk = wire.unpack_video_fragment(body)
             rx.on_fragment(f, idx, cnt, chunk, False)
         self.assertEqual(len(frames), 1)

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import os
 import struct
-from typing import Optional
 
 MAGIC = 0x2112A442
 BINDING_REQUEST = 0x0001
@@ -51,7 +50,7 @@ def build_response(txid: bytes, host: str, port: int) -> bytes:
     return HEADER.pack(BINDING_SUCCESS, len(body), MAGIC, txid) + body
 
 
-def parse_message(data: bytes) -> Optional[tuple[int, bytes, dict]]:
+def parse_message(data: bytes) -> tuple[int, bytes, dict] | None:
     if len(data) < 20:
         return None
     mtype, length, magic, txid = HEADER.unpack_from(data, 0)
@@ -68,7 +67,7 @@ def parse_message(data: bytes) -> Optional[tuple[int, bytes, dict]]:
     return mtype, txid, attrs
 
 
-def parse_mapped(attrs: dict, txid: bytes) -> Optional[tuple[str, int]]:
+def parse_mapped(attrs: dict, txid: bytes) -> tuple[str, int] | None:
     import ipaddress
 
     raw = attrs.get(ATTR_XOR_MAPPED)
@@ -125,7 +124,7 @@ class StunClient(asyncio.DatagramProtocol):
             self.transport.close()
 
 
-async def query_stun(server: tuple[str, int], timeout: float = 2.0) -> Optional[tuple[str, int]]:
+async def query_stun(server: tuple[str, int], timeout: float = 2.0) -> tuple[str, int] | None:
     loop = asyncio.get_event_loop()
     fut: asyncio.Future = loop.create_future()
     transport = None
@@ -137,7 +136,7 @@ async def query_stun(server: tuple[str, int], timeout: float = 2.0) -> Optional[
         packet, _ = build_request(proto.txid)
         transport.sendto(packet)
         return await asyncio.wait_for(fut, timeout)
-    except (asyncio.TimeoutError, OSError):
+    except (TimeoutError, OSError):
         return None
     finally:
         if transport:

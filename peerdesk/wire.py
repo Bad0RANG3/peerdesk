@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import json
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Optional
 
 MAGIC = b"PD"
 VERSION = 1
@@ -101,7 +101,7 @@ class Header:
         )
 
 
-def parse_header(buf: bytes) -> Optional[Header]:
+def parse_header(buf: bytes) -> Header | None:
     if len(buf) < HEADER_LEN:
         return None
     magic, ver, typ, seq, ts, stream, flags, plen, session = HEADER.unpack_from(buf, 0)
@@ -185,7 +185,7 @@ class ParityGroup:
     parity: bytes
 
     @classmethod
-    def build(cls, fragments: list[bytes], k: int) -> list["ParityGroup"]:
+    def build(cls, fragments: list[bytes], k: int) -> list[ParityGroup]:
         groups: list[ParityGroup] = []
         for start in range(0, len(fragments), k):
             group = fragments[start : start + k]
@@ -200,7 +200,7 @@ class FragmentAssembler:
     def __init__(self, frag_cnt: int, max_bytes: int = 32 * 1024 * 1024) -> None:
         self.frag_cnt = frag_cnt
         self.max_bytes = max_bytes
-        self.parts: list[Optional[bytes]] = [None] * frag_cnt
+        self.parts: list[bytes | None] = [None] * frag_cnt
         self.received = 0
 
     def add(self, idx: int, data: bytes) -> bool:

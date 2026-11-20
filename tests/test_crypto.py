@@ -4,7 +4,6 @@ import unittest
 
 from peerdesk import crypto
 
-
 HELLO_HOST = b'{"role":"host","nonce":"aaaa","ts":1}'
 HELLO_CLIENT = b'{"role":"client","nonce":"bbbb","ts":2}'
 

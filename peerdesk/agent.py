@@ -13,10 +13,7 @@ import asyncio
 import logging
 import os
 import socket
-import sys
 import webbrowser
-from pathlib import Path
-from typing import Optional
 
 from . import signal as signaling
 from . import util
@@ -40,13 +37,13 @@ class AgentApp:
             skip_static=not args.no_skip_static,
             clipboard=not args.no_clipboard,
         )
-        self.link: Optional[PeerLink] = None
-        self.host: Optional[HostSession] = None
-        self.signal: Optional[signaling.SignalingClient] = None
+        self.link: PeerLink | None = None
+        self.host: HostSession | None = None
+        self.signal: signaling.SignalingClient | None = None
         self.hub = AgentHub(code=self.code, server=f"{self.server_host}:{self.server_port}")
         self.ui = WebUI("agent.html", self.hub, port=args.web_port, title="PeerDesk · 本机")
         self._queue: asyncio.Queue = asyncio.Queue()
-        self._relay: Optional[tuple[str, int]] = None
+        self._relay: tuple[str, int] | None = None
         self._relay_tag = 0
         self._viewer_cands: list[Candidate] = []
         self.hub.on_command = self.on_command
@@ -54,7 +51,7 @@ class AgentApp:
     # ------------------------------------------------------------------ setup
     async def start(self) -> None:
         await self._make_link()
-        port = await self.ui.start()
+        await self.ui.start()
         log.info("panel: %s", self.ui.url)
         self.hub.push_event({"t": "notice", "text": f"面板已启动 {self.ui.url}"})
         if self.args.open:

@@ -26,7 +26,6 @@ import hashlib
 import os
 import struct
 from dataclasses import dataclass, field
-from typing import Optional
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -51,7 +50,7 @@ class KeyPair:
     public_bytes: bytes
 
     @classmethod
-    def generate(cls) -> "KeyPair":
+    def generate(cls) -> KeyPair:
         sk = X25519PrivateKey.generate()
         pk = sk.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
@@ -60,7 +59,7 @@ class KeyPair:
         return cls(private=sk, public_bytes=pk)
 
     @classmethod
-    def from_private_bytes(cls, raw: bytes) -> "KeyPair":
+    def from_private_bytes(cls, raw: bytes) -> KeyPair:
         sk = X25519PrivateKey.from_private_bytes(raw)
         pk = sk.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
@@ -104,7 +103,7 @@ class SessionKeys:
         hello_host: bytes,
         hello_client: bytes,
         psk: bytes = b"",
-    ) -> "SessionKeys":
+    ) -> SessionKeys:
         if len(peer_public) != 32:
             raise ValueError("peer public key must be 32 bytes")
         peer = X25519PublicKey.from_public_bytes(peer_public)
@@ -192,7 +191,7 @@ class CryptoContext:
             _nonce(self._out_direction(), seq), payload, _aad(header)
         )
 
-    def open(self, header: bytes, body: bytes, seq: int) -> Optional[bytes]:
+    def open(self, header: bytes, body: bytes, seq: int) -> bytes | None:
         if not self._recv.check_and_update(seq):
             return None
         try:

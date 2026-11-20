@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from . import util
-from .transport import Candidate, PeerLink
+from .transport import PeerLink
 
 log = logging.getLogger("peerdesk.signal")
 
@@ -18,9 +18,9 @@ class SignalingClient:
         self.host = host
         self.port = port
         self.on_message = on_message
-        self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
-        self._task: Optional[asyncio.Task] = None
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
+        self._task: asyncio.Task | None = None
         self.connected = False
         self.last_error = ""
 
@@ -29,7 +29,7 @@ class SignalingClient:
             self.reader, self.writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port), timeout
             )
-        except (OSError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, OSError) as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             log.warning("signal connect failed %s", self.last_error)
             return False

@@ -12,9 +12,7 @@ import argparse
 import asyncio
 import logging
 import os
-import sys
 import webbrowser
-from typing import Optional
 
 from . import signal as signaling
 from . import util
@@ -29,9 +27,9 @@ class ViewerApp:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.server_host, self.server_port = util.parse_addr(args.server, 7900)
-        self.link: Optional[PeerLink] = None
-        self.session: Optional[ViewerSession] = None
-        self.signal: Optional[signaling.SignalingClient] = None
+        self.link: PeerLink | None = None
+        self.session: ViewerSession | None = None
+        self.signal: signaling.SignalingClient | None = None
         self.hub = ViewerHub(on_command=self.on_command)
         self.ui = WebUI("viewer.html", self.hub, port=args.web_port, title="PeerDesk · 远程控制")
         self.code = ""

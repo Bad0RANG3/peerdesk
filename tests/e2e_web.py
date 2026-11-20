@@ -16,7 +16,6 @@ import hashlib
 import io
 import json
 import os
-import ssl
 import struct
 import sys
 import types
@@ -40,7 +39,7 @@ class WSClient:
         self.writer = writer
 
     @classmethod
-    async def connect(cls, host: str, port: int, path: str = "/ws") -> "WSClient":
+    async def connect(cls, host: str, port: int, path: str = "/ws") -> WSClient:
         reader, writer = await asyncio.open_connection(host, port)
         key = base64.b64encode(os.urandom(16)).decode()
         req = (
@@ -86,7 +85,7 @@ class WSClient:
 
         try:
             return await asyncio.wait_for(_read(), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None, None
 
     def close(self) -> None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import platform
 import socket
 import sys
-import time
 
 
 def _line(ok: bool, label: str, detail: str = "") -> None:
@@ -67,8 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         failures += 1
 
     try:
-        from .crypto import CryptoContext, KeyPair, SessionKeys
         from . import wire
+        from .crypto import CryptoContext, KeyPair, SessionKeys
 
         a, b = KeyPair.generate(), KeyPair.generate()
         ha, hb = b"hello-a", b"hello-b"

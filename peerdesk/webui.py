@@ -12,7 +12,6 @@ import json
 import logging
 import mimetypes
 from pathlib import Path
-from typing import Callable, Optional
 
 from .websocket import WSConnection
 
@@ -28,7 +27,7 @@ class _Conn:
     def __init__(self, ws: WSConnection) -> None:
         self.ws = ws
         self.busy = False
-        self.pending: Optional[bytes] = None
+        self.pending: bytes | None = None
 
 
 class Hub:
@@ -38,7 +37,7 @@ class Hub:
 
     def __init__(self) -> None:
         self.conns: list[_Conn] = []
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self.sticky: dict[str, dict] = {}
 
     def bind_loop(self) -> None:
@@ -229,7 +228,7 @@ class WebUI:
         self.host = host
         self.port = port
         self.title = title
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> int:
         self._server = await asyncio.start_server(self._handle, self.host, self.port)
@@ -324,7 +323,7 @@ class WebUI:
         html = html.replace("{{TITLE}}", self.title)
         return html.encode("utf-8")
 
-    def _static(self, path: str) -> tuple[Optional[bytes], str]:
+    def _static(self, path: str) -> tuple[bytes | None, str]:
         name = path.lstrip("/").replace("..", "")
         target = WEB_DIR / name
         if not target.is_file():

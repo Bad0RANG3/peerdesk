@@ -18,13 +18,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import logging
 import os
 import struct
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 from . import stun, util, wire
 from .crypto import CryptoContext, KeyPair, SessionKeys
@@ -255,10 +254,10 @@ class PeerLink(asyncio.DatagramProtocol):
         is_host: bool,
         psk: bytes = b"",
         *,
-        on_state: Optional[Callable[[str, LinkStats], None]] = None,
-        on_control: Optional[Callable[[dict], None]] = None,
-        on_video: Optional[Callable[[bytes, bool], None]] = None,
-        on_log: Optional[Callable[[str], None]] = None,
+        on_state: Callable[[str, LinkStats], None] | None = None,
+        on_control: Callable[[dict], None] | None = None,
+        on_video: Callable[[bytes, bool], None] | None = None,
+        on_log: Callable[[str], None] | None = None,
         label: str = "",
         device_id: str = "",
         force_relay: bool = False,
@@ -274,17 +273,17 @@ class PeerLink(asyncio.DatagramProtocol):
         self.on_log = on_log or (lambda m: log.debug(m))
 
         self.loop = asyncio.get_event_loop()
-        self.transport: Optional[asyncio.DatagramTransport] = None
-        self.local_addr: Optional[tuple[str, int]] = None
-        self.public_addr: Optional[tuple[str, int]] = None
+        self.transport: asyncio.DatagramTransport | None = None
+        self.local_addr: tuple[str, int] | None = None
+        self.public_addr: tuple[str, int] | None = None
         self.candidates: list[Candidate] = []
-        self.peer_addr: Optional[tuple[str, int]] = None
-        self.relay_addr: Optional[tuple[str, int]] = None
+        self.peer_addr: tuple[str, int] | None = None
+        self.relay_addr: tuple[str, int] | None = None
         self.relay_out_tag: int = 0
         self.using_relay = False
-        self.srflx: Optional[tuple[str, int]] = None
+        self.srflx: tuple[str, int] | None = None
         self._stun_txid = b""
-        self._stun_future: Optional[asyncio.Future] = None
+        self._stun_future: asyncio.Future | None = None
 
         self.session_id = os.urandom(4)
         self.session_tag = int.from_bytes(os.urandom(4), "big")
@@ -292,7 +291,7 @@ class PeerLink(asyncio.DatagramProtocol):
         self.stats = LinkStats()
 
         self._kp = KeyPair.generate()
-        self._crypto: Optional[CryptoContext] = None
+        self._crypto: CryptoContext | None = None
         self._hello_client_bytes: bytes = b""
         self._hello_host_bytes: bytes = b""
         self._hello_sent_at = 0.0
@@ -416,7 +415,7 @@ class PeerLink(asyncio.DatagramProtocol):
             return [self.relay_addr]
         return out
 
-    def _send_packet(self, typ: int, stream: int, flags: int, payload: bytes, addr=None, plain: bool = False, seq: Optional[int] = None) -> None:
+    def _send_packet(self, typ: int, stream: int, flags: int, payload: bytes, addr=None, plain: bool = False, seq: int | None = None) -> None:
         if not self.transport:
             return
         addr = addr or self.peer_addr or (self.candidates[0].key() if self.candidates else None)
@@ -506,7 +505,7 @@ class PeerLink(asyncio.DatagramProtocol):
         self.transport.sendto(packet, server)
         try:
             return await asyncio.wait_for(self._stun_future, timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
     def candidate_list(self) -> list[Candidate]:
