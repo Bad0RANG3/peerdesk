@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# 运行期产物
+logs/
+scratch/
+*.log
+*.session.json
+
+# 端到端测试抓到的临时帧
+tests/out/
+docs/*.tmp.png
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

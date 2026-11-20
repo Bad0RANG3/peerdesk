@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{TITLE}}</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="app">
+  <div class="brand">
+    <div class="logo">P</div>
+    <div>
+      PeerDesk 对端桌面
+      <small>本机 · 允许被远程控制</small>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">本机连接码</div>
+        <div class="card-sub">在控制端输入此码即可连接本机</div>
+      </div>
+      <span class="pill" id="modePill">待机</span>
+    </div>
+
+    <div class="code-block">
+      <div class="code-label">Connection Code</div>
+      <div class="code-value" id="code">— — —</div>
+      <div class="code-hint" id="codeHint">正在向信令服务器注册…</div>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button class="btn small" id="btnCopy">复制连接码</button>
+      <button class="btn small" id="btnRegen">更换连接码</button>
+      <div class="spacer"></div>
+      <span class="pill green" id="serverPill">—</span>
+    </div>
+
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">未连接控制端</span>
+      <div class="spacer"></div>
+      <span id="pathText" style="font-family:var(--mono);font-size:11.5px"></span>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="field" style="margin:0">
+        <label>显示器</label>
+        <select class="input" id="monitor"></select>
+      </div>
+      <div class="field" style="margin:0">
+        <label>帧率</label>
+        <select class="input" id="fps">
+          <option value="15">15 fps</option>
+          <option value="24">24 fps</option>
+          <option value="30" selected>30 fps</option>
+          <option value="45">45 fps</option>
+          <option value="60">60 fps</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0">
+        <label>最大宽度</label>
+        <select class="input" id="width">
+          <option value="1280">1280 px</option>
+          <option value="1600">1600 px</option>
+          <option value="1920" selected>1920 px</option>
+          <option value="2560">2560 px</option>
+          <option value="3840">3840 px</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0">
+        <label>画质</label>
+        <select class="input" id="quality">
+          <option value="45">流畅</option>
+          <option value="62" selected>均衡</option>
+          <option value="75">高清</option>
+          <option value="88">原画</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row wrap" style="margin-top:14px;gap:18px">
+      <label class="row" style="gap:8px;font-size:12.5px;color:var(--text-dim)">
+        <input type="checkbox" id="allowInput" checked /> 允许键鼠控制
+      </label>
+      <label class="row" style="gap:8px;font-size:12.5px;color:var(--text-dim)">
+        <input type="checkbox" id="allowClip" checked /> 剪贴板同步
+      </label>
+      <label class="row" style="gap:8px;font-size:12.5px;color:var(--text-dim)">
+        <input type="checkbox" id="skipStatic" checked /> 静帧省流
+      </label>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="card-sub" style="text-align:center">
+    PeerDesk · 自托管 P2P 远程桌面 · 无会员 / 无时长限制 / 无中继收费
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script src="/agent.js"></script>
+</body>
+</html>
