@@ -66,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
         failures += 1
 
     try:
+        from . import audio as audio_mod
+
+        ok, detail = audio_mod.probe(timeout=0.3)
+        _line(ok, f"声音采集 (WASAPI loopback {audio_mod.RATE} Hz)", detail)
+    except Exception as exc:
+        _line(False, "声音采集", str(exc))
+        failures += 1
+
+    try:
         from . import wire
         from .crypto import CryptoContext, KeyPair, SessionKeys
 

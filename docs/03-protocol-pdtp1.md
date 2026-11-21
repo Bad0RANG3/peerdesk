@@ -35,7 +35,7 @@
 | `typ` | 1 | 见下表 |
 | `seq` | 4 | 每包自增，同时是 AEAD nonce 计数器（重放窗口按它判重） |
 | `ts_ms` | 4 | 发送端单调毫秒（会话相对，**不是** epoch 毫秒） |
-| `stream` | 1 | 0=video 1=control 2=file 3=stats |
+| `stream` | 1 | 0=video 1=control 2=file 3=stats 4=audio |
 | `flags` | 1 | bit0 KEYFRAME，bit1 LAST_FRAG，bit2 RELIABLE |
 | `plen` | 2 | 载荷长度 **+16**（含 AEAD tag），作为 AAD 一部分被校验 |
 | `session` | 4 | 会话标识（握手后双方一致） |
@@ -59,8 +59,9 @@
 | 10 | PING | 双向 | 空，4s 心跳 |
 | 11 | PONG | 双向 | 空 |
 | 12 | BYE | 双向 | 空，优雅关闭 |
+| 13 | AUDIO | host→client | `<IIHH>` seq, ts_ms, samples, prev_len + 上一帧 + 当前帧（µ-law） |
 
-`UNRELIABLE_TYPES = {PUNCH, PUNCH_ACK, DATA, PARITY, PING, PONG}` —— 其余（HELLO*、ACK、NACK、BYE）走重传/独立处理。
+`UNRELIABLE_TYPES = {PUNCH, PUNCH_ACK, DATA, PARITY, PING, PONG, AUDIO}` —— 其余（HELLO*、ACK、NACK、BYE）走重传/独立处理。
 
 ## 3. 握手与密钥
 
@@ -127,6 +128,26 @@ DATA payload = struct "<I"(msg_seq) || body
    - 否则每 50 ms 对在途帧（≤4 帧）发 NACK，最多带 32 个缺片号；发送端从 10 帧回滚缓存里重传。
 5. 帧超过 **450 ms** 未拼齐即丢弃；若丢的是关键帧，回一条 `keyframe_req` 要新的 IDR。
 6. 发送端每秒推一次 `stats`（fps/Mbps/RTT/质量/编码耗时）。
+
+## 5.1 音频流（不可靠、无 FEC、帧内冗余）
+
+```
+ AUDIO_HDR = struct "<IIHH"  (12 B)
+ ┌──────────┬──────────┬──────────┬───────────┬──────────────┬──────────────┐
+ │ seq u32  │ ts_ms u32│samples u16│prev_len u16│ 上一帧（µ-law）│ 当前帧（µ-law）│
+ └──────────┴──────────┴──────────┴───────────┴──────────────┴──────────────┘
+```
+
+1. 固定 **16 kHz / 单声道 / 20 ms**，`samples = 320`，当前帧 320 字节；上一帧同样 320 字节，
+   所以单个数据报 20 + 12 + 640 + 16(tag) = **688 B < 1400**，永远不进分片器。
+2. **不进 FEC 组、不发 NACK**：20 ms 的声音等一次重传就过期了。丢包时接收端用
+   `prev_len` 里的上一帧补位（听感上是"少 20 ms"而不是"爆一声"），然后按 `seq` 去重。
+3. `seq` 单调自增；静音抑制期间 seq 会出现空洞，接收端必须以 `seq` 判断连续性，
+   不能假设连续。`ts_ms` 是会话相对毫秒，供抖动缓冲估算节奏。
+4. 编解码固定 **G.711 µ-law (`pcmu`)**：8 bit/采样、零依赖、浏览器 256 项查表即可还原，
+   128 kbit/s 在 6.6 Mbps 的视频旁边可以忽略；静音抑制后约 2.5 kbit/s。
+5. 音频与视频共用同一个 UDP 五元组与加密上下文（同一条 `PeerLink`），
+   因此打洞/中继切换对声音透明。
 
 ## 6. 打洞与中继
 

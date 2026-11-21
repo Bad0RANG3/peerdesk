@@ -59,7 +59,9 @@
         let msg; try { msg = JSON.parse(ev.data); } catch { return; }
         onJson(msg);
       } else {
-        onFrame(new Uint8Array(ev.data));
+        const bytes = new Uint8Array(ev.data);
+        if (bytes.length && bytes[0] === 0x41) onAudio(bytes);   // "A" 声音
+        else onFrame(bytes);
       }
     };
   }
@@ -96,6 +98,11 @@
         $("hudMbps").textContent = (msg.mbps ?? 0) + " Mbps";
         $("hudRtt").textContent = (msg.rtt ?? 0) + " ms";
         $("hudMode").textContent = msg.relay ? "中继" : "P2P";
+        audioFps = audioFrames; audioFrames = 0;
+        $("hudAud").textContent = !audioOn ? "关" : (audioFps ? audioFps + " 帧/s" : "静音");
+        break;
+      case "audio":
+        if (typeof msg.on === "boolean" && !msg.pending) setAudio(msg.on, false);
         break;
       case "clipboard":
         navigator.clipboard?.writeText(msg.s || "").then(
@@ -135,6 +142,102 @@
         toast(`对端已保存 ${(msg.path || "").split(/[\\/]/).pop()}`);
         break;
     }
+  }
+
+  /* ----------------------------------------------------------------- audio */
+  // 服务端送 16 kHz 单声道 µ-law，20 ms 一帧（320 字节），帧头见 peerdesk/wire.py AUDIO_HDR。
+  const ULAW = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const u = ~i & 0xFF;
+    let t = ((u & 0x0F) << 3) + 0x84;
+    t <<= (u & 0x70) >> 4;
+    ULAW[i] = ((u & 0x80) ? 0x84 - t : t - 0x84) / 32768;
+  }
+
+  const AUDIO_RATE = 16000;
+  const AUDIO_LEAD = 0.06;      // 抖动缓冲目标延迟
+  const AUDIO_MAX_LAG = 0.45;   // 落后太多就重排时间轴，宁丢不积压
+  let audioCtx = null;
+  let audioGain = null;
+  let audioNext = 0;
+  let audioSeq = -1;
+  let audioFrames = 0;
+  let audioFps = 0;
+  let audioDrops = 0;
+  let audioOn = localStorage.getItem("pd.audio") !== "0";
+
+  function ensureAudio() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!audioCtx) {
+      try {
+        audioCtx = new Ctx({ sampleRate: AUDIO_RATE, latencyHint: "interactive" });
+      } catch {
+        audioCtx = new Ctx();
+      }
+      audioGain = audioCtx.createGain();
+      audioGain.gain.value = 1;
+      audioGain.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+    return audioCtx;
+  }
+
+  function playPcm(samples) {
+    const ctx = audioCtx;
+    if (!ctx || !samples.length) return;
+    const buf = ctx.createBuffer(1, samples.length, AUDIO_RATE);
+    const out = buf.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) out[i] = ULAW[samples[i]];
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioGain);
+    const now = ctx.currentTime;
+    if (audioNext < now + 0.005) {
+      audioNext = now + AUDIO_LEAD;                    // 刚开或断流，重新排队
+    } else if (audioNext - now > AUDIO_MAX_LAG) {
+      audioNext = now + AUDIO_LEAD;
+      audioDrops++;
+    }
+    src.start(audioNext);
+    audioNext += samples.length / AUDIO_RATE;
+    audioFrames++;
+  }
+
+  function onAudio(bytes) {
+    if (!audioOn || bytes.length < 13) return;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const seq = view.getUint32(1, true);
+    const samples = view.getUint16(9, true);
+    const prevLen = view.getUint16(11, true);
+    let off = 13;
+    const fresh = audioSeq < 0 || audioSeq !== seq - 1;
+    if (prevLen && fresh && off + prevLen <= bytes.length && seq > 0) {
+      if (!ensureAudio()) return;
+      playPcm(bytes.subarray(off, off + prevLen));    // 上一帧丢了，用它顶一下
+    }
+    off += prevLen;
+    if (seq === audioSeq || off + samples > bytes.length) return;
+    if (!ensureAudio()) return;
+    audioSeq = seq;
+    playPcm(bytes.subarray(off, off + samples));
+  }
+
+  function setAudio(on, notify = true) {
+    audioOn = !!on;
+    localStorage.setItem("pd.audio", audioOn ? "1" : "0");
+    const btn = $("btnAudio");
+    if (btn) btn.classList.toggle("active", audioOn);
+    const hud = $("hudAud");
+    if (hud) hud.textContent = audioOn ? "开" : "关";
+    if (audioOn) {
+      ensureAudio();
+      audioNext = 0;
+    } else if (audioCtx) {
+      audioNext = 0;
+      audioSeq = -1;
+    }
+    if (notify && connected) send({ t: "audio", on: audioOn });
   }
 
   /* ---------------------------------------------------------------- upload */
@@ -400,6 +503,12 @@
   $("btnHud").onclick = () => {
     hud.style.display = hud.style.display === "none" ? "block" : "none";
   };
+
+  $("btnAudio").onclick = () => {
+    setAudio(!audioOn);
+    toast(audioOn ? "已开启对端声音" : "已关闭声音");
+  };
+  $("btnAudio").classList.toggle("active", audioOn);
 
   $("btnHangup").onclick = () => {
     send({ t: "hangup" });

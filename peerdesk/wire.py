@@ -21,7 +21,7 @@ Types
 -----
 HELLO, HELLO_ACK, HELLO_FIN carry the *unencrypted* handshake material.
 PUNCH / PUNCH_ACK are plain 8 byte probes used while hole punching.
-DATA / PARITY / ACK / NACK / PING / PONG / BYE are encrypted.
+DATA / PARITY / AUDIO / ACK / NACK / PING / PONG / BYE are encrypted.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ TYPE_NACK = 9
 TYPE_PING = 10
 TYPE_PONG = 11
 TYPE_BYE = 12
+TYPE_AUDIO = 13
 
 TYPE_NAMES = {
     TYPE_HELLO: "hello",
@@ -62,18 +63,28 @@ TYPE_NAMES = {
     TYPE_PING: "ping",
     TYPE_PONG: "pong",
     TYPE_BYE: "bye",
+    TYPE_AUDIO: "audio",
 }
 
 STREAM_VIDEO = 0
 STREAM_CONTROL = 1
 STREAM_FILE = 2
 STREAM_STATS = 3
+STREAM_AUDIO = 4
 
 FLAG_KEYFRAME = 0x01
 FLAG_LAST_FRAG = 0x02
 FLAG_RELIABLE = 0x04
 
-UNRELIABLE_TYPES = {TYPE_PUNCH, TYPE_PUNCH_ACK, TYPE_DATA, TYPE_PARITY, TYPE_PING, TYPE_PONG}
+UNRELIABLE_TYPES = {
+    TYPE_PUNCH,
+    TYPE_PUNCH_ACK,
+    TYPE_DATA,
+    TYPE_PARITY,
+    TYPE_AUDIO,
+    TYPE_PING,
+    TYPE_PONG,
+}
 
 
 @dataclass(slots=True)
@@ -117,6 +128,8 @@ VIDEO_FRAG = struct.Struct("<IHH")  # frame_id, frag_idx, frag_cnt
 PARITY_HDR = struct.Struct("<IHBB")  # frame_id, parity_index, data_shards, ...
 ACK_PAYLOAD = struct.Struct("<III")  # ack_cum, bitmap_lo, bitmap_hi
 NACK_PAYLOAD = struct.Struct("<IH")  # frame_id, count
+# 音频：seq, ts_ms, samples（解码后样本数）, prev_len（上一帧重传长度）
+AUDIO_HDR = struct.Struct("<IIHH")
 
 
 def pack_video_fragment(frame_id: int, frag_idx: int, frag_cnt: int, data: bytes) -> bytes:
@@ -147,6 +160,18 @@ def unpack_nack(payload: bytes):
     off = NACK_PAYLOAD.size
     idx = struct.unpack_from(f"<{count}H", payload, off) if count else ()
     return frame_id, idx
+
+
+def pack_audio(seq: int, ts_ms: int, samples: int, current: bytes, previous: bytes = b"") -> bytes:
+    """音频包：定长头 + 可选的上一帧（丢一个包也不会静音）。"""
+    return AUDIO_HDR.pack(seq & 0xFFFFFFFF, ts_ms & 0xFFFFFFFF, samples, len(previous)) + previous + current
+
+
+def unpack_audio(payload: bytes):
+    seq, ts_ms, samples, prev_len = AUDIO_HDR.unpack_from(payload, 0)
+    off = AUDIO_HDR.size
+    previous = payload[off : off + prev_len]
+    return seq, ts_ms, samples, previous, payload[off + prev_len :]
 
 
 def json_payload(obj) -> bytes:

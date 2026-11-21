@@ -2,7 +2,7 @@
 
 > 给下一个接手的人（或者三个月后的自己）。目标：**10 分钟内跑起来，1 小时内敢改代码，半天内知道哪些坑已经踩过。**
 
-最后更新：2026-11-21 · 版本 0.2.0 · 提交见 `git log -1`
+最后更新：2026-11-21 · 版本 0.3.0 · 提交见 `git log -1`
 
 ---
 
@@ -16,11 +16,11 @@
 | --- | --- |
 | 仓库 | https://github.com/Bad0RANG3/peerdesk （PUBLIC，默认分支 `main`，Apache-2.0） |
 | 本地路径 | `D:\UU\peerdesk` |
-| 版本 | `peerdesk/__init__.py` → `__version__ = "0.2.0"`（file transfer 起于 0.2） |
-| 代码量 | 约 6600 行（`peerdesk/` 5300 + `tests/` 800 + `web/` 800 内嵌在 peerdesk 下） |
+| 版本 | `peerdesk/__init__.py` → `__version__ = "0.3.0"`（文件传输起于 0.2，声音起于 0.3） |
+| 代码量 | 约 7200 行（`peerdesk/` 6431 含 `web/` 1464，加 `tests/` 与文档） |
 | 依赖 | Pillow / numpy / cryptography / mss；**没有** npm / Electron / Qt / ffmpeg / WebRTC 库 |
 | 平台 | Windows 10/11 被控端与控制端（控制端只需浏览器） |
-| 测试 | 85 个单测 + 3 个端到端（直连/中继/浏览器桥，含双向文件传输与 /dl 下载） |
+| 测试 | 99 个单测 + 3 个端到端（直连/中继/浏览器桥，均覆盖声音、双向文件传输与 /dl 下载） |
 
 三端模型：
 
@@ -36,7 +36,7 @@
 ```bash
 cd D:\UU\peerdesk
 python -m pip install -e . --no-deps     # 依赖已在本机：Pillow 13 / numpy 2.5 / cryptography 50 / mss 10.2
-python -m peerdesk doctor                # 自检：依赖、显示器、输入注入、AEAD、UDP、STUN
+python -m peerdesk doctor                # 自检：依赖、显示器、输入注入、声音采集、AEAD、UDP、STUN
 ```
 
 三个终端：
@@ -53,10 +53,10 @@ python -m peerdesk viewer --server 127.0.0.1:7900 --web-port 7702
 自测命令（**改完代码必跑**）：
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 85 tests，约 0.05s
-python tests/e2e_local.py                            # 直连：8s，约 90 帧
-python tests/e2e_local.py --relay                    # 强制中继
-python tests/e2e_web.py                              # 页面+WS+JPEG+上传+下载+/dl
+python -m unittest discover -s tests -p "test_*.py"   # 99 tests，约 0.5s
+python tests/e2e_local.py                            # 直连：约 90 帧 + 267 个声音包/5s
+python tests/e2e_local.py --relay                    # 强制中继（声音同样要过）
+python tests/e2e_web.py                              # 页面+WS+JPEG+声音+"A" 二进制+上传+下载+/dl
 python -m ruff check peerdesk tests                   # CI 会跑（advisory）
 ```
 
@@ -74,19 +74,20 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 
 | 文件 | 行数 | 什么时候要看它 |
 | --- | --- | --- |
-| `peerdesk/transport.py` | 853 | **90% 的 bug 在这里**：握手、打洞、中继、可靠流、FEC、统计 |
-| `peerdesk/session.py` | 500 | 抓屏循环、输入分发、剪贴板、双向文件传输 |
-| `peerdesk/web/viewer.js` | 442 | 控制端交互：绘制、鼠标键盘、画质菜单、拖拽上传、接收下载 |
+| `peerdesk/transport.py` | 875 | **90% 的 bug 在这里**：握手、打洞、中继、可靠流、FEC、统计 |
+| `peerdesk/session.py` | 598 | 抓屏循环、输入分发、剪贴板、双向文件传输、声音起停 |
+| `peerdesk/audio.py` | 640 | WASAPI loopback（ctypes COM）、重采样、µ-law、`AudioPump` 定拍 |
+| `peerdesk/web/viewer.js` | 551 | 控制端交互：绘制、鼠标键盘、画质菜单、拖拽上传、WebAudio 播放 |
 | `peerdesk/web/style.css` | 499 | 视觉规范（token 在文件顶部 `:root`） |
-| `peerdesk/webui.py` | 376 | 本地 HTTP + WS 桥、Hub 背压丢帧、sticky 重放、`/dl` 下载 |
+| `peerdesk/webui.py` | 393 | 本地 HTTP + WS 桥、Hub 背压丢帧、sticky 重放、`/dl` 下载、声音旁路广播 |
 | `peerdesk/wininput.py` | 327 | `SendInput` 注入、虚拟桌面坐标、剪贴板监视 |
 | `peerdesk/server.py` | 296 | 信令 + UDP 中继（`RLY1` 头 + 配对 tag）+ STUN |
-| `peerdesk/wire.py` | 243 | 20 字节头、分片、parity、ACK/NACK 载荷 |
-| `peerdesk/agent.py` / `viewer.py` | 229 / 185 | 角色编排、信令交互、CLI |
+| `peerdesk/wire.py` | 268 | 20 字节头、分片、parity、ACK/NACK 载荷、`AUDIO_HDR` |
+| `peerdesk/agent.py` / `viewer.py` | 238 / 189 | 角色编排、信令交互、CLI |
 | `peerdesk/crypto.py` | 214 | X25519 → HKDF → AEAD、重放窗口 |
 | `peerdesk/capture.py` | 192 | mss 抓屏、JPEG、自适应质量、静帧跳过 |
 | `peerdesk/websocket.py` | 166 | 手写 RFC6455 服务端（无扩展、8MB 上限） |
-| `peerdesk/stun.py` / `util.py` / `doctor.py` / `signal.py` | 143 / 137 / 130 / 88 | STUN 子集、连接码与路径、自检、信令客户端 |
+| `peerdesk/stun.py` / `util.py` / `doctor.py` / `signal.py` | 143 / 137 / 139 / 88 | STUN 子集、连接码与路径、自检（含声音）、信令客户端 |
 
 ### 关键数据结构与入口
 
@@ -100,6 +101,9 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 - `ViewerSession`：`_video`（帧上行）、`begin_upload/upload_chunk/end_upload`（浏览器拖拽上传）、
   `_rx_begin/_rx_data/_rx_end`（接收被控端推来的文件 → `/dl/<name>`）。
 - `WebUI` + `Hub`：浏览器一轮一连接；`post_frame` 由抓屏线程调用（线程安全，背压时丢旧帧）。
+- `audio`：`LoopbackCapture`（IMMDeviceEnumerator → IAudioClient loopback → IAudioCaptureClient）→
+  `MonoResampler` → `AudioPump`（20 ms 定拍）→ `wire.pack_audio` → `PeerLink.send_audio`；
+  接收侧 `ViewerSession.on_audio` → `Hub.post_audio`（**不走** busy/pending 帧通道）→ `b"A"` 二进制。
 
 ---
 
@@ -131,6 +135,16 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 8. **控制消息 > MTU 必须自己分片**（`ControlFragments`）。文件传输 24KB base64 一次发，靠 IP 分片在真实网络必然出事。
 9. **统计 fps/mbps 要双边累计**，否则 viewer 侧永远显示 0。
 10. **`KeyPair.public_bytes` 是字段不是方法**；`CryptoContext.seal()` 只返回密文（不含 20 字节头）。
+11. **WASAPI 的 COM 单元是线程私有的**：`LoopbackCapture` 必须在 `AudioPump` 线程里 `open`，
+    主线程只准碰 `stop()`；否则 `CoInitializeEx` 返回 `RPC_E_CHANGED_MODE` 或拿到空指针。vtable 序号
+    全靠手数（`IAudioClient::GetMixFormat=8`、`Start=10`、`GetService=14`），数错就是 `0xC0000005`。
+12. **声音不能走 `Hub` 的帧通道**：那条通道有 busy/pending 背压，会**丢**数据；视频丢一帧无所谓，
+    声音丢一片就是爆音。声音走独立的 `broadcast_audio`，和视频并发写 WS（`WSConnection._send_frame`
+    内部有 `asyncio.Lock`，安全）。
+13. **µ-law 表要按"取反位"写**：`u = ~i & 0xFF` 之后再拆符号/指数/尾数，0 必须映射成 `0xFF`
+    （否则静音判断和 `audioop` 对不上）。
+14. **DXGI `DuplicateOutput` 本机会崩整个进程**（`0xC0000005`，读 `0xFFFF...FF`）。
+    想上 DXGI 必须先 fork 子进程探测，见 §9。
 
 ---
 
@@ -138,11 +152,11 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 
 | 限制 | 说明 | 出路 |
 | --- | --- | --- |
-| 抓屏 25–40 ms/帧 | GDI `BitBlt` 是瓶颈，不是网络 | 0.2 换 DXGI Desktop Duplication |
-| MJPEG 码率高 | 1600×900 约 6.6 Mbps | 0.3 上 H.264 |
-| 无音频 | 只能看不能听 | 0.2 WASAPI loopback |
+| 抓屏 25–40 ms/帧 | GDI `BitBlt` 是瓶颈，不是网络 | 0.4 试 DXGI（本机会崩，需子进程探测）；兜底做持久 DIB（-35%） |
+| MJPEG 码率高 | 1600×900 约 6.6 Mbps | 0.5 上 H.264 |
+| 声音是 G.711 µ-law | 人声清楚、音乐发毛，128 kbit/s | 0.5 评估 Opus 双栈 |
 | 无虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦 `SendInput` | 0.3 / 0.4（需驱动签名） |
-| 中继无鉴权/限速 | 公网部署会被白嫖 | 0.2 加 `--token` + 限速 |
+| 中继无鉴权/限速 | 公网部署会被白嫖 | 0.4 加 `--token` + 限速 |
 | 面板只监听 127.0.0.1 | 跨机访问要 SSH 隧道/反代 | 设计如此，别改默认 |
 | 连接码即 PSK | 知道 9 位码即可连（同类产品同一模型） | 服务端只存 `code_id`；要更强就加确认弹窗 |
 
@@ -183,12 +197,13 @@ gh run watch     # 或 gh run list --limit 3
 
 ## 9. 下一步优先级（与 `docs/05-roadmap.md` 一致）
 
-1. **DXGI 抓屏**（收益最大：25–40 ms → 3–5 ms，顺带脏矩形）
-2. **音频**（WASAPI loopback → 简单编码 → 浏览器 `<audio>` 播放、WebAudio 抖动缓冲）
-3. **H.264**（码率降 5 倍；先找 `openh264` 的 Python 绑定，拿不到就插件化 ffmpeg）
-4. 中继鉴权 + 限速（公网可用性）
-5. 独立文件流（当前文件走控制通道，会跟键鼠抢带宽）
-6. 远程 Shell（对应 UU 的 `uuyc-cli term`）、Wake-on-LAN
+1. **真跨机验证**（回环测不出 NAT/丢包；需要一个公网 server + 两台机器）
+2. **DXGI 抓屏**（收益最大：25–40 ms → 3–5 ms）——但本机 `DuplicateOutput` 会崩，
+   先写 `scratch/dxgi_probe.py` 那种子进程探针，探针通过才在主进程启用；退路是持久 DIB（-35%）
+3. **中继鉴权 + 限速**（公网可用性）
+4. **PyInstaller 打包**（`--onefile` + `--add-data peerdesk/web`）
+5. **H.264 / Opus**（码率与音质；都要外部动态库，做成"加载得到就用"的插件层）
+6. 独立文件流（当前文件走控制通道，会跟键鼠抢带宽）、远程 Shell、Wake-on-LAN
 
 明确不做：账号体系、会员、时长计费、把中继当付费权益。
 
@@ -198,7 +213,8 @@ gh run watch     # 或 gh run list --limit 3
 
 - [x] 仓库公开、README/文档/许可证齐全、CI 通过
 - [x] 三端可跑、直连与中继都验证过、双向文件传输可用
-- [x] 单测 85 个、端到端 3 套、`doctor` 自检
+- [x] 单测 99 个、端到端 3 套（均验证声音）、`doctor` 自检
+- [x] 声音通道：WASAPI loopback → G.711 µ-law → WebAudio，直连/中继/浏览器桥全部实测
 - [x] 逆向报告留存（`docs/01`），证据来自本机安装目录 strings + 运行期抓包，不含官方代码/资源
 - [ ] 真跨机（非回环）验证：需要两台机器 + 一个有公网 IP 或端口映射的 server
 - [ ] 打包成 exe（PyInstaller 方案未做；当前是 `pip install -e .` + `python -m peerdesk`）

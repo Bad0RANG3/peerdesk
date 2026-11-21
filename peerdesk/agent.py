@@ -36,6 +36,7 @@ class AgentApp:
             monitor=args.monitor,
             skip_static=not args.no_skip_static,
             clipboard=not args.no_clipboard,
+            audio=not getattr(args, "no_audio", False),
         )
         self.link: PeerLink | None = None
         self.host: HostSession | None = None
@@ -81,6 +82,7 @@ class AgentApp:
             settings=self.settings,
             on_event=self._session_event,
             allow_input=not self.args.no_input,
+            audio_test=bool(getattr(self.args, "audio_test", False)),
         )
         self.hub.attach(self.host)
         self.hub.code = self.code
@@ -184,6 +186,11 @@ class AgentApp:
                 self.hub.push_event(
                     {"t": "notice", "text": "已允许键鼠控制" if self.host.allow_input else "已禁止键鼠控制"}
                 )
+        elif kind == "audio":
+            if self.host:
+                on = bool(obj.get("v", obj.get("on", True)))
+                self.host.set_audio(on)
+                self.hub.push_event({"t": "notice", "text": "已开启声音" if on else "已关闭声音"})
 
     async def _regen(self) -> None:
         self.code = util.generate_code()
@@ -212,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--relay-only", action="store_true", help="强制走中继（调试/联机受限网络）")
     parser.add_argument("--no-input", action="store_true", help="只读模式，忽略远端键鼠")
     parser.add_argument("--no-clipboard", action="store_true")
+    parser.add_argument("--no-audio", action="store_true", help="不采集本机播放的声音（默认采集）")
+    parser.add_argument("--audio-test", action="store_true", help="用 440 Hz 合成音代替声卡（联调/无声卡机器）")
     parser.add_argument("--no-skip-static", action="store_true")
     parser.add_argument("--open", action="store_true", help="自动打开浏览器面板")
     parser.add_argument("-v", "--verbose", action="store_true")

@@ -22,6 +22,7 @@ log = logging.getLogger("peerdesk.webui")
 WEB_DIR = Path(__file__).resolve().parent / "web"
 FRAME_MAGIC = b"J"
 UPLOAD_MAGIC = b"U"
+AUDIO_MAGIC = b"A"
 
 
 class _Conn:
@@ -110,6 +111,19 @@ class Hub:
         finally:
             conn.busy = False
 
+    def post_audio(self, payload: bytes) -> None:
+        """音频帧不进帧通道：视频可以丢，声音丢了就是断音。"""
+        if self._loop and not self._loop.is_closed():
+            asyncio.ensure_future(self.broadcast_audio(payload))
+
+    async def broadcast_audio(self, payload: bytes) -> None:
+        data = AUDIO_MAGIC + payload
+        for conn in list(self.conns):
+            try:
+                await conn.ws.send_binary(data)
+            except Exception:
+                self.drop(conn)
+
     async def on_connect(self, conn: _Conn) -> None:  # pragma: no cover - overridden
         pass
 
@@ -164,6 +178,8 @@ class ViewerHub(Hub):
             session.select_monitor(int(obj.get("i", 0)))
         elif kind == "keyframe":
             session.request_keyframe()
+        elif kind == "audio":
+            session.set_audio(bool(obj.get("on", True)))
         elif kind == "upload_begin":
             try:
                 session.begin_upload(str(obj.get("name") or "file.bin"), int(obj.get("size") or 0))
@@ -217,6 +233,7 @@ class AgentHub(Hub):
             "name": self.host.info().get("name") if self.host else "",
             "monitors": (self.host.info().get("monitors") if self.host else []),
             "settings": (self.host.settings.as_dict() if self.host else {}),
+            "audio": (self.host.audio_state() if self.host else {}),
         }
         await conn.ws.send_text(json.dumps(payload, ensure_ascii=False))
         await self.replay(conn)

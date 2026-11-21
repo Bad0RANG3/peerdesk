@@ -11,6 +11,7 @@ Lifecycle
 ``link.on_state``             idle -> punching -> direct | relay -> connected
 ``link.send_video``           fire-and-forget JPEG frame (fragmented + XOR FEC)
 ``link.send_control``         reliable, ordered JSON messages
+``link.send_audio``           20 ms µ-law frame (unreliable, self-contained)
 """
 
 from __future__ import annotations
@@ -314,6 +315,7 @@ class PeerLink(asyncio.DatagramProtocol):
         on_state: Callable[[str, LinkStats], None] | None = None,
         on_control: Callable[[dict], None] | None = None,
         on_video: Callable[[bytes, bool], None] | None = None,
+        on_audio: Callable[[bytes], None] | None = None,
         on_log: Callable[[str], None] | None = None,
         label: str = "",
         device_id: str = "",
@@ -327,6 +329,7 @@ class PeerLink(asyncio.DatagramProtocol):
         self.on_state = on_state
         self.on_control = on_control
         self.on_video = on_video
+        self.on_audio = on_audio
         self.on_log = on_log or (lambda m: log.debug(m))
 
         self.loop = asyncio.get_event_loop()
@@ -375,6 +378,8 @@ class PeerLink(asyncio.DatagramProtocol):
         self._rx_window: list[tuple[float, int]] = []
         self._rx_frames: list[float] = []
         self._keyframe_requests = 0
+        self._audio_sent = 0
+        self._audio_rx = 0
 
     # ------------------------------------------------------------------ set up
     def connection_made(self, transport) -> None:
@@ -528,6 +533,13 @@ class PeerLink(asyncio.DatagramProtocol):
         if len(self._frames_window) > 300:
             self._frames_window.pop(0)
 
+    def send_audio(self, payload: bytes) -> None:
+        """一帧音频 = 一个报文：不切片、不重传，丢了就靠帧内冗余补回来。"""
+        if not self._crypto or not self._established:
+            return
+        self._send_packet(wire.TYPE_AUDIO, wire.STREAM_AUDIO, 0, payload)
+        self._audio_sent += 1
+
     def _send_control_raw(self, seq: int, payload: bytes, flags: int) -> None:
         # The reliable-stream sequence travels inside the payload: the packet
         # header seq is the AEAD nonce counter and must stay strictly monotonic
@@ -650,6 +662,8 @@ class PeerLink(asyncio.DatagramProtocol):
         elif hdr.type == wire.TYPE_PARITY:
             fid, gidx, shards, _ = struct.unpack_from("<IHBB", payload, 0)
             self._video_recv.on_parity(fid, gidx, shards, payload[8:])
+        elif hdr.type == wire.TYPE_AUDIO:
+            self._deliver_audio(payload)
         elif hdr.type == wire.TYPE_ACK:
             cum, bitmap = wire.unpack_ack(payload)
             self._ctrl.on_ack(cum, bitmap)
@@ -759,6 +773,14 @@ class PeerLink(asyncio.DatagramProtocol):
             del self._rx_frames[:200]
         if self.on_video:
             self.on_video(payload, keyframe)
+
+    def _deliver_audio(self, payload: bytes) -> None:
+        self._audio_rx += 1
+        if self.on_audio:
+            try:
+                self.on_audio(payload)
+            except Exception:
+                log.exception("audio handler failed")
 
     # ------------------------------------------------------------------- loops
     async def _timer_loop(self) -> None:

@@ -62,6 +62,10 @@
       <span>文件</span>
     </button>
     <button class="tool" id="btnCtrlAltDel" title="发送 Ctrl+Alt+Del">CAD</button>
+    <button class="tool active" id="btnAudio" title="对端声音（µ-law 16 kHz）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9.5v5h3.5L12 19V5L7.5 9.5z"/><path d="M16 9.2a4 4 0 0 1 0 5.6M18.6 6.6a7.6 7.6 0 0 1 0 10.8"/></svg>
+      <span>声音</span>
+    </button>
     <div class="sep"></div>
     <button class="tool" id="btnFull" title="全屏">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
@@ -83,6 +87,7 @@
     <div><span class="k">帧率</span> <b id="hudFps">—</b></div>
     <div><span class="k">码率</span> <b id="hudMbps">—</b></div>
     <div><span class="k">延迟</span> <b id="hudRtt">—</b></div>
+    <div><span class="k">声音</span> <b id="hudAud">—</b></div>
   </div>
 
   <div class="kbd-capture" id="kbdBox">

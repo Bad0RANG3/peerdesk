@@ -32,6 +32,8 @@
 - **每包 AEAD**：X25519 临时密钥 + HKDF（连接码当 PSK）+ ChaCha20-Poly1305，20 字节头做 AAD
 - **打洞 + 中继回退**：候选交换后 100 ms 一发 PUNCH，6 秒直连失败自动升级 UDP 中继（画质不变）
 - **视频**：JPEG 质量自适应（32–92）+ XOR FEC（8+1）+ NACK 重传 + 关键帧请求 + 450 ms 帧超时丢弃
+- **声音**：WASAPI loopback 采集本机播放的音频 → 16 kHz 单声道 G.711 µ-law（20 ms/帧，128 kbit/s）
+  → 帧内带上一帧冗余、静音自动抑制 → 浏览器 WebAudio 抖动缓冲播放
 - **控制**：独立可靠流（累积 ACK + 64 位位图 + RTO 退避），键鼠/文本/剪贴板/文件/画质/显示器切换
 - **双向文件传输**：控制端拖拽即上传（浏览器→被控端），被控端面板填路径即可推给控制端（经 `/dl` 下载）
 - **多显示器**、静帧跳过、绝对坐标注入、Unicode 文本输入、`Ctrl+Alt+Del`
@@ -78,6 +80,7 @@ python -m peerdesk viewer --help
 | `--fps / --width / --quality` | agent | 帧率上限 / 最大宽度 / JPEG 质量（32–92） |
 | `--monitor N` | agent | 初始显示器序号（0 起） |
 | `--no-input` / `--no-clipboard` / `--no-skip-static` | agent | 禁止键鼠 / 禁止剪贴板 / 关闭静帧跳过 |
+| `--no-audio` / `--audio-test` | agent | 不传声音 / 用 440 Hz 合成音代替声卡（无声卡联调） |
 | `--relay-only` | agent/viewer | 强制中继（排障、对称 NAT 场景） |
 | `-v` / `--log FILE` | 全部 | 详细日志 / 写日志文件 |
 
@@ -95,6 +98,7 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 | 加密 | `peerdesk/crypto.py` | X25519 → HKDF → AEAD，nonce=`(direction, seq)`，重放窗口 2048 |
 | 传输 | `peerdesk/transport.py` | `PeerLink` 状态机、`ReliableStream`、`VideoSender/Receiver`、中继封装 |
 | 抓屏/编码 | `peerdesk/capture.py` | mss + Pillow，`FramePacer` 按帧大小调质量 |
+| 声音 | `peerdesk/audio.py` | WASAPI loopback（纯 ctypes）→ 重采样 → G.711 µ-law，`AudioPump` 定拍送帧 |
 | 输入 | `peerdesk/wininput.py` | `SendInput`，虚拟桌面归一化，剪贴板读写与监视 |
 | 会话 | `peerdesk/session.py` | `HostSession` / `ViewerSession`，控制消息分发 |
 | 服务端 | `peerdesk/server.py` | 信令 + 中继（`RLY1` 头 + 配对 tag）+ STUN |
@@ -105,14 +109,14 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 85 个单元测试
-python tests/e2e_local.py                            # 进程内端到端（直连）
+python -m unittest discover -s tests -p "test_*.py"   # 99 个单元测试
+python tests/e2e_local.py                            # 进程内端到端（直连，含声音 267 帧/5 s）
 python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
-python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 上传/下载
+python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 声音 + 上传/下载
 ```
 
 本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13.5–15.7 fps / 6.6 Mbps / RTT 0.4–2 ms**，
-中继模式功能等价。瓶颈是抓屏+JPEG（约 30–40 ms/帧），不是网络。
+声音另占 128 kbit/s（静音时自动掉到 2.5 kbit/s），中继模式功能等价。瓶颈是抓屏+JPEG（约 30–40 ms/帧），不是网络。
 
 ## 文档
 
@@ -120,7 +124,7 @@ python tests/e2e_web.py                              # 浏览器桥：页面 + W
 - [架构](docs/02-architecture.md) — 进程模型、数据流、状态机、性能数字、已知限制
 - [PDTP/1 协议规范](docs/03-protocol-pdtp1.md) — 报文格式、握手、密钥派生、FEC/NACK、中继
 - [UI 复刻对照](docs/04-ui-parity.md) — 界面清单、视觉规范、交互细节
-- [路线图](docs/05-roadmap.md) — DXGI 抓屏、音频、H.264、虚拟显示器、远程 Shell
+- [路线图](docs/05-roadmap.md) — DXGI 抓屏、H.264、虚拟显示器、远程 Shell
 - **[交接手册](docs/06-handover.md)** — 十分钟跑起来、代码地图、协议速查、10 个已踩的坑、排查表、发布流程
 
 ## 安全说明

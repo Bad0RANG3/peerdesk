@@ -43,6 +43,7 @@ PeerDesk（对端桌面）是一个**纯 Python 3.11+** 的 Windows 远程桌面
 | `server.py` | 297 | 信令服务器 + UDP 中继 + STUN 响应 | `SignalingServer`、`Peer`、`Pair` |
 | `session.py` | 407 | 会话层：抓屏循环、控制消息分发、输入注入、文件接收、剪贴板 | `HostSession`、`ViewerSession`、`VideoSettings` |
 | `capture.py` | 192 | mss 抓屏 + JPEG 编码 + 自适应质量 + 静帧跳过 | `ScreenCapture`、`FramePacer` |
+| `audio.py` | 646 | WASAPI loopback（ctypes COM）→ 重采样 → G.711 µ-law，静音抑制 | `LoopbackCapture`、`LoopbackSource`、`AudioPump`、`MonoResampler` |
 | `wininput.py` | 327 | `SendInput` 键鼠注入、虚拟桌面归一化、剪贴板读写 | `InputInjector`、`ClipboardWatcher` |
 | `websocket.py` | 167 | 最小 RFC6455 服务端（文本/二进制/分片/ping-pong） | `WSConnection` |
 | `webui.py` | 335 | 本地 HTTP 静态资源 + WS 桥 + Hub 扇出（丢旧帧背压） | `Hub`、`ViewerHub`、`AgentHub`、`WebUI` |
@@ -51,6 +52,26 @@ PeerDesk（对端桌面）是一个**纯 Python 3.11+** 的 Windows 远程桌面
 | `doctor.py` | 131 | 自检 | `run_checks()` |
 
 ## 3. 数据流
+
+### 3.0 声音（agent → viewer）
+
+```
+AudioPump 线程 (20 ms 定拍)                事件循环                浏览器
+  LoopbackCapture.read_raw()  ─┐
+  MonoResampler → 320 采样      ├─ ulaw_encode → 320 B
+  wire.pack_audio(seq, ts, 320, 当前帧, 上一帧)
+      └──TYPE_AUDIO / STREAM_AUDIO──▶ PeerLink.send_audio （不重传，丢包靠冗余帧顶）
+                                     └─ ViewerSession.on_audio → Hub.post_audio
+                                          └─WS 二进制 "A" + AUDIO_HDR──▶ WebAudio 抖动缓冲
+```
+
+要点：
+- **20 ms 一帧、128 kbit/s**，与视频同一条 UDP 通道但**不走**可靠流也不进 FEC 组——
+  声音等不起重传，宁可丢一个 20 ms 断点。
+- 每个报文里带**上一帧**（`prev_len`），单包丢失时接收端先补上一帧，听感上不出现爆音。
+- **静音抑制**：连续 0.5 s 纯静音后只每 25 帧发一个心跳帧（约 2.5 kbit/s），桌面安静时不白烧带宽。
+- 采集线程拥有自己的 COM 单元（WASAPI 要求），跨线程只经 `loop.call_soon_threadsafe`。
+- 浏览器用 `AudioContext` 直接把 µ-law 展开成 `Float32Array`，无需 WASM 或第三方库。
 
 ### 3.1 视频（agent → viewer）
 
@@ -129,6 +150,9 @@ idle ──begin_handshake()──▶ punching ──收到对端 HELLO/PUNCH─
 | 端到端（直连，1600×900，fps=20） | ~13.5–15.7 fps，6.6 Mbps，RTT 0.3–2 ms，单帧 70–80 KB |
 | 端到端（强制中继） | ~14 fps，6.6 Mbps，功能等价 |
 | 本机回环 Web 桥 | 1024×576 JPEG 26–28 KB/帧，控制通道 `pending=0` |
+| 声音（直连，合成音） | 267 帧 / 5.3 s（20 ms/帧，0 丢帧），85 KB ≈ 128 kbit/s |
+| 声音（强制中继） | 214 帧 / 4.3 s，68 KB ≈ 128 kbit/s，功能等价 |
+| 声音（loopback 实测） | 48 kHz 立体声混音 → 16 kHz 单声道，1 s 抓满 16000 采样，rms 8293（真实扬声器输出） |
 
 瓶颈是**抓屏 + JPEG 编码**（串行 30–40 ms），不是网络。若要用满 60 fps，需要
 DXGI Desktop Duplication 或硬件 MJPEG 编码器（见路线图）。
@@ -136,7 +160,7 @@ DXGI Desktop Duplication 或硬件 MJPEG 编码器（见路线图）。
 ## 7. 已知限制
 
 1. MJPEG 无帧间压缩：同画质下码率约为 H.264 的 5–10 倍（本机 6.6 Mbps vs 同类 1–2 Mbps）。
-2. 无音频通道。
+2. 声音是 G.711 µ-law（8 bit/16 kHz），够"听得到、听得清人声"，但不是音乐级；Opus 需要额外依赖。
 3. 无虚拟显示器/虚拟 HID 驱动：分辨率跟随真实桌面，部分反作弊会拦 `SendInput`。
 4. 剪贴板只同步文本（图片/文件待补）。
 5. 中继是单进程 UDP 转发，未做鉴权与限速（生产部署需要在外层加白名单/限流）。

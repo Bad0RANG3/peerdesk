@@ -84,6 +84,10 @@
       case "settings":
         applySettings(msg.settings || {});
         break;
+      case "audio":
+        $("allowAudio").checked = !!msg.on;
+        log(msg.on ? `声音已开启（${msg.source || "系统输出"}）` : "声音已关闭", msg.on ? "ok" : "");
+        break;
       case "error":
         log(msg.text || msg.reason || "错误", "warn");
         break;
@@ -111,6 +115,7 @@
     if (s.quality !== undefined) $("quality").value = String(s.quality);
     if (s.clipboard !== undefined) $("allowClip").checked = !!s.clipboard;
     if (s.skip_static !== undefined) $("skipStatic").checked = !!s.skip_static;
+    if (s.audio !== undefined) $("allowAudio").checked = !!s.audio;
   }
 
   function pushSettings() {
@@ -133,6 +138,11 @@
   $("allowInput").addEventListener("change", () => {
     log($("allowInput").checked ? "已允许键鼠控制" : "已禁止键鼠控制", "warn");
     send({ t: "allow_input", v: $("allowInput").checked });
+  });
+  $("allowAudio").addEventListener("change", () => {
+    const on = $("allowAudio").checked;
+    log(on ? "正在开启声音采集…" : "正在关闭声音采集…", "warn");
+    send({ t: "audio", v: on });
   });
 
   $("btnCopy").onclick = async () => {

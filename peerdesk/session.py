@@ -43,6 +43,7 @@ class VideoSettings:
     monitor: int = 0
     skip_static: bool = True
     clipboard: bool = True
+    audio: bool = True
     pixel_format: str = "jpeg"
 
     def as_dict(self) -> dict:
@@ -53,6 +54,7 @@ class VideoSettings:
             "monitor": self.monitor,
             "skip_static": self.skip_static,
             "clipboard": self.clipboard,
+            "audio": self.audio,
             "pixel_format": self.pixel_format,
         }
 
@@ -63,7 +65,7 @@ class VideoSettings:
                     setattr(self, key, int(obj[key]))
                 except (TypeError, ValueError):
                     pass
-        for key in ("skip_static", "clipboard"):
+        for key in ("skip_static", "clipboard", "audio"):
             if key in obj:
                 setattr(self, key, bool(obj[key]))
         self.fps = max(1, min(120, self.fps))
@@ -82,12 +84,18 @@ class HostSession:
         settings: VideoSettings | None = None,
         on_event: Callable[[dict], None] | None = None,
         allow_input: bool = True,
+        audio_test: bool = False,
+        audio_source_factory: Callable[[bool], object] | None = None,
     ) -> None:
         self.link = link
         self.code = code
         self.settings = settings or VideoSettings()
         self.on_event = on_event or (lambda e: None)
         self.allow_input = allow_input
+        self.audio_test = audio_test
+        self._audio_factory = audio_source_factory
+        self._audio = None
+        self.audio_error = ""
         self.monitors: list[Monitor] = []
         self.current_monitor: Monitor | None = None
         self.pacer = FramePacer(self.settings.quality)
@@ -134,8 +142,77 @@ class HostSession:
             "monitors": [m.as_dict() for m in self.monitors],
             "settings": self.settings.as_dict(),
             "input": self.allow_input,
+            "audio": self.audio_state(),
             "version": "1.0.0",
         }
+
+    # ----------------------------------------------------------------- audio
+    def audio_state(self) -> dict:
+        """给面板/控制端看的音频状态（不含音频本身）。"""
+        from .audio import CODEC, FRAME_MS, RATE
+
+        running = bool(self._audio and self._audio.is_alive())
+        return {
+            "on": running,
+            "enabled": bool(self.settings.audio),
+            "codec": CODEC,
+            "rate": RATE,
+            "frame_ms": FRAME_MS,
+            "source": self._audio.label if self._audio else "",
+            "error": self.audio_error,
+        }
+
+    def set_audio(self, on: bool) -> None:
+        self.settings.audio = bool(on)
+        if on:
+            self._start_audio()
+        else:
+            self._stop_audio()
+        self.link.send_control({"t": "audio", **self.audio_state()})
+        self.on_event({"t": "audio", **self.audio_state()})
+
+    def _start_audio(self) -> None:
+        if self._audio or not self.settings.audio:
+            return
+        from .audio import AudioPump, open_source
+
+        try:
+            source = self._audio_factory(self.audio_test) if self._audio_factory else open_source(self.audio_test)
+        except Exception as exc:
+            self.audio_error = str(exc)
+            log.warning("audio source unavailable: %s", exc)
+            self.on_event({"t": "audio", **self.audio_state()})
+            return
+        pump = AudioPump(source, self._on_audio_frame, on_error=self._on_audio_error)
+        pump.start()
+        self._audio = pump
+        self.audio_error = ""
+        log.info("audio started: %s", pump.label)
+        self.link.send_control({"t": "audio", **self.audio_state()})
+        self.on_event({"t": "audio", **self.audio_state()})
+
+    def _stop_audio(self) -> None:
+        pump = self._audio
+        self._audio = None
+        if pump:
+            pump.stop()
+            # 采集线程自己关设备；这里只切断回调，避免关掉 loop 之后还在投递
+            log.info("audio stopped")
+
+    def _on_audio_frame(self, payload: bytes) -> None:
+        """音频线程 -> 事件循环：DatagramTransport 只能在 loop 线程里发。"""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self.link.send_audio, payload)
+        except RuntimeError:
+            pass
+
+    def _on_audio_error(self, text: str) -> None:
+        self.audio_error = text
+        self._audio = None
+        self.on_event({"t": "audio", **self.audio_state()})
 
     # ------------------------------------------------------------------ link
     def on_link_state(self, state: str, stats: LinkStats) -> None:
@@ -144,11 +221,13 @@ class HostSession:
             self._start_streaming()
         elif state == "closed":
             self._running = False
+            self._stop_audio()
 
     def _start_streaming(self) -> None:
         self._running = True
         self._load_monitors()
         self.link.send_control(self.info())
+        self._start_audio()
         self._loop.create_task(self._capture_loop())
 
     async def _capture_loop(self) -> None:
@@ -240,6 +319,8 @@ class HostSession:
             self.link.send_control({"t": "settings_ack", "settings": self.settings.as_dict()})
         elif kind == "keyframe_req":
             self._force_keyframe = True
+        elif kind == "audio":
+            self.set_audio(bool(msg.get("on", True)))
         elif kind == "mouse":
             if self.allow_input:
                 self._mouse(msg)
@@ -340,6 +421,7 @@ class HostSession:
 
     def stop(self) -> None:
         self._running = False
+        self._stop_audio()
 
 
 def _stream_file(send, path: Path) -> None:
@@ -367,18 +449,23 @@ class ViewerSession:
         link: PeerLink,
         *,
         on_frame: Callable[[bytes, dict], None] | None = None,
+        on_audio: Callable[[bytes], None] | None = None,
         on_message: Callable[[dict], None] | None = None,
     ) -> None:
         self.link = link
         self._rx_files = {}
         self.on_frame = on_frame or (lambda data, meta: None)
+        self.on_audio = on_audio or (lambda payload: None)
         self.on_message = on_message or (lambda msg: None)
         self.info: dict = {}
         self.stats: dict = {}
+        self.audio: dict = {}
         self._seq = 0
         self._frames = 0
+        self._audio_frames = 0
         self._decoded_at = time.monotonic()
         link.on_video = self._video
+        link.on_audio = self._audio
         link.on_control = self._control
         link.on_state = self._state
 
@@ -392,12 +479,18 @@ class ViewerSession:
         self._frames += 1
         self.on_frame(payload, {"seq": self._seq, "keyframe": keyframe})
 
+    def _audio(self, payload: bytes) -> None:
+        self._audio_frames += 1
+        self.on_audio(payload)
+
     def _control(self, msg: dict) -> None:
         kind = msg.get("t")
         if kind == "info":
             self.info = msg
         elif kind == "stats":
             self.stats = msg
+        elif kind == "audio":
+            self.audio = msg
         elif kind == "file_begin":
             self._rx_begin(msg)
             return
@@ -471,6 +564,11 @@ class ViewerSession:
     def select_monitor(self, index: int) -> None:
         self.send({"t": "settings", "monitor": index})
         self.request_keyframe()
+
+    def set_audio(self, on: bool) -> None:
+        """控制端要求被控端开/关声音采集。"""
+        self.send({"t": "audio", "on": bool(on)})
+        self.on_message({"t": "audio", "on": bool(on), "pending": True})
 
     # ------------------------------------------------------------ upload (browser)
     def begin_upload(self, name: str, size: int) -> None:

@@ -88,6 +88,7 @@ class ViewerApp:
         self.session = ViewerSession(
             self.link,
             on_frame=self._on_frame,
+            on_audio=self._on_audio,
             on_message=self._on_message,
         )
         self.hub.attach(self.session)
@@ -96,11 +97,14 @@ class ViewerApp:
     def _on_frame(self, data: bytes, meta: dict) -> None:
         self.hub.post_frame(data)
 
+    def _on_audio(self, payload: bytes) -> None:
+        self.hub.post_audio(payload)
+
     def _on_message(self, msg: dict) -> None:
         kind = msg.get("t")
         if kind == "stats":
             self.hub.push_event({"t": "stats", **{k: v for k, v in msg.items() if k != "t"}, "jpeg_kb": round(msg.get("kb", 0))})
-        elif kind in ("info", "link", "error", "notice", "clip"):
+        elif kind in ("info", "link", "error", "notice", "clip", "audio"):
             self.hub.push_event(msg)
 
     # ------------------------------------------------------------- signal loop

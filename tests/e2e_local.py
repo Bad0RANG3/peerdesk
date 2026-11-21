@@ -47,6 +47,8 @@ async def run(relay: bool, seconds: float) -> int:
             monitor=0,
             no_skip_static=True,
             no_clipboard=True,
+            no_audio=False,
+            audio_test=True,
             no_input=True,
             relay_only=relay,
             web_port=0,
@@ -72,6 +74,7 @@ async def run(relay: bool, seconds: float) -> int:
     asyncio.get_event_loop().create_task(viewer.start())
 
     frames: list[int] = []
+    audio: list[bytes] = []
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         await asyncio.sleep(0.25)
@@ -86,6 +89,14 @@ async def run(relay: bool, seconds: float) -> int:
                 _orig(data, meta)
 
             session.on_frame = hook
+
+            original_audio = session.on_audio
+
+            def hook_audio(payload, _orig=original_audio):
+                audio.append(payload)
+                _orig(payload)
+
+            session.on_audio = hook_audio
             session._wrapped = True
         state = viewer.link.state if viewer.link else "?"
         if state in ("direct", "relay") and frames:
@@ -98,12 +109,30 @@ async def run(relay: bool, seconds: float) -> int:
     state = viewer.link.state if viewer.link else "none"
     path = viewer.link.stats.path if viewer.link else ""
     stats = viewer.session.stats if viewer.session else {}
-    ok = state in ("direct", "relay") and len(frames) >= 10
+    audio_ok = False
+    audio_detail = "未收到声音"
+    if audio:
+        from peerdesk import audio as audio_mod
+        from peerdesk import wire
+
+        good = 0
+        for payload in audio:
+            seq, _ts, samples, _prev, cur = wire.unpack_audio(payload)
+            if samples != audio_mod.SAMPLES or len(cur) != audio_mod.MULAW_BYTES:
+                continue
+            dec = audio_mod.ulaw_decode(cur)
+            if any(dec):
+                good += 1
+        audio_ok = good >= 20
+        audio_detail = f"{len(audio)} 帧（{good} 帧非静音 ≈ {len(audio) * 0.32:.0f} KB / {len(audio) * 0.02:.1f}s）"
+
+    ok = state in ("direct", "relay") and len(frames) >= 10 and audio_ok
 
     print(f"path state : {state}  ({path})  relay={relay}")
     print(f"frames     : {len(frames)} in ~{seconds + 2:.0f}s")
     if frames:
         print(f"frame size : avg {statistics.mean(frames) / 1024:.0f} KB, max {max(frames) / 1024:.0f} KB")
+    print(f"audio      : {audio_detail}")
     print(f"host stats : {stats}")
     if viewer.session:
         print(f"link stats : rtt={viewer.link.stats.rtt_ms:.0f}ms mode={viewer.link.stats.mode} "

@@ -117,7 +117,8 @@ async def run() -> int:
 
     agent = AgentApp(
         ns(code=CODE, server=f"127.0.0.1:{sig_port}", fps=12, width=1024, quality=50, monitor=0,
-           no_skip_static=True, no_clipboard=True, no_input=True, relay_only=False,
+           no_skip_static=True, no_clipboard=True, no_audio=False, audio_test=True,
+           no_input=True, relay_only=False,
            web_port=0, udp_port=0, open=False, verbose=False)
     )
     asyncio.get_event_loop().create_task(agent.start())
@@ -169,6 +170,35 @@ async def run() -> int:
         print(f"[OK  ] jpeg decodes: {img.size[0]}x{img.size[1]} {img.format} {len(frames[-1]) // 1024} KB")
         ok_jpeg = img.format == "JPEG"
         failures += 0 if ok_jpeg else 1
+
+    # 2b. 声音：WS 上带 "A" 前缀的二进制帧，解码后应当有非静音样本
+    audio_frames: list[bytes] = []
+    audio_deadline = asyncio.get_event_loop().time() + 6
+    while asyncio.get_event_loop().time() < audio_deadline and len(audio_frames) < 30:
+        try:
+            opcode, data = await ws.recv(timeout=2.0)
+        except Exception:
+            break
+        if opcode is None:
+            break
+        if opcode == 0x2 and data[:1] == b"A":
+            audio_frames.append(data[1:])
+
+    audio_ok = False
+    if audio_frames:
+        from peerdesk import audio as audio_mod
+        from peerdesk import wire
+
+        good = 0
+        for payload in audio_frames:
+            _seq, _ts, samples, _prev, cur = wire.unpack_audio(payload)
+            if samples == audio_mod.SAMPLES and len(cur) == audio_mod.MULAW_BYTES and any(audio_mod.ulaw_decode(cur)):
+                good += 1
+        audio_ok = good >= 20
+        print(f"[{'OK  ' if audio_ok else 'FAIL'}] audio frames over bridge: {len(audio_frames)} ({good} 非静音)")
+    else:
+        print("[FAIL] audio frames over bridge: 0")
+    failures += 0 if audio_ok else 1
 
     # 3. input/command plumbing: quality change + mouse event are accepted
     await ws.send_json({"t": "quality", "q": 40, "w": 800})
