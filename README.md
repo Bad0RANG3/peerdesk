@@ -70,6 +70,18 @@ python -m peerdesk agent --help
 python -m peerdesk viewer --help
 ```
 
+### 不用装 Python：单文件 exe
+
+```bash
+python -m pip install pyinstaller
+python packaging/build.py            # → dist/peerdesk.exe（约 33 MB，无控制台窗口可选）
+dist/peerdesk.exe doctor             # 自检
+dist/peerdesk.exe agent --server 1.2.3.4:7900 --code 604173829
+```
+
+`dist/peerdesk.exe` 一个文件包含 agent / viewer / server / doctor 四端与全部前端资源，
+目标机器上**不需要 Python**。CI 每次推 main 都会构建并把 exe 作为 artifact 上传。
+
 ### 常用参数
 
 | 参数 | 角色 | 说明 |
@@ -82,6 +94,9 @@ python -m peerdesk viewer --help
 | `--no-input` / `--no-clipboard` / `--no-skip-static` | agent | 禁止键鼠 / 禁止剪贴板 / 关闭静帧跳过 |
 | `--no-audio` / `--audio-test` | agent | 不传声音 / 用 440 Hz 合成音代替声卡（无声卡联调） |
 | `--relay-only` | agent/viewer | 强制中继（排障、对称 NAT 场景） |
+| `--token` | 全部 | 服务端/客户端共享令牌（服务端设了就必须带） |
+| `--capture auto\|gdi\|mss` | agent | 抓屏后端，默认 `auto`（GDI 优先，失败回退 mss） |
+| `--scale-mode fast\|halftone\|pil` | agent | 缩放交给谁：GDI 驱动（快）/ 平滑 / Pillow（最慢最锐） |
 | `-v` / `--log FILE` | 全部 | 详细日志 / 写日志文件 |
 
 ## 架构
@@ -116,11 +131,13 @@ python tests/e2e_web.py                              # 浏览器桥：页面 + W
 python tests/e2e_local.py --token s3cret             # 验证令牌鉴权链路
 python tests/e2e_local.py --token s3cret --bad-token # 负路径：错误令牌必须被拒
 python tests/e2e_local.py --relay --relay-mbps 1.5   # 中继限速 + 被控端带宽自适应
+python tests/e2e_exe.py                              # 黑盒：dist/peerdesk.exe 三进程互连
 ```
 
 本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13–16 fps / 6.5 Mbps / RTT 0.4–2.6 ms，
 单帧抓屏+缩放+编码 23 ms（GDI 后端；mss 后端 37 ms）**，
-声音另占 128 kbit/s（静音时自动掉到 2.5 kbit/s），中继模式功能等价。瓶颈是抓屏+JPEG（约 30–40 ms/帧），不是网络。
+声音另占 128 kbit/s（静音时自动掉到 2.5 kbit/s），中继模式功能等价。
+瓶颈是抓屏+JPEG（22–24 ms/帧），不是网络。
 
 ## 文档
 

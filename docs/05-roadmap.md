@@ -2,13 +2,19 @@
 
 按"对使用者价值 / 实现成本"排序。✅ 已实现，🔜 下一版，🧭 中期，🌱 远期。
 
-## 0.4（当前）
+## 0.5（当前）
 
+- ✅ **单文件 exe 打包**：`packaging/peerdesk.spec` + `packaging/build.py`，
+  PyInstaller onefile 产出 `dist/peerdesk.exe`（33 MB，agent/viewer/server/doctor 四端合一，
+  前端资源内嵌），目标机器**不需要 Python**。`tests/e2e_exe.py` 用真 exe 起三个进程做黑盒互连，
+  CI 每次推 main 构建并上传 artifact。
 - ✅ **GDI 抓屏后端**：`GdiCapture` 用常驻 `CreateDIBSection` + `BitBlt`，
   并且直接用 `StretchBlt` 在驱动层缩放到目标宽高（省掉 Pillow resize）。
   实测 2560×1440 → 1600×900 的"抓屏+缩放+重排+JPEG q60"从 36.1 ms 降到 22.7 ms，
   e2e 的 `enc_ms` 从 37 降到 23，帧率 13 fps → 16 fps。`--capture auto|gdi|mss`、
   `--scale-mode fast|halftone|pil` 可选，`mss` 保留为回退路径。
+
+## 0.4（已完成）
 
 - ✅ **服务端鉴权**：`--token` / `PEERDESK_TOKEN`，`register` 与 `connect` 都校验
   （`hmac.compare_digest`），失败回 `{"t":"error","reason":"bad_token"}`；两端都有 `--token`，
@@ -46,16 +52,17 @@
 - ✅ 自托管 server（信令 + 中继 + STUN 同端口）
 - ✅ `doctor` 自检
 
-## 0.4 🔜
+## 0.6 🔜
 
-- 🔜 **DXGI Desktop Duplication 抓屏**：绕开 GDI `BitBlt`，把抓屏 25 ms 降到 3–5 ms，
+- 🔜 **DXGI Desktop Duplication 抓屏**：绕开 GDI `BitBlt`，把抓屏 22 ms 降到 3–5 ms，
   同时能拿到脏矩形（省掉整帧编码）。Windows 8+ 可用，`ctypes` 直接调 `d3d11.dll` + `dxgi.dll`。
   ⚠️ 本机（RTX 4070 Ti SUPER + 官方驱动）实测 `IDXGIOutput1::DuplicateOutput` 恒定
   access violation（`0xC0000005`，读 `0xFFFF...FF`），已排除设备创建路径 / COM 单元 / GUID 布局 /
   DPI 感知；该功能必须先做**子进程探测**再启用，否则会连带杀掉主进程。
 - 🔜 剪贴板图片/文件（`CF_DIB` → PNG 走文件流）。
+- 🔜 真跨机（非回环）验证：两台机器 + 一个公网 server，覆盖对称 NAT 与 5% 丢包。
 
-## 0.5 🧭
+## 0.7 🧭
 
 - 🧭 **H.264 编码**：优先 `openh264` 的 Python 绑定或 `libx264` 动态库；
   拿不到就退回 MJPEG。收益：同画质码率降到 1/5，弱网质变。
@@ -67,7 +74,7 @@
 - 🧭 远程 Shell（对应 UU 的 `uuyc-cli term`）：ConPTY + 浏览器 xterm 风格面板。
 - 🧭 Wake-on-LAN（对应 `/api/v1/device/wake_on_lan`）。
 
-## 0.6 🌱
+## 0.8 🌱
 
 - 🌱 虚拟 HID 驱动（游戏兼容，对应 `uuycinput`）。
 - 🌱 硬件编码（NVENC/QSV/AMF）——需要与 `ffmpeg` 动态库协作，破坏"零重依赖"，单独插件化。
@@ -85,8 +92,8 @@
 
 | 差距 | 影响 | 计划 |
 | --- | --- | --- |
-| 没有虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦截 `SendInput` | 0.5 / 0.6 |
-| 声音是 8 bit µ-law | 人声清楚，音乐发毛 | 0.5 起评估 Opus |
-| MJPEG 码率高 | 弱网/流量敏感场景体验差 | 0.5 |
+| 没有虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦截 `SendInput` | 0.7 / 0.8 |
+| 声音是 8 bit µ-law | 人声清楚，音乐发毛 | 0.7 起评估 Opus |
+| MJPEG 码率高 | 弱网/流量敏感场景体验差 | 0.7 |
 | 无账号/设备列表 | 每次要输码，设备多时不便 | 不打算做账号；后续做"本地收藏 + 二维码" |
-| 无远程终端 | 运维场景弱 | 0.5 |
+| 无远程终端 | 运维场景弱 | 0.7 |

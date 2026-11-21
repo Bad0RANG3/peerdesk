@@ -52,3 +52,39 @@ jobs:
         run: |
           python tests/e2e_local.py
           python tests/e2e_local.py --relay
+
+  build-exe:
+    name: 打包单文件 exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pyinstaller
+
+      - name: Build
+        run: python packaging/build.py
+
+      - name: Smoke test
+        run: |
+          dist\peerdesk.exe --help
+          dist\peerdesk.exe doctor
+
+      - name: End-to-end (exe, 三进程)
+        # 抓屏依赖交互式桌面；托管 runner 是服务会话，抓不到画面就跳过，不阻塞。
+        continue-on-error: true
+        run: python tests/e2e_exe.py --seconds 10
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peerdesk-exe
+          path: dist/peerdesk.exe
+          if-no-files-found: error

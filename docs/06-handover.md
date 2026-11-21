@@ -2,7 +2,7 @@
 
 > 给下一个接手的人（或者三个月后的自己）。目标：**10 分钟内跑起来，1 小时内敢改代码，半天内知道哪些坑已经踩过。**
 
-最后更新：2026-11-22 · 版本 0.4.0 · 提交见 `git log -1`
+最后更新：2026-11-22 · 版本 0.5.0 · 提交见 `git log -1`
 
 ---
 
@@ -200,6 +200,7 @@ cd D:\UU\peerdesk
 python -m ruff check peerdesk tests
 python -m unittest discover -s tests -p "test_*.py"
 python tests/e2e_local.py && python tests/e2e_local.py --relay && python tests/e2e_web.py
+python packaging/build.py && python tests/e2e_exe.py   # 打包 + 真 exe 三进程互连
 git add -A && git commit -m "feat: ..." && git push origin main
 gh run watch     # 或 gh run list --limit 3
 ```
@@ -211,15 +212,15 @@ gh run watch     # 或 gh run list --limit 3
 ## 9. 下一步优先级（与 `docs/05-roadmap.md` 一致）
 
 1. **真跨机验证**（回环测不出 NAT/丢包；需要一个公网 server + 两台机器）
-2. **DXGI 抓屏**（收益最大：25–40 ms → 3–5 ms）——但本机 `DuplicateOutput` 会崩，
+2. **DXGI 抓屏**（收益最大：22 ms → 3–5 ms）——但本机 `DuplicateOutput` 会崩，
    先写 `scratch/dxgi_probe.py` 那种子进程探针，探针通过才在主进程启用；退路是持久 DIB（-35%）
-3. **PyInstaller 打包**（`--onefile` + `--add-data peerdesk/web`）
-4. **H.264 / Opus**（码率与音质；都要外部动态库，做成"加载得到就用"的插件层）
-5. 独立文件流（当前文件走控制通道，会跟键鼠抢带宽）、远程 Shell、Wake-on-LAN
-6. 基于 RTT/丢包的拥塞控制（现在只有"上限→质量→帧率"的开环节流）
+3. **H.264 / Opus**（码率与音质；都要外部动态库，做成"加载得到就用"的插件层）
+4. 独立文件流（当前文件走控制通道，会跟键鼠抢带宽）、远程 Shell、Wake-on-LAN
+5. 基于 RTT/丢包的拥塞控制（现在只有"上限→质量→帧率"的开环节流）
 
 已完成（0.4）：中继 `--token` 鉴权、`--connect-max` 连接频次、`--relay-mbps` 令牌桶限速、
-被控端按上限自适应（先降质量再降帧率）。
+被控端按上限自适应（先降质量再降帧率）、GDI 抓屏后端（37 ms → 23 ms 单帧）、
+PyInstaller 单文件 exe + `tests/e2e_exe.py` 黑盒验证。
 
 明确不做：账号体系、会员、时长计费、把中继当付费权益。
 
@@ -234,7 +235,25 @@ gh run watch     # 或 gh run list --limit 3
 - [x] 声音通道：WASAPI loopback → G.711 µ-law → WebAudio，直连/中继/浏览器桥全部实测
 - [x] 逆向报告留存（`docs/01`），证据来自本机安装目录 strings + 运行期抓包，不含官方代码/资源
 - [ ] 真跨机（非回环）验证：需要两台机器 + 一个有公网 IP 或端口映射的 server
-- [ ] 打包成 exe（PyInstaller 方案未做；当前是 `pip install -e .` + `python -m peerdesk`）
+- [x] 打包成 exe：`packaging/*.spec|build.py` → `dist/peerdesk.exe`（33 MB，四端合一），
+      `tests/e2e_exe.py` 用真 exe 跑通 relay + 256 帧视频 + 594 帧声音
 - [ ] 截图更新（加入文件传输/中继 HUD 的新图）
+
+### 打包成 exe（怎么打、为什么这么打）
+
+```bash
+python -m pip install pyinstaller
+python packaging/build.py --clean      # → dist/peerdesk.exe
+dist/peerdesk.exe doctor               # 自检（GDI 后端/声音 probe 都会跑到）
+python tests/e2e_exe.py                # 黑盒：server+agent+viewer 三个 exe 互连
+```
+
+几条不能改的地方：
+- 前端资源必须按 `peerdesk/web` 的相对路径进包（`peerdesk.spec` 里 `datas` 的 dest），
+  因为 `webui.WEB_DIR = Path(__file__).parent / "web"`；打漏了就是"页面只有 web assets missing"。
+- `excludes` 里去掉了 `tkinter`/`unittest`，体积从 ~40 MB 降到 33 MB。
+- `upx=False`：UPX 会让每次启动多解压一遍，启动时间从 ~1 s 涨到 3 s 以上。
+- `tests/e2e_exe.py` 刻意用 `--relay-only`：本机虚拟网卡多（WireGuard/Hyper-V/GameViewer IDD），
+  打洞候选经常挑到不通的那张，打包冒烟不该被 NAT 行为干扰。
 
 > 交接联系人：Bad0RANG3 · 有任何与协议相关的疑问，先读 `docs/03-protocol-pdtp1.md`，再看 `peerdesk/transport.py` 顶部的常量区。

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "peerdesk"
-version = "0.4.0"
+version = "0.5.0"
 description = "PeerDesk 对端桌面 — 自研 PDTP/1 协议的 P2P 远程桌面（Windows，纯 Python）"
 readme = "README.md"
 requires-python = ">=3.11"
