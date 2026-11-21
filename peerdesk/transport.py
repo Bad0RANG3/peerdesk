@@ -42,6 +42,63 @@ RX_TIMEOUT = 25.0
 RELAY_MAGIC = b"RLY1"
 RELAY_HDR = struct.Struct(">4sI")
 
+# 控制消息分片：一条 DATA 报文不能超过 PAYLOAD_MTU（否则靠 IP 分片，一丢全丢）。
+CTRL_FRAG_TAG = 0xF1
+CTRL_CHUNK = 1200
+CTRL_FRAG_HDR = struct.Struct("<B4sHH")  # tag, 占位, frag_idx, frag_cnt
+
+
+class ControlFragments:
+    """把超长控制消息切成 ≤ mtu 的片段，并在远端拼回来。
+
+    ``ReliableStream`` 保证按序交付，所以这里只需按 ``frag_cnt`` 计数即可；
+    ``mid`` 只用于把交错的多条大消息分开（例如一边传文件一边发心跳）。
+    """
+
+    def __init__(self, chunk: int = CTRL_CHUNK, max_pending: int = 16) -> None:
+        self.chunk = max(64, int(chunk))
+        self.max_pending = max_pending
+        self._next_mid = 0
+        self._pending: dict[int, dict] = {}
+
+    def split(self, body: bytes) -> list[bytes]:
+        if len(body) <= self.chunk:
+            return [body]
+        mid = self._next_mid
+        self._next_mid = (self._next_mid + 1) & 0xFFFFFFFF
+        cnt = (len(body) + self.chunk - 1) // self.chunk
+        out: list[bytes] = []
+        for idx in range(cnt):
+            head = CTRL_FRAG_HDR.pack(CTRL_FRAG_TAG, struct.pack("<I", mid), idx, cnt)
+            out.append(head + body[idx * self.chunk : (idx + 1) * self.chunk])
+        return out
+
+    def feed(self, payload: bytes) -> bytes | None:
+        """返回拼好的消息体；还没拼完返回 None。非分片载荷原样返回。"""
+        if not payload or payload[0] != CTRL_FRAG_TAG:
+            return payload
+        if len(payload) < CTRL_FRAG_HDR.size:
+            return None
+        tag, mid_raw, idx, cnt = CTRL_FRAG_HDR.unpack_from(payload, 0)
+        if tag != CTRL_FRAG_TAG or cnt == 0 or idx >= cnt:
+            return None
+        mid = struct.unpack("<I", mid_raw)[0]
+        ent = self._pending.get(mid)
+        if ent is None:
+            while len(self._pending) >= self.max_pending:
+                self._pending.pop(next(iter(self._pending)))
+            ent = {"cnt": cnt, "parts": {}, "got": 0}
+            self._pending[mid] = ent
+        if not isinstance(ent["cnt"], int) or idx in ent["parts"]:
+            return None
+        ent["parts"][idx] = payload[CTRL_FRAG_HDR.size :]
+        ent["got"] = len(ent["parts"])
+        if ent["got"] < ent["cnt"]:
+            return None
+        self._pending.pop(mid, None)
+        parts = ent["parts"]
+        return b"".join(parts[i] for i in range(ent["cnt"]))
+
 
 @dataclass
 class Candidate:
@@ -303,6 +360,7 @@ class PeerLink(asyncio.DatagramProtocol):
 
         self._video_sender = VideoSender()
         self._video_recv = VideoReceiver(self._deliver_video, self._request_keyframe, fec_k=VideoSender.FEC_K)
+        self._ctrl_frag = ControlFragments()
         self._ctrl = ReliableStream(self._deliver_control, self._send_control_raw)
         self._tasks: list[asyncio.Task] = []
         self._last_ack_at = 0.0
@@ -456,8 +514,10 @@ class PeerLink(asyncio.DatagramProtocol):
             self._bytes_window.pop(0)
 
     def send_control(self, obj: dict) -> None:
-        if self._crypto:
-            self._ctrl.send(wire.json_payload(obj))
+        if not self._crypto:
+            return
+        for part in self._ctrl_frag.split(wire.json_payload(obj)):
+            self._ctrl.send(part)
 
     def send_video(self, jpeg: bytes, keyframe: bool = False) -> None:
         if not self._crypto or not self._established:
@@ -683,7 +743,10 @@ class PeerLink(asyncio.DatagramProtocol):
             self._send_packet(wire.TYPE_ACK, 0, 0, self._ctrl.ack_payload())
 
     def _deliver_control(self, payload: bytes) -> None:
-        obj = wire.parse_json(payload)
+        body = self._ctrl_frag.feed(payload)
+        if body is None:
+            return
+        obj = wire.parse_json(body)
         if obj and self.on_control:
             try:
                 self.on_control(obj)

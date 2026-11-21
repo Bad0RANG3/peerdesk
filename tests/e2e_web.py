@@ -176,6 +176,56 @@ async def run() -> int:
     await asyncio.sleep(1.0)
     pending = viewer.session.link._ctrl.pending() if viewer.session else -1
     print(f"[OK  ] control channel pending={pending}")
+
+    # 4. 浏览器上传 -> 被控端落盘（顺带验证 >MTU 控制消息的分片/重组）
+    import tempfile
+
+    import peerdesk.util as util_mod
+
+    tmp = Path(tempfile.mkdtemp(prefix="peerdesk-e2e-"))
+    orig_download = util_mod.download_dir
+    util_mod.download_dir = lambda: tmp
+    blob = os.urandom(180 * 1024)
+    up_name = "e2e-upload.bin"
+    try:
+        await ws.send_json({"t": "upload_begin", "name": up_name, "size": len(blob)})
+        for off in range(0, len(blob), 24576):
+            await ws.send(b"U" + blob[off : off + 24576], opcode=0x2)
+        await ws.send_json({"t": "upload_end"})
+        landed = tmp / "PeerDesk" / up_name
+        for _ in range(100):
+            if landed.exists() and landed.stat().st_size == len(blob):
+                break
+            await asyncio.sleep(0.2)
+        got = landed.read_bytes() if landed.exists() else b""
+        ok_up = got == blob
+        print(f"[{'OK  ' if ok_up else 'FAIL'}] browser upload -> host file {len(got)} bytes")
+        failures += 0 if ok_up else 1
+
+        # 5. 反方向：被控端推文件 -> 控制端落盘 -> 浏览器经 /dl 下载
+        sample = tmp / "handover-sample.bin"
+        sample.write_bytes(os.urandom(96 * 1024))
+        agent.host.send_file(sample)
+        back = tmp / "PeerDesk" / "handover-sample.bin"
+        for _ in range(100):
+            if back.exists() and back.stat().st_size == sample.stat().st_size:
+                break
+            await asyncio.sleep(0.2)
+        ok_back = back.exists() and back.read_bytes() == sample.read_bytes()
+        print(f"[{'OK  ' if ok_back else 'FAIL'}] host push -> viewer file {back.stat().st_size if back.exists() else 0} bytes")
+        failures += 0 if ok_back else 1
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", viewer.ui.port)
+        writer.write(b"GET /dl/handover-sample.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(), 10.0)
+        writer.close()
+        head, _, body = raw.partition(b"\r\n\r\n")
+        ok_dl = b"200 OK" in head and body == sample.read_bytes()
+        print(f"[{'OK  ' if ok_dl else 'FAIL'}] /dl download {len(body)} bytes")
+        failures += 0 if ok_dl else 1
+    finally:
+        util_mod.download_dir = orig_download
     ws.close()
 
     state = viewer.link.state if viewer.link else "none"

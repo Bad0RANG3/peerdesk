@@ -187,5 +187,60 @@ class VideoPathTest(unittest.TestCase):
         self.assertEqual(indices, [8])
 
 
+class ControlFragmentTest(unittest.TestCase):
+    """控制消息 > MTU 时必须自己分片，不能靠 IP 分片。"""
+
+    def test_short_message_passes_through(self):
+        frag = transport.ControlFragments(chunk=64)
+        body = b'{"t":"ping"}'
+        parts = frag.split(body)
+        self.assertEqual(parts, [body])
+        self.assertEqual(frag.feed(body), body)
+
+    def test_split_never_exceeds_budget(self):
+        frag = transport.ControlFragments(chunk=1200)
+        body = b"x" * 5000
+        parts = frag.split(body)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(p) <= 1200 + transport.CTRL_FRAG_HDR.size for p in parts))
+
+    def test_reassembly_roundtrip(self):
+        body = b'{"t":"file_data","d":"' + b"A" * 4000 + b'"}'
+        parts = transport.ControlFragments(chunk=512).split(body)
+        rx = transport.ControlFragments(chunk=512)
+        results = [rx.feed(p) for p in parts]
+        self.assertTrue(all(r is None for r in results[:-1]))
+        self.assertEqual(results[-1], body)
+
+    def test_duplicate_fragment_is_ignored(self):
+        body = b"y" * 900
+        parts = transport.ControlFragments(chunk=256).split(body)
+        rx = transport.ControlFragments(chunk=256)
+        self.assertIsNone(rx.feed(parts[0]))
+        self.assertIsNone(rx.feed(parts[0]))  # 重传的重复片
+        for part in parts[1:]:
+            out = rx.feed(part)
+        self.assertEqual(out, body)
+
+    def test_interleaved_messages_do_not_mix(self):
+        a = b"a" * 700
+        b = b"b" * 700
+        tx = transport.ControlFragments(chunk=256)
+        pa, pb = tx.split(a), tx.split(b)
+        rx = transport.ControlFragments(chunk=256)
+        outs = []
+        for x, y in zip(pa, pb, strict=True):
+            outs.append(rx.feed(x))
+            outs.append(rx.feed(y))
+        done = [o for o in outs if o]
+        self.assertEqual(len(done), 2)
+        self.assertIn(a, done)
+        self.assertIn(b, done)
+
+    def test_truncated_fragment_ignored(self):
+        rx = transport.ControlFragments(chunk=64)
+        self.assertIsNone(rx.feed(bytes([transport.CTRL_FRAG_TAG, 0, 0])))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

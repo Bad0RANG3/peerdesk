@@ -5,7 +5,20 @@ from __future__ import annotations
 import sys
 
 
+def _force_utf8_console() -> None:
+    """Windows 控制台默认 GBK，中文帮助会变成乱码；能改就改成 UTF-8。"""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower()
+        if enc.replace("-", "").startswith("utf8"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_console()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(

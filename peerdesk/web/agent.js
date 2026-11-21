@@ -155,4 +155,16 @@
   };
 
   connectWS();
+
+  /* 发送本机文件给控制端（被控端主动推） */
+  const btnSendFile = $("btnSendFile");
+  if (btnSendFile) {
+    btnSendFile.addEventListener("click", () => {
+      const path = ($("sendPath").value || "").trim();
+      if (!path) { toast("先填文件路径"); return; }
+      send({ t: "file", path });
+      toast("正在发送 " + path.split(/[\\/]/).pop());
+    });
+  }
+
 })();

@@ -109,8 +109,82 @@
       case "notice":
         toast(msg.text || "");
         break;
+      case "upload":
+        if (msg.state === "begin") toast(`正在发送 ${msg.name}…`);
+        else if (msg.state === "progress") {
+          const pct = msg.size ? Math.round((msg.sent / msg.size) * 100) : 0;
+          $("toast").textContent = `发送 ${msg.name || ""} ${pct}%`;
+          $("toast").classList.add("show");
+        } else if (msg.state === "done") toast(`已发送 ${msg.name || "文件"}`);
+        break;
+      case "file_in":
+        if (msg.state === "begin") toast(`对端正在发送 ${msg.name}…`);
+        else if (msg.state === "progress") {
+          $("toast").textContent = `接收中 ${Math.round((msg.got || 0) / 1024)} KB`;
+          $("toast").classList.add("show");
+        } else if (msg.state === "done") {
+          toast(`已接收 ${msg.name}（${Math.round((msg.size || 0) / 1024)} KB）`);
+          if (msg.url) {
+            const a = document.createElement("a");
+            a.href = msg.url; a.download = msg.name || "file";
+            document.body.appendChild(a); a.click(); a.remove();
+          }
+        }
+        break;
+      case "file_done":
+        toast(`对端已保存 ${(msg.path || "").split(/[\\/]/).pop()}`);
+        break;
     }
   }
+
+  /* ---------------------------------------------------------------- upload */
+  const UPLOAD_SLICE = 24 * 1024;
+
+  async function uploadFile(file) {
+    if (!connected || !ws || ws.readyState !== 1) { setGate("bad", "先连接再发送文件"); return; }
+    send({ t: "upload_begin", name: file.name, size: file.size });
+    let off = 0;
+    while (off < file.size) {
+      const buf = new Uint8Array(await file.slice(off, off + UPLOAD_SLICE).arrayBuffer());
+      if (!buf.length) break;
+      const frame = new Uint8Array(buf.length + 1);
+      frame[0] = 0x55;                     // "U"：浏览器→viewer 的上传分块
+      frame.set(buf, 1);
+      ws.send(frame);
+      off += buf.length;
+      await new Promise((r) => setTimeout(r, 0));   // 让出主线程，避免卡顿画面
+    }
+    send({ t: "upload_end" });
+  }
+
+  async function uploadFiles(list) {
+    for (const file of list) {
+      try { await uploadFile(file); } catch (e) { toast("发送失败：" + (e.message || e)); }
+    }
+  }
+
+  const drop = $("drop");
+  let dragDepth = 0;
+  window.addEventListener("dragenter", (ev) => {
+    if (!connected || !ev.dataTransfer?.types?.includes("Files")) return;
+    dragDepth++; ev.preventDefault(); drop.classList.add("show");
+  });
+  window.addEventListener("dragover", (ev) => {
+    if (!connected) return;
+    ev.preventDefault(); ev.dataTransfer.dropEffect = "copy";
+  });
+  window.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) drop.classList.remove("show");
+  });
+  window.addEventListener("drop", (ev) => {
+    if (!connected) return;
+    ev.preventDefault(); dragDepth = 0; drop.classList.remove("show");
+    const files = ev.dataTransfer?.files;
+    if (files && files.length) uploadFiles(files);
+  });
+  $("btnFile").addEventListener("click", () => { if (!connected) { toast("先连接"); return; } $("filePick").click(); });
+  $("filePick").addEventListener("change", (ev) => { uploadFiles(ev.target.files); ev.target.value = ""; });
 
   /* ---------------------------------------------------------------- render */
   function onFrame(bytes) {

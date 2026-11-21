@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from . import util
 from .capture import FramePacer, Monitor, ScreenCapture
@@ -328,12 +329,38 @@ class HostSession:
         self.link.send_control({"t": "file_done", "id": fid, "path": str(entry["path"]), "size": entry["got"]})
         self.on_event({"t": "notice", "text": f"文件已保存 {entry['path'].name}"})
 
+    def send_file(self, path: Path) -> None:
+        """被控端把本机文件推给控制端（浏览器里会弹下载）。"""
+        path = Path(path)
+        if not path.is_file():
+            self.on_event({"t": "notice", "text": f"文件不存在：{path}"})
+            return
+        _stream_file(self.link.send_control, path)
+        self.on_event({"t": "notice", "text": f"已发送 {path.name}"})
+
     def stop(self) -> None:
         self._running = False
 
 
+def _stream_file(send, path: Path) -> None:
+    """把文件按 base64 分块塞进控制通道（收发两端共用）。"""
+    size = path.stat().st_size
+    fid = os.urandom(4).hex()
+    send({"t": "file_begin", "id": fid, "name": path.name, "size": size})
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(CHUNK_B64)
+            if not chunk:
+                break
+            send({"t": "file_data", "id": fid, "d": base64.b64encode(chunk).decode()})
+    send({"t": "file_end", "id": fid})
+
+
 class ViewerSession:
     """Receives frames and pushes remote input."""
+
+    _upload: dict | None = None
+    _rx_files: dict[str, dict]
 
     def __init__(
         self,
@@ -343,6 +370,7 @@ class ViewerSession:
         on_message: Callable[[dict], None] | None = None,
     ) -> None:
         self.link = link
+        self._rx_files = {}
         self.on_frame = on_frame or (lambda data, meta: None)
         self.on_message = on_message or (lambda msg: None)
         self.info: dict = {}
@@ -370,7 +398,58 @@ class ViewerSession:
             self.info = msg
         elif kind == "stats":
             self.stats = msg
+        elif kind == "file_begin":
+            self._rx_begin(msg)
+            return
+        elif kind == "file_data":
+            self._rx_data(msg)
+            return
+        elif kind == "file_end":
+            self._rx_end(msg)
+            return
         self.on_message(msg)
+
+    # -------------------------------------------------- inbound files (from host)
+    def _rx_begin(self, msg: dict) -> None:
+        fid = str(msg.get("id", ""))
+        name = Path(str(msg.get("name", "file.bin"))).name
+        target = util.download_dir() / "PeerDesk"
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / name
+        if path.exists():
+            stem, suffix = path.stem, path.suffix
+            for i in range(1, 1000):
+                cand = target / f"{stem} ({i}){suffix}"
+                if not cand.exists():
+                    path = cand
+                    break
+        self._rx_files[fid] = {"handle": open(path, "wb"), "path": path, "got": 0}
+        self.on_message({"t": "file_in", "state": "begin", "name": name})
+
+    def _rx_data(self, msg: dict) -> None:
+        entry = self._rx_files.get(str(msg.get("id", "")))
+        if not entry:
+            return
+        chunk = base64.b64decode(str(msg.get("d", "")))
+        entry["handle"].write(chunk)
+        entry["got"] += len(chunk)
+        self.on_message({"t": "file_in", "state": "progress", "got": entry["got"]})
+
+    def _rx_end(self, msg: dict) -> None:
+        entry = self._rx_files.pop(str(msg.get("id", "")), None)
+        if not entry:
+            return
+        entry["handle"].close()
+        name = entry["path"].name
+        self.on_message(
+            {
+                "t": "file_in",
+                "state": "done",
+                "name": name,
+                "size": entry["got"],
+                "url": "/dl/" + quote(name),
+            }
+        )
 
     # --------------------------------------------------------------- commands
     def send(self, obj: dict) -> None:
@@ -393,15 +472,29 @@ class ViewerSession:
         self.send({"t": "settings", "monitor": index})
         self.request_keyframe()
 
-    def send_file(self, path: Path) -> None:
-        path = Path(path)
-        size = path.stat().st_size
+    # ------------------------------------------------------------ upload (browser)
+    def begin_upload(self, name: str, size: int) -> None:
+        """浏览器拖文件进来：先声明，再按 upload_chunk() 推，最后 end_upload()。"""
         fid = os.urandom(4).hex()
-        self.send({"t": "file_begin", "id": fid, "name": path.name, "size": size})
-        with open(path, "rb") as fh:
-            while True:
-                chunk = fh.read(CHUNK_B64)
-                if not chunk:
-                    break
-                self.send({"t": "file_data", "id": fid, "d": base64.b64encode(chunk).decode()})
-        self.send({"t": "file_end", "id": fid})
+        self._upload = {"id": fid, "name": Path(name).name or "file.bin", "size": int(size), "sent": 0}
+        self.send({"t": "file_begin", "id": fid, "name": self._upload["name"], "size": self._upload["size"]})
+        self.on_message({"t": "upload", "state": "begin", "name": self._upload["name"], "size": self._upload["size"]})
+
+    def upload_chunk(self, data: bytes) -> None:
+        up = getattr(self, "_upload", None)
+        if not up or not data:
+            return
+        up["sent"] += len(data)
+        self.send({"t": "file_data", "id": up["id"], "d": base64.b64encode(data).decode()})
+        self.on_message({"t": "upload", "state": "progress", "sent": up["sent"], "size": up["size"]})
+
+    def end_upload(self) -> None:
+        up = getattr(self, "_upload", None)
+        if not up:
+            return
+        self.send({"t": "file_end", "id": up["id"]})
+        self.on_message({"t": "upload", "state": "done", "name": up["name"], "sent": up["sent"]})
+        self._upload = None
+
+    def send_file(self, path: Path) -> None:
+        _stream_file(self.send, Path(path))

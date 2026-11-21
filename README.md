@@ -33,6 +33,7 @@
 - **打洞 + 中继回退**：候选交换后 100 ms 一发 PUNCH，6 秒直连失败自动升级 UDP 中继（画质不变）
 - **视频**：JPEG 质量自适应（32–92）+ XOR FEC（8+1）+ NACK 重传 + 关键帧请求 + 450 ms 帧超时丢弃
 - **控制**：独立可靠流（累积 ACK + 64 位位图 + RTO 退避），键鼠/文本/剪贴板/文件/画质/显示器切换
+- **双向文件传输**：控制端拖拽即上传（浏览器→被控端），被控端面板填路径即可推给控制端（经 `/dl` 下载）
 - **多显示器**、静帧跳过、绝对坐标注入、Unicode 文本输入、`Ctrl+Alt+Del`
 - **浏览器 UI**：深色玻璃拟态、悬浮会话工具栏、实时 HUD，无框架无构建步骤
 - **自托管服务端**：TCP 信令 + UDP 中继 + STUN 复用同一个 UDP 端口
@@ -104,10 +105,10 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 79 个单元测试
+python -m unittest discover -s tests -p "test_*.py"   # 85 个单元测试
 python tests/e2e_local.py                            # 进程内端到端（直连）
 python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
-python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG 帧 + 控制通道
+python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 上传/下载
 ```
 
 本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13.5–15.7 fps / 6.6 Mbps / RTT 0.4–2 ms**，
@@ -120,6 +121,7 @@ python tests/e2e_web.py                              # 浏览器桥：页面 + W
 - [PDTP/1 协议规范](docs/03-protocol-pdtp1.md) — 报文格式、握手、密钥派生、FEC/NACK、中继
 - [UI 复刻对照](docs/04-ui-parity.md) — 界面清单、视觉规范、交互细节
 - [路线图](docs/05-roadmap.md) — DXGI 抓屏、音频、H.264、虚拟显示器、远程 Shell
+- **[交接手册](docs/06-handover.md)** — 十分钟跑起来、代码地图、协议速查、10 个已踩的坑、排查表、发布流程
 
 ## 安全说明
 

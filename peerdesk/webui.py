@@ -12,13 +12,16 @@ import json
 import logging
 import mimetypes
 from pathlib import Path
+from urllib.parse import unquote
 
+from . import util
 from .websocket import WSConnection
 
 log = logging.getLogger("peerdesk.webui")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 FRAME_MAGIC = b"J"
+UPLOAD_MAGIC = b"U"
 
 
 class _Conn:
@@ -113,6 +116,9 @@ class Hub:
     async def on_json(self, conn: _Conn, obj: dict) -> None:  # pragma: no cover - overridden
         pass
 
+    async def on_binary(self, conn: _Conn, payload: bytes) -> None:  # pragma: no cover - overridden
+        """浏览器发来的二进制帧（上传分块）。默认忽略。"""
+
 
 class ViewerHub(Hub):
     """Browser (controller) side bridge."""
@@ -158,6 +164,13 @@ class ViewerHub(Hub):
             session.select_monitor(int(obj.get("i", 0)))
         elif kind == "keyframe":
             session.request_keyframe()
+        elif kind == "upload_begin":
+            try:
+                session.begin_upload(str(obj.get("name") or "file.bin"), int(obj.get("size") or 0))
+            except Exception:
+                log.exception("upload_begin failed")
+        elif kind == "upload_end":
+            session.end_upload()
         elif kind == "file":
             path = obj.get("path")
             if path:
@@ -167,6 +180,15 @@ class ViewerHub(Hub):
                     log.exception("send_file failed")
         elif self.on_command:
             await self.on_command(conn, obj)
+
+    async def on_binary(self, conn: _Conn, payload: bytes) -> None:
+        """浏览器上传：帧首字节 b"U" + 原始字节。"""
+        if payload[:1] != UPLOAD_MAGIC or self.session is None:
+            return
+        try:
+            self.session.upload_chunk(payload[1:])
+        except Exception:
+            log.exception("upload_chunk failed")
 
     async def on_frame(self, data: bytes) -> None:  # called by ViewerSession
         await self.broadcast_frame(data)
@@ -274,6 +296,9 @@ class WebUI:
                     if msg is None:
                         break
                     opcode, payload = msg
+                    if opcode == 2:
+                        await self.hub.on_binary(slot, payload)
+                        continue
                     if opcode != 1:
                         continue
                     try:
@@ -288,6 +313,8 @@ class WebUI:
         try:
             if path in ("/", "/index.html"):
                 body, ctype = self._render(self.page), "text/html; charset=utf-8"
+            elif path.startswith("/dl/"):
+                body, ctype = self._download(path[len("/dl/") :])
             elif path == "/favicon.ico":
                 body, ctype = b"", "image/x-icon"
                 writer.write(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
@@ -298,11 +325,15 @@ class WebUI:
                 body, ctype = self._static(path)
             status = "200 OK" if body is not None else "404 Not Found"
             payload = body or b"not found"
+            extra = ""
+            if path.startswith("/dl/") and body is not None:
+                extra = f'Content-Disposition: attachment; filename*=UTF-8\'\'{Path(unquote(path[4:])).name}\r\n'
+
             writer.write(
                 (
                     f"HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\n"
                     f"Content-Length: {len(payload)}\r\nCache-Control: no-store\r\n"
-                    "Connection: close\r\n\r\n"
+                    f"{extra}Connection: close\r\n\r\n"
                 ).encode()
                 + payload
             )
@@ -322,6 +353,17 @@ class WebUI:
         html = path.read_text(encoding="utf-8")
         html = html.replace("{{TITLE}}", self.title)
         return html.encode("utf-8")
+
+    def _download(self, name: str) -> tuple[bytes | None, str]:
+        """把被控端推过来的文件交给浏览器下载（只允许下载目录内的单层文件名）。"""
+        safe = Path(unquote(name)).name
+        if not safe or safe in (".", ".."):
+            return None, "text/plain"
+        target = util.download_dir() / "PeerDesk" / safe
+        if not target.is_file():
+            return None, "text/plain"
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        return target.read_bytes(), ctype
 
     def _static(self, path: str) -> tuple[bytes | None, str]:
         name = path.lstrip("/").replace("..", "")
