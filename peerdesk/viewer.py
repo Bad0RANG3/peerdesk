@@ -33,6 +33,7 @@ class ViewerApp:
         self.hub = ViewerHub(on_command=self.on_command)
         self.ui = WebUI("viewer.html", self.hub, port=args.web_port, title="PeerDesk · 远程控制")
         self.code = ""
+        self.token = str(getattr(args, "token", "") or "").strip()
         self._queue: asyncio.Queue = asyncio.Queue()
         self._connecting = False
 
@@ -52,7 +53,7 @@ class ViewerApp:
         await self._idle()
 
     # ------------------------------------------------------------------ connect
-    async def connect(self, code_text: str, server_text: str = "") -> None:
+    async def connect(self, code_text: str, server_text: str = "", token_text: str = "") -> None:
         code = util.normalize_code(code_text)
         if not util.code_is_valid(code):
             self.hub.push_event({"t": "error", "text": "连接码需要 9 位数字"})
@@ -65,6 +66,8 @@ class ViewerApp:
                     await self.signal.close()
                     self.signal = None
         self.code = code
+        if token_text.strip():
+            self.token = token_text.strip()
         self.hub.push_event({"t": "connecting", "code": code, "server": f"{self.server_host}:{self.server_port}"})
         await self._make_link()
         if not self.signal or not self.signal.connected:
@@ -72,7 +75,9 @@ class ViewerApp:
             if not await self.signal.connect():
                 self.hub.push_event({"t": "error", "text": f"无法连接信令服务器：{self.signal.last_error}"})
                 return
-        await self.signal.send({"t": "connect", "code": code, "cands": signaling.cands_of(self.link)})
+        await self.signal.send(
+            {"t": "connect", "code": code, "cands": signaling.cands_of(self.link), **signaling.token_args(self.token)}
+        )
 
     async def _make_link(self) -> None:
         if self.link:
@@ -146,14 +151,21 @@ class ViewerApp:
             self.hub.push_event({"t": "link", "state": "closed", "path": ""})
         elif kind == "error":
             reason = msg.get("reason")
-            text = {"bad_code": "连接码格式错误", "offline": "对方不在线或码已失效"}.get(reason, str(reason))
+            text = {
+                "bad_code": "连接码格式错误",
+                "offline": "对方不在线或码已失效",
+                "bad_token": "服务器令牌不匹配",
+                "rate_limited": "连接尝试过于频繁，稍后再试",
+            }.get(reason, str(reason))
             self.hub.push_event({"t": "error", "text": text})
 
     # ------------------------------------------------------------------ commands
     async def on_command(self, conn, obj: dict) -> None:
         kind = obj.get("t")
         if kind == "connect":
-            await self.connect(str(obj.get("code", "")), str(obj.get("server", "")))
+            await self.connect(
+                str(obj.get("code", "")), str(obj.get("server", "")), str(obj.get("token", ""))
+            )
         elif kind == "hangup":
             if self.link:
                 await self.link.close()
@@ -173,6 +185,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--code", default=os.environ.get("PEERDESK_CODE", ""), help="直接连接的连接码")
     parser.add_argument("--web-port", type=int, default=0)
     parser.add_argument("--udp-port", type=int, default=0)
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("PEERDESK_TOKEN", ""),
+        help="信令服务器令牌（页面里也可以临时填）",
+    )
     parser.add_argument("--relay-only", action="store_true", help="强制走中继（调试）")
     parser.add_argument("--open", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")

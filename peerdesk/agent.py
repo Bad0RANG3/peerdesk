@@ -29,6 +29,7 @@ class AgentApp:
         self.args = args
         self.code = util.normalize_code(args.code) if args.code else util.generate_code()
         self.server_host, self.server_port = util.parse_addr(args.server, 7900)
+        self.token = str(getattr(args, "token", "") or "").strip()
         self.settings = VideoSettings(
             fps=args.fps,
             max_width=args.width,
@@ -104,7 +105,14 @@ class AgentApp:
         assert self.link and self.signal
         cands = signaling.cands_of(self.link)
         await self.signal.send(
-            {"t": "register", "role": "agent", "code": self.code, "name": socket.gethostname(), "cands": cands}
+            {
+                "t": "register",
+                "role": "agent",
+                "code": self.code,
+                "name": socket.gethostname(),
+                "cands": cands,
+                **signaling.token_args(self.token),
+            }
         )
         self.hub.push_event({"t": "ready", "code": self.code, "server": f"{self.server_host}:{self.server_port}",
                              "name": socket.gethostname(), "monitors": self.host.info().get("monitors") if self.host else [],
@@ -119,10 +127,18 @@ class AgentApp:
             except Exception:
                 log.exception("signal message")
 
+    def _apply_rate_limit(self, msg: dict) -> None:
+        if "relay_mbps" not in msg or not self.host:
+            return
+        mbps = float(msg.get("relay_mbps") or 0.0)
+        if abs(mbps - self.host.rate_limit) > 1e-9:
+            self.host.set_rate_limit(mbps)
+
     async def _handle_signal(self, msg: dict) -> None:
         kind = msg.get("t")
         assert self.link and self.signal
         if kind == "registered":
+            self._apply_rate_limit(msg)
             relay = msg.get("relay") or []
             if len(relay) == 2:
                 self._relay = (str(relay[0]), int(relay[1]))
@@ -133,6 +149,7 @@ class AgentApp:
             await self.signal.send({"t": "cands", "cands": signaling.cands_of(self.link)})
             self.hub.push_event({"t": "notice", "text": f"连接码 {util.format_code(self.code)} 已就绪"})
         elif kind == "viewer":
+            self._apply_rate_limit(msg)
             relay = msg.get("relay") or []
             if len(relay) == 2:
                 self._relay = (str(relay[0]), int(relay[1]))
@@ -216,6 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--quality", type=int, default=62)
     parser.add_argument("--monitor", type=int, default=0)
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("PEERDESK_TOKEN", ""),
+        help="信令服务器令牌（服务器用 --token 开启时必填）",
+    )
     parser.add_argument("--relay-only", action="store_true", help="强制走中继（调试/联机受限网络）")
     parser.add_argument("--no-input", action="store_true", help="只读模式，忽略远端键鼠")
     parser.add_argument("--no-clipboard", action="store_true")

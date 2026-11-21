@@ -66,10 +66,19 @@
     };
   }
 
+  const TOKEN_KEY = "pd.token";
+  const tokenBox = $("token");
+  if (tokenBox) {
+    tokenBox.value = localStorage.getItem(TOKEN_KEY) || "";
+    tokenBox.addEventListener("change", () => localStorage.setItem(TOKEN_KEY, tokenBox.value.trim()));
+  }
+
   function onJson(msg) {
     switch (msg.t) {
       case "ready":
         if (msg.code) $("code").value = fmtCode(msg.code);
+        if (msg.token_required && !tokenBox.value) setGate("warn", "该服务器需要令牌");
+        if (msg.relay_mbps) hud.dataset.limit = String(msg.relay_mbps);
         break;
       case "info":
         info = msg;
@@ -94,8 +103,10 @@
         }
         break;
       case "stats":
-        $("hudFps").textContent = (msg.fps ?? 0) + " fps";
-        $("hudMbps").textContent = (msg.mbps ?? 0) + " Mbps";
+        $("hudFps").textContent =
+          (msg.fps ?? 0) + " fps" + (msg.sfps && msg.sfps !== Math.round(msg.fps) ? " (限 " + msg.sfps + ")" : "");
+        $("hudMbps").textContent =
+          (msg.mbps ?? 0) + " Mbps" + (msg.cap ? " / 限 " + msg.cap : "");
         $("hudRtt").textContent = (msg.rtt ?? 0) + " ms";
         $("hudMode").textContent = msg.relay ? "中继" : "P2P";
         audioFps = audioFrames; audioFrames = 0;
@@ -533,8 +544,10 @@
     const code = ($("code").value || "").replace(/\D/g, "");
     if (code.length !== 9) { toast("请输入 9 位连接码"); return; }
     const server = ($("server").value || "").trim();
+    const token = (tokenBox.value || "").trim();
+    localStorage.setItem(TOKEN_KEY, token);
     setGate("warn", "正在连接…");
-    send({ t: "connect", code, server });
+    send({ t: "connect", code, server, token });
     setTimeout(() => { if (!connected) setGate("warn", "正在打洞，请稍候…"); }, 1500);
   };
 

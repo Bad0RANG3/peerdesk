@@ -109,10 +109,13 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 99 个单元测试
+python -m unittest discover -s tests -p "test_*.py"   # 119 个单元测试
 python tests/e2e_local.py                            # 进程内端到端（直连，含声音 267 帧/5 s）
 python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
 python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 声音 + 上传/下载
+python tests/e2e_local.py --token s3cret             # 验证令牌鉴权链路
+python tests/e2e_local.py --token s3cret --bad-token # 负路径：错误令牌必须被拒
+python tests/e2e_local.py --relay --relay-mbps 1.5   # 中继限速 + 被控端带宽自适应
 ```
 
 本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13.5–15.7 fps / 6.6 Mbps / RTT 0.4–2 ms**，
@@ -132,7 +135,9 @@ python tests/e2e_web.py                              # 浏览器桥：页面 + W
 - 连接码即 PSK：知道 9 位码即可握手（与同类产品同一模型）。服务端不存明文码。
 - 服务器只看到元数据（谁连谁、候选地址、流量大小），看不到媒体内容。
 - 面板默认只监听 `127.0.0.1`，跨机访问请用 SSH 隧道或反代，别直接暴露到公网。
-- 中继目前没有鉴权与限速，公网部署请在前面加白名单（见路线图 0.2）。
+- 自托管建议开 `--token`（两端和浏览器面板都填同一个令牌，`hmac.compare_digest` 比较），
+  并按需设 `--relay-mbps` 控制中继出口带宽、`--connect-max` 限制单 IP 的连接尝试频率。
+  三者都是"最小可用"，正式公网仍建议前置反代/WAF。
 
 ## 许可
 

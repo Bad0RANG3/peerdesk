@@ -35,21 +35,26 @@ PeerDesk（对端桌面）是一个**纯 Python 3.11+** 的 Windows 远程桌面
 
 | 文件 | 行数 | 职责 | 关键对象 |
 | --- | --- | --- | --- |
-| `wire.py` | 243 | 报文格式、分片、XOR FEC、ACK/NACK 位图 | `Header`、`FragmentAssembler`、`ParityGroup` |
-| `crypto.py` | 215 | X25519 → HKDF → ChaCha20-Poly1305、重放窗口 | `KeyPair`、`SessionKeys`、`CryptoContext` |
-| `transport.py` | 791 | UDP 传输：握手、打洞、中继、可靠控制流、视频发送/接收、统计 | `PeerLink`、`ReliableStream`、`VideoSender`、`VideoReceiver` |
-| `stun.py` | 144 | 自实现 STUN Binding 子集（与媒体共用 socket） | `build_request/parse_mapped/query_stun` |
-| `signal.py` | 88 | 信令客户端（TCP JSON Lines） | `SignalingClient` |
-| `server.py` | 297 | 信令服务器 + UDP 中继 + STUN 响应 | `SignalingServer`、`Peer`、`Pair` |
-| `session.py` | 407 | 会话层：抓屏循环、控制消息分发、输入注入、文件接收、剪贴板 | `HostSession`、`ViewerSession`、`VideoSettings` |
-| `capture.py` | 192 | mss 抓屏 + JPEG 编码 + 自适应质量 + 静帧跳过 | `ScreenCapture`、`FramePacer` |
-| `audio.py` | 646 | WASAPI loopback（ctypes COM）→ 重采样 → G.711 µ-law，静音抑制 | `LoopbackCapture`、`LoopbackSource`、`AudioPump`、`MonoResampler` |
+| `wire.py` | 268 | 报文格式、分片、XOR FEC、ACK/NACK 位图 | `Header`、`FragmentAssembler`、`ParityGroup` |
+| `crypto.py` | 214 | X25519 → HKDF → ChaCha20-Poly1305、重放窗口 | `KeyPair`、`SessionKeys`、`CryptoContext` |
+| `transport.py` | 875 | UDP 传输：握手、打洞、中继、可靠控制流、视频发送/接收、统计 | `PeerLink`、`ReliableStream`、`VideoSender`、`VideoReceiver` |
+| `stun.py` | 143 | 自实现 STUN Binding 子集（与媒体共用 socket） | `build_request/parse_mapped/query_stun` |
+| `signal.py` | 94 | 信令客户端（TCP JSON Lines） | `SignalingClient` |
+| `server.py` | 446 | 信令服务器 + UDP 中继 + STUN 响应 | `SignalingServer`、`Peer`、`Pair` |
+| `session.py` | 624 | 会话层：抓屏循环、控制消息分发、输入注入、文件接收、剪贴板 | `HostSession`、`ViewerSession`、`VideoSettings` |
+| `capture.py` | 196 | mss 抓屏 + JPEG 编码 + 自适应质量 + 静帧跳过 | `ScreenCapture`、`FramePacer` |
+| `audio.py` | 640 | WASAPI loopback（ctypes COM）→ 重采样 → G.711 µ-law，静音抑制 | `LoopbackCapture`、`LoopbackSource`、`AudioPump`、`MonoResampler` |
 | `wininput.py` | 327 | `SendInput` 键鼠注入、虚拟桌面归一化、剪贴板读写 | `InputInjector`、`ClipboardWatcher` |
-| `websocket.py` | 167 | 最小 RFC6455 服务端（文本/二进制/分片/ping-pong） | `WSConnection` |
-| `webui.py` | 335 | 本地 HTTP 静态资源 + WS 桥 + Hub 扇出（丢旧帧背压） | `Hub`、`ViewerHub`、`AgentHub`、`WebUI` |
-| `web/*` | 1113 | 浏览器 UI（深色玻璃拟态 + 连接码页 + 悬浮工具栏 + HUD） | `viewer.js`、`agent.js`、`style.css` |
+| `websocket.py` | 166 | 最小 RFC6455 服务端（文本/二进制/分片/ping-pong） | `WSConnection` |
+| `webui.py` | 393 | 本地 HTTP 静态资源 + WS 桥 + Hub 扇出（丢旧帧背压） | `Hub`、`ViewerHub`、`AgentHub`、`WebUI` |
+| `web/*` | 1482 | 浏览器 UI（深色玻璃拟态 + 连接码页 + 悬浮工具栏 + HUD） | `viewer.js`、`agent.js`、`style.css` |
 | `agent.py` / `viewer.py` | 419 | 两个角色的主编排（CLI → 信令 → PeerLink → 面板） | `AgentApp`、`ViewerApp` |
-| `doctor.py` | 131 | 自检 | `run_checks()` |
+| `doctor.py` | 139 | 自检 | `run_checks()` |
+
+服务端策略对象：`SignalingServer` 持有 `token` / `relay_mbps` / `connect_max` / `connect_window`；
+`TokenBucket` 是每对会话的中继令牌桶（`rate = mbps × 125000` B/s，1 s 突发），
+`Pair.bucket` 在转发前 `allow(len(data))`，不通过就丢包。被控端侧对应
+`HostSession.set_rate_limit()` + `FramePacer.set_budget_kb()` + `_effective_fps()`。
 
 ## 3. 数据流
 
@@ -163,5 +168,8 @@ DXGI Desktop Duplication 或硬件 MJPEG 编码器（见路线图）。
 2. 声音是 G.711 µ-law（8 bit/16 kHz），够"听得到、听得清人声"，但不是音乐级；Opus 需要额外依赖。
 3. 无虚拟显示器/虚拟 HID 驱动：分辨率跟随真实桌面，部分反作弊会拦 `SendInput`。
 4. 剪贴板只同步文本（图片/文件待补）。
-5. 中继是单进程 UDP 转发，未做鉴权与限速（生产部署需要在外层加白名单/限流）。
+   限速是"先降质量再降帧率"的粗粒度控制，没有基于 RTT/丢包的拥塞控制（无 BBR/GCC）。
+5. 中继是单进程 UDP 转发：已有 `--token` 鉴权、`--relay-mbps` 令牌桶限速与
+   `--connect-max` 连接频次限制，但仍是单机单进程，没有分布式配额与计费，
+   也没有 TLS——信令靠连接码派生 PSK 保护媒体，令牌本身走明文 TCP。
 6. 浏览器桥只监听 `127.0.0.1`，跨机访问需要 SSH 隧道或反代（有意为之）。

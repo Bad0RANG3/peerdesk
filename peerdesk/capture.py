@@ -162,6 +162,10 @@ class FramePacer:
         elif size < target * 0.6:
             self.quality = min(self.max_q, self.quality + 1)
 
+    def set_budget_kb(self, kb: float) -> None:
+        """按外部带宽上限设置单帧目标；0 表示恢复默认。"""
+        self.target_kb = 140 if kb <= 0 else max(4.0, min(600.0, kb))
+
     def frame_budget(self, fps: int) -> float:
         return 1.0 / max(1, fps)
 

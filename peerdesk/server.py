@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -25,6 +26,47 @@ log = logging.getLogger("peerdesk.server")
 
 MAX_LINE = 1 << 20
 RELAY_SILENCE = 180.0
+CONNECT_WINDOW = 60.0  # 连接尝试计数窗口（秒）
+CONNECT_MAX = 10  # 窗口内每个来源 IP 允许的 connect 次数（9 位码防爆破）
+
+
+class TokenBucket:
+    """按字节计费的令牌桶，给中继做带宽上限（0 = 不限速）。
+
+    按 1 秒的突发容量起步：既能扛住关键帧那种瞬时尖峰，又不会让长时间
+    下载把整条线路占满。``allow()`` 接受显式的 ``now``，方便单测。
+    """
+
+    def __init__(self, mbps: float, burst_sec: float = 1.0) -> None:
+        self.mbps = max(0.0, float(mbps))
+        self.rate = self.mbps * 125_000.0  # bytes/s
+        self.capacity = max(self.rate * burst_sec, 8192.0)
+        self.tokens = self.capacity
+        self.last = 0.0  # 首次 allow() 时按需补充，允许调用方注入时钟
+        self.passed = 0
+        self.dropped = 0
+        self.bytes = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.rate > 0.0
+
+    def allow(self, size: int, now: float | None = None) -> bool:
+        if not self.enabled:
+            self.passed += 1
+            self.bytes += size
+            return True
+        now = time.monotonic() if now is None else now
+        if now > self.last:
+            self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+            self.last = now
+        if self.tokens < size:
+            self.dropped += 1
+            return False
+        self.tokens -= size
+        self.passed += 1
+        self.bytes += size
+        return True
 
 
 @dataclass
@@ -55,6 +97,7 @@ class Pair:
     agent_tag: int
     viewer_tag: int
     created: float = field(default_factory=time.monotonic)
+    bucket: TokenBucket = field(default_factory=lambda: TokenBucket(0.0))
 
 
 class RelayProtocol(asyncio.DatagramProtocol):
@@ -87,10 +130,25 @@ class RelayProtocol(asyncio.DatagramProtocol):
 
 
 class SignalingServer:
-    def __init__(self, host: str = "0.0.0.0", port: int = 7900, udp_port: int = 7901) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 7900,
+        udp_port: int = 7901,
+        *,
+        token: str = "",
+        relay_mbps: float = 0.0,
+        connect_max: int = CONNECT_MAX,
+        connect_window: float = CONNECT_WINDOW,
+    ) -> None:
         self.host = host
         self.port = port
         self.udp_port = udp_port
+        self.token = token or ""
+        self.relay_mbps = max(0.0, float(relay_mbps))
+        self.connect_max = max(1, int(connect_max))
+        self.connect_window = max(1.0, float(connect_window))
+        self.attempts: dict[str, list[float]] = {}
         self.registry: dict[str, Peer] = {}
         self.pairs: dict[str, Pair] = {}
         self.tag_map: dict[int, Pair] = {}
@@ -153,9 +211,48 @@ class SignalingServer:
             except Exception:
                 pass
 
+    # ------------------------------------------------------- auth / rate limits
+    def _remote_ip(self, peer: Peer) -> str:
+        try:
+            a = peer.writer.get_extra_info("peername")
+            return a[0] if a else "?"
+        except Exception:
+            return "?"
+
+    def _auth(self, peer: Peer, msg: dict, *, close: bool = False) -> bool:
+        """--token 模式下校验握手令牌；未配置 token 时一律放行。"""
+        if not self.token:
+            return True
+        given = str(msg.get("token") or "")
+        if hmac.compare_digest(given, self.token):
+            return True
+        log.warning("bad token from %s (%s)", addr_of(peer), self._remote_ip(peer))
+        peer.send({"t": "error", "reason": "bad_token", "text": "服务器令牌不匹配"})
+        return False
+
+    def _rate_ok(self, ip: str, now: float | None = None) -> bool:
+        """每个来源 IP 在窗口内的 connect 次数上限（挡 9 位码爆破）。"""
+        now = time.monotonic() if now is None else now
+        stamps = [t for t in self.attempts.get(ip, []) if now - t < self.connect_window]
+        if len(stamps) >= self.connect_max:
+            self.attempts[ip] = stamps
+            return False
+        stamps.append(now)
+        self.attempts[ip] = stamps
+        # 顺手清理，免得长跑之后字典无限膨胀
+        if len(self.attempts) > 4096:
+            for key in [k for k, v in self.attempts.items() if not v or now - v[-1] > self.connect_window]:
+                self.attempts.pop(key, None)
+        if len(self.attempts) > 8192:  # 极端情况（大量来源 IP）硬顶，丢最早的
+            for key in list(self.attempts)[: len(self.attempts) - 4096]:
+                self.attempts.pop(key, None)
+        return True
+
     async def _dispatch(self, peer: Peer, msg: dict) -> None:
         kind = msg.get("t")
         if kind == "register":
+            if not self._auth(peer, msg):
+                return
             code = util.normalize_code(str(msg.get("code", "")))
             if not util.code_is_valid(code):
                 peer.send({"t": "error", "reason": "bad_code"})
@@ -172,9 +269,18 @@ class SignalingServer:
                     "code": util.format_code(code),
                     "relay": [self.public_host, self.udp_port],
                     "server_time": int(time.time()),
+                    "token_required": bool(self.token),
+                    "relay_mbps": self.relay_mbps,
                 }
             )
         elif kind == "connect":
+            if not self._auth(peer, msg):
+                return
+            ip = self._remote_ip(peer)
+            if not self._rate_ok(ip):
+                log.warning("connect rate limited ip=%s", ip)
+                peer.send({"t": "error", "reason": "rate_limited", "text": "连接尝试过于频繁，稍后再试"})
+                return
             code = util.normalize_code(str(msg.get("code", "")))
             agent = self.registry.get(util.code_id(code))
             if not agent or not agent.writer:
@@ -190,7 +296,14 @@ class SignalingServer:
             agent.partner = peer
             peer.cands = list(msg.get("cands") or [])
             peer.name = str(msg.get("name", ""))[:64]
-            pair = Pair(sid, agent, peer, secrets.randbits(32) | 1, secrets.randbits(32) | 1)
+            pair = Pair(
+                sid,
+                agent,
+                peer,
+                secrets.randbits(32) | 1,
+                secrets.randbits(32) | 1,
+                bucket=TokenBucket(self.relay_mbps),
+            )
             self.pairs[sid] = pair
             self.tag_map[pair.agent_tag] = pair
             self.tag_map[pair.viewer_tag] = pair
@@ -203,6 +316,7 @@ class SignalingServer:
                     "name": peer.name,
                     "relay": [self.public_host, self.udp_port],
                     "relay_tag": pair.agent_tag,
+                    "relay_mbps": self.relay_mbps,
                 }
             )
             peer.send(
@@ -213,6 +327,7 @@ class SignalingServer:
                     "name": agent.name,
                     "relay": [self.public_host, self.udp_port],
                     "relay_tag": pair.viewer_tag,
+                    "relay_mbps": self.relay_mbps,
                 }
             )
         elif kind == "reconnect":
@@ -245,6 +360,14 @@ class SignalingServer:
             return
         self.tag_map.pop(pair.agent_tag, None)
         self.tag_map.pop(pair.viewer_tag, None)
+        if pair.bucket.dropped or pair.bucket.enabled:
+            log.info(
+                "pair %s relay: %d 包 / %.1f MB, 限速丢包 %d",
+                sid[:8],
+                pair.bucket.passed,
+                pair.bucket.bytes / (1 << 20),
+                pair.bucket.dropped,
+            )
         for p in (pair.agent, pair.viewer):
             p.partner = None
             p.sid = ""
@@ -262,6 +385,8 @@ class SignalingServer:
             dst = pair.agent.udp_addr
         if not dst or not self.relay or not self.relay.transport:
             return
+        if not pair.bucket.allow(len(data)):
+            return  # 超带宽：丢，不排队（视频/声音都是实时的，排队只会更糟）
         try:
             self.relay.transport.sendto(data, dst)
         except Exception:
@@ -281,10 +406,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=os.environ.get("PEERDESK_BIND", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PEERDESK_PORT", "7900")))
     parser.add_argument("--udp-port", type=int, default=int(os.environ.get("PEERDESK_UDP_PORT", "7901")))
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("PEERDESK_TOKEN", ""),
+        help="握手令牌（设了之后 agent/viewer 必须带同一个值）",
+    )
+    parser.add_argument(
+        "--relay-mbps",
+        type=float,
+        default=float(os.environ.get("PEERDESK_RELAY_MBPS", "0")),
+        help="每个会话的中继带宽上限（Mbps，0=不限）",
+    )
+    parser.add_argument("--connect-max", type=int, default=CONNECT_MAX, help="窗口内每 IP 允许的连接尝试次数")
+    parser.add_argument("--connect-window", type=float, default=CONNECT_WINDOW, help="连接尝试计数窗口（秒）")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     util.setup_logging(args.verbose)
-    server = SignalingServer(args.host, args.port, args.udp_port)
+    server = SignalingServer(
+        args.host,
+        args.port,
+        args.udp_port,
+        token=args.token,
+        relay_mbps=args.relay_mbps,
+        connect_max=args.connect_max,
+        connect_window=args.connect_window,
+    )
+    if args.token:
+        log.info("handshake token required (%d chars)", len(args.token))
+    if args.relay_mbps:
+        log.info("relay limited to %.1f Mbps per session", args.relay_mbps)
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:

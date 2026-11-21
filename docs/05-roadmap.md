@@ -2,7 +2,22 @@
 
 按"对使用者价值 / 实现成本"排序。✅ 已实现，🔜 下一版，🧭 中期，🌱 远期。
 
-## 0.3（当前）
+## 0.4（当前）
+
+- ✅ **服务端鉴权**：`--token` / `PEERDESK_TOKEN`，`register` 与 `connect` 都校验
+  （`hmac.compare_digest`），失败回 `{"t":"error","reason":"bad_token"}`；两端都有 `--token`，
+  浏览器连接码面板有令牌输入框（记住在 localStorage）。
+- ✅ **连接频次限制**：`--connect-max`（默认 10）/ `--connect-window`（默认 60 s）按来源 IP 滑动窗口，
+  超限回 `reason=rate_limited`；`attempts` 字典会清过期项并在 8192 条时硬顶丢最早，挡住海量 IP。
+- ✅ **中继限速**：`--relay-mbps` / `PEERDESK_RELAY_MBPS`，每对会话一个令牌桶（1 s 突发）；
+  超出的报文直接丢弃（视频是 UDP 流，丢包由 FEC/NACK 兜）。
+- ✅ **带宽自适应**：服务器把 `relay_mbps` 下发，被控端 `HostSession.set_rate_limit()` 先压 JPEG
+  质量（`FramePacer.set_budget_kb`），仍超就按实测帧大小降帧率（`_effective_fps`）；
+  实测 1.5 Mbps 上限下从"1 帧 / 6 s"变成 4 fps / 44 KB/帧 / 链路 1.51 Mbps。
+- ✅ 119 个单元测试（新增 `tests/test_server.py` 13 个、`tests/test_ratelimit.py` 7 个），
+  `e2e_local --token` / `--bad-token` / `--relay-mbps` 三条负路径也覆盖。
+
+## 0.3（已完成）
 
 - ✅ **声音通道**：WASAPI loopback（纯 ctypes，不装驱动）→ 16 kHz 单声道 → G.711 µ-law，
   20 ms 一帧，帧内带上一帧冗余、0.5 s 静音后自动抑制到 2.5 kbit/s；
@@ -33,7 +48,6 @@
   DPI 感知；该功能必须先做**子进程探测**再启用，否则会连带杀掉主进程。
 - 🔜 持久 DIB + `BitBlt` 抓屏（无新依赖的兜底优化，实测 19.35 ms → 12.30 ms，约 -35%）。
 - 🔜 剪贴板图片/文件（`CF_DIB` → PNG 走文件流）。
-- 🔜 服务端连接码尝试频率限制 + 可选 `--token`（自托管时的最小鉴权）。
 
 ## 0.5 🧭
 

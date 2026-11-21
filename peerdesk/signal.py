@@ -79,6 +79,12 @@ class SignalingClient:
         self.connected = False
 
 
+def token_args(token: str) -> dict:
+    """握手令牌字段：服务器没设 token 时就不带这个键（保持线格式干净）。"""
+    token = (token or "").strip()
+    return {"token": token} if token else {}
+
+
 def cands_of(link: PeerLink) -> list[dict]:
     return [c.as_dict() for c in link.candidate_list()]
 

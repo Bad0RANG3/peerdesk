@@ -99,6 +99,8 @@ class HostSession:
         self.monitors: list[Monitor] = []
         self.current_monitor: Monitor | None = None
         self.pacer = FramePacer(self.settings.quality)
+        self.rate_limit = 0.0  # Mbps，0 = 不限（由信令下发的服务器中继上限决定）
+        self._fps_cap = 0
         self._force_keyframe = True
         self._running = False
         self._upload: dict[str, dict] = {}
@@ -254,10 +256,32 @@ class HostSession:
             now = time.monotonic()
             if now - self._stats_at >= 1.0:
                 self._push_stats(now)
-            target = self.pacer.frame_budget(self.settings.fps)
+            target = self.pacer.frame_budget(self._effective_fps())
             elapsed = time.perf_counter() - t0
             await asyncio.sleep(max(0.0, target - elapsed))
         log.info("capture loop stop")
+
+    def set_rate_limit(self, mbps: float) -> None:
+        """按中继上限自适应：先压质量，再降帧率。0 表示不限制。"""
+        mbps = max(0.0, float(mbps or 0.0))
+        self.rate_limit = mbps
+        if mbps <= 0:
+            self.pacer.set_budget_kb(0)
+            self._fps_cap = 0
+            return
+        per_frame = mbps * 125_000.0 / max(1, self.settings.fps)
+        self.pacer.set_budget_kb(per_frame / 1024.0 * 0.75)
+        self._fps_cap = 0
+        log.info("rate limit %.1f Mbps -> %.1f KB/帧", mbps, self.pacer.target_kb)
+        self.on_event({"t": "notice", "text": f"中继上限 {mbps:g} Mbps，已按此节流"})
+
+    def _effective_fps(self) -> int:
+        fps = max(1, int(self.settings.fps))
+        if self.rate_limit > 0 and self.pacer.last_size:
+            need = self.pacer.last_size * 8.0 * fps / 1_000_000.0
+            if need > self.rate_limit:
+                fps = max(1, int(fps * self.rate_limit / need))
+        return fps
 
     def _grab_once(self):
         cap = thread_capture()
@@ -286,6 +310,8 @@ class HostSession:
                 "quality": self.pacer.quality,
                 "kb": round(self.pacer.last_size / 1024, 1),
                 "enc_ms": round(self.pacer.last_ms, 1),
+                "cap": round(self.rate_limit, 1),
+                "sfps": self._effective_fps(),
             }
         )
         self.on_event({"t": "stats", "fps": round(self._fps, 1), "mbps": round(stats.mbps, 2)})

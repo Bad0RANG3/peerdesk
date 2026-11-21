@@ -31,9 +31,15 @@ def ns(**kw):
     return types.SimpleNamespace(**kw)
 
 
-async def run(relay: bool, seconds: float) -> int:
+async def run(
+    relay: bool,
+    seconds: float,
+    token: str = "",
+    ethernet: float = 0.0,
+    bad_token: bool = False,
+) -> int:
     sig_port, udp_port = 7910, 7911
-    srv = SignalingServer("127.0.0.1", sig_port, udp_port)
+    srv = SignalingServer("127.0.0.1", sig_port, udp_port, token=token, relay_mbps=ethernet)
     asyncio.get_event_loop().create_task(srv.start())
     await asyncio.sleep(0.4)
 
@@ -41,6 +47,7 @@ async def run(relay: bool, seconds: float) -> int:
         ns(
             code=CODE,
             server=f"127.0.0.1:{sig_port}",
+            token=token,
             fps=15,
             width=1280,
             quality=55,
@@ -64,6 +71,7 @@ async def run(relay: bool, seconds: float) -> int:
         ns(
             code=CODE,
             server=f"127.0.0.1:{sig_port}",
+            token=(token + "-wrong") if bad_token else token,
             relay_only=relay,
             web_port=0,
             udp_port=0,
@@ -75,7 +83,7 @@ async def run(relay: bool, seconds: float) -> int:
 
     frames: list[int] = []
     audio: list[bytes] = []
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + (6 if bad_token else 20)
     while time.monotonic() < deadline:
         await asyncio.sleep(0.25)
         session = viewer.session
@@ -103,7 +111,7 @@ async def run(relay: bool, seconds: float) -> int:
             break
 
     started = time.monotonic()
-    while time.monotonic() - started < seconds:
+    while time.monotonic() - started < (1.0 if bad_token else seconds):
         await asyncio.sleep(0.5)
 
     state = viewer.link.state if viewer.link else "none"
@@ -126,9 +134,17 @@ async def run(relay: bool, seconds: float) -> int:
         audio_ok = good >= 20
         audio_detail = f"{len(audio)} 帧（{good} 帧非静音 ≈ {len(audio) * 0.32:.0f} KB / {len(audio) * 0.02:.1f}s）"
 
-    ok = state in ("direct", "relay") and len(frames) >= 10 and audio_ok
+    if bad_token:
+        ok = state not in ("direct", "relay") and not frames
+        print(f"auth check : token 不匹配时被拒绝 (state={state}, frames={len(frames)})")
+    else:
+        ok = state in ("direct", "relay") and len(frames) >= 10 and audio_ok
 
-    print(f"path state : {state}  ({path})  relay={relay}")
+    print(f"path state : {state}  ({path})  relay={relay}  token={'yes' if token else 'no'}")
+    if ethernet:
+        passed = sum(p.bucket.passed for p in srv.pairs.values())
+        dropped = sum(p.bucket.dropped for p in srv.pairs.values())
+        print(f"relay limit: {ethernet} Mbps  令牌桶 通过 {passed} / 丢弃 {dropped}")
     print(f"frames     : {len(frames)} in ~{seconds + 2:.0f}s")
     if frames:
         print(f"frame size : avg {statistics.mean(frames) / 1024:.0f} KB, max {max(frames) / 1024:.0f} KB")
@@ -145,10 +161,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--relay", action="store_true")
     ap.add_argument("--seconds", type=float, default=6.0)
+    ap.add_argument("--token", default="", help="信令令牌（验证 --token 全链路）")
+    ap.add_argument("--relay-mbps", type=float, default=0.0, help="中继限速（0=不限）")
+    ap.add_argument("--bad-token", action="store_true", help="用错误令牌连接，验证被拒")
     args = ap.parse_args()
     os.environ.setdefault("PEERDESK_LOGLEVEL", "WARNING")
     try:
-        return asyncio.run(run(args.relay, args.seconds))
+        return asyncio.run(
+        run(args.relay, args.seconds, args.token, args.relay_mbps, args.bad_token)
+    )
     except KeyboardInterrupt:
         return 130
 

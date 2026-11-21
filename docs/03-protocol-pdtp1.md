@@ -127,7 +127,10 @@ DATA payload = struct "<I"(msg_seq) || body
    - 有同组校验片且只缺 1 片 → 直接 XOR 恢复（`parity ^ 其余片 = 缺失片`）。
    - 否则每 50 ms 对在途帧（≤4 帧）发 NACK，最多带 32 个缺片号；发送端从 10 帧回滚缓存里重传。
 5. 帧超过 **450 ms** 未拼齐即丢弃；若丢的是关键帧，回一条 `keyframe_req` 要新的 IDR。
-6. 发送端每秒推一次 `stats`（fps/Mbps/RTT/质量/编码耗时）。
+6. 发送端每秒推一次 `stats`（fps/Mbps/RTT/质量/编码耗时），近版本另带
+   `cap`（当前生效的带宽上限，Mbps，0=不限）与 `sfps`（限速后实际目标帧率）。
+   受限时顺序是**先降质量、再降帧率**：`FramePacer.target_kb = 上限字节率/fps×0.75`，
+   若实测帧大小仍超，`_effective_fps = fps × 上限/需求`（下限 1）。
 
 ## 5.1 音频流（不可靠、无 FEC、帧内冗余）
 
@@ -187,8 +190,22 @@ server → viewer: {"t":"peer","sid":..,"cands":[agent 候选],"name":..,"relay"
 两端后续增量候选：{"t":"cands","cands":[...]} → 对端收到 "peer_cands"
 保活：{"t":"ping"} → {"t":"pong"}
 关闭：{"t":"bye"} → 对端 "peer_bye"；TCP 断开 → 对端 "peer_gone"
-错误：{"t":"error","reason":"bad_code|offline|unknown_type"}
+错误：{"t":"error","reason":"bad_code|offline|unknown_type|bad_token|rate_limited"}
 ```
+
+**鉴权与限速（可选，默认关闭）**：
+
+- 服务器带 `--token` 时，`register` 与 `connect` 的报文里都要带 `"token":"..."`；
+  缺失或不匹配回 `{"t":"error","reason":"bad_token"}`，随后连接被关闭。比较用
+  `hmac.compare_digest`，不看长度也不提前返回。
+- `registered` / `viewer` / `peer` 回包都带 `"token_required":true|false` 与
+  `"relay_mbps":<float>`（0=不限）。浏览器连接码面板据此提示"该服务器需要令牌"。
+- 连接频次：服务器按来源 IP 做滑动窗口（`--connect-max` 默认 10 次 / `--connect-window` 默认 60 s），
+  超限回 `{"t":"error","reason":"rate_limited"}`。`attempts` 表会清过期项，并在超过 8192 条时
+  丢弃最早的一批，防止被大量来源 IP 撑爆内存。
+- 中继限速：每对会话一个令牌桶（速率 `relay_mbps × 125000` B/s，1 s 突发容量），
+  超出的报文在服务端直接丢弃（视频是流，丢包由 FEC/NACK 兜住）；会话结束时日志打印
+  `通过 N 包 / 限速丢包 M`。
 
 服务端只保存 `code_id = SHA256("peerdesk-id"||0x00||digits)[:32]`，**不落明文连接码**。
 
