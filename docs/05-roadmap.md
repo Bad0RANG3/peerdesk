@@ -4,6 +4,12 @@
 
 ## 0.4（当前）
 
+- ✅ **GDI 抓屏后端**：`GdiCapture` 用常驻 `CreateDIBSection` + `BitBlt`，
+  并且直接用 `StretchBlt` 在驱动层缩放到目标宽高（省掉 Pillow resize）。
+  实测 2560×1440 → 1600×900 的"抓屏+缩放+重排+JPEG q60"从 36.1 ms 降到 22.7 ms，
+  e2e 的 `enc_ms` 从 37 降到 23，帧率 13 fps → 16 fps。`--capture auto|gdi|mss`、
+  `--scale-mode fast|halftone|pil` 可选，`mss` 保留为回退路径。
+
 - ✅ **服务端鉴权**：`--token` / `PEERDESK_TOKEN`，`register` 与 `connect` 都校验
   （`hmac.compare_digest`），失败回 `{"t":"error","reason":"bad_token"}`；两端都有 `--token`，
   浏览器连接码面板有令牌输入框（记住在 localStorage）。
@@ -14,7 +20,8 @@
 - ✅ **带宽自适应**：服务器把 `relay_mbps` 下发，被控端 `HostSession.set_rate_limit()` 先压 JPEG
   质量（`FramePacer.set_budget_kb`），仍超就按实测帧大小降帧率（`_effective_fps`）；
   实测 1.5 Mbps 上限下从"1 帧 / 6 s"变成 4 fps / 44 KB/帧 / 链路 1.51 Mbps。
-- ✅ 119 个单元测试（新增 `tests/test_server.py` 13 个、`tests/test_ratelimit.py` 7 个），
+- ✅ 128 个单元测试（新增 `tests/test_server.py` 13 个、`tests/test_ratelimit.py` 7 个、
+  `tests/test_capture.py` 9 个），
   `e2e_local --token` / `--bad-token` / `--relay-mbps` 三条负路径也覆盖。
 
 ## 0.3（已完成）
@@ -46,7 +53,6 @@
   ⚠️ 本机（RTX 4070 Ti SUPER + 官方驱动）实测 `IDXGIOutput1::DuplicateOutput` 恒定
   access violation（`0xC0000005`，读 `0xFFFF...FF`），已排除设备创建路径 / COM 单元 / GUID 布局 /
   DPI 感知；该功能必须先做**子进程探测**再启用，否则会连带杀掉主进程。
-- 🔜 持久 DIB + `BitBlt` 抓屏（无新依赖的兜底优化，实测 19.35 ms → 12.30 ms，约 -35%）。
 - 🔜 剪贴板图片/文件（`CF_DIB` → PNG 走文件流）。
 
 ## 0.5 🧭

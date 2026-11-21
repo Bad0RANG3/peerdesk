@@ -1,4 +1,12 @@
-"""Screen capture and JPEG encoding (mss + Pillow, no native build step)."""
+"""Screen capture and JPEG encoding.
+
+两套抓屏后端，都用 ctypes + Pillow，不引入需要编译的依赖：
+
+- ``gdi``（默认）：持久 DIB section + ``BitBlt``，每帧只拷像素，2560×1440 约 12 ms；
+- ``mss``：``mss`` 每次抓屏新建上下文，同样分辨率约 19 ms。
+
+选择顺序：环境变量 ``PEERDESK_CAPTURE=gdi|mss`` 强制指定，否则先试 gdi，失败回退 mss。
+"""
 
 from __future__ import annotations
 
@@ -32,6 +40,168 @@ class Monitor:
         }
 
 
+SRCCOPY = 0x00CC0020
+CAPTUREBLT = 0x40000000
+HALFTONE = 4
+COLORONCOLOR = 3
+SCALE_MODES = {"fast": COLORONCOLOR, "halftone": HALFTONE, "pil": 0}
+DIB_RGB_COLORS = 0
+BI_RGB = 0
+MONITORINFOF_PRIMARY = 0x1
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("rcMonitor", _RECT),
+        ("rcWork", _RECT),
+        ("dwFlags", ctypes.c_ulong),
+    ]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_ulong),
+        ("biWidth", ctypes.c_long),
+        ("biHeight", ctypes.c_long),
+        ("biPlanes", ctypes.c_ushort),
+        ("biBitCount", ctypes.c_ushort),
+        ("biCompression", ctypes.c_ulong),
+        ("biSizeImage", ctypes.c_ulong),
+        ("biXPelsPerMeter", ctypes.c_long),
+        ("biYPelsPerMeter", ctypes.c_long),
+        ("biClrUsed", ctypes.c_ulong),
+        ("biClrImportant", ctypes.c_ulong),
+    ]
+
+
+class GdiCapture:
+    """持久 DIB + BitBlt。
+
+    ``BitBlt`` 只认桌面左上角为原点的坐标，所以每个显示器直接用它的
+    ``rcMonitor``；缓冲区按需重建（分辨率变化时）。
+    """
+
+    def __init__(self, scale_mode: int = COLORONCOLOR) -> None:
+        self.scale_mode = scale_mode
+        self.user32 = ctypes.windll.user32
+        self.gdi32 = ctypes.windll.gdi32
+        self._hdc_screen = self.user32.GetDC(None)
+        if not self._hdc_screen:
+            raise OSError("GetDC 失败")
+        self._hdc_mem = self.gdi32.CreateCompatibleDC(self._hdc_screen)
+        if not self._hdc_mem:
+            raise OSError("CreateCompatibleDC 失败")
+        self._hbmp = None
+        self._old = None
+        self._bits = None
+        self._size = (0, 0)
+
+    # ------------------------------------------------------------------ layout
+    def monitors(self) -> list[Monitor]:
+        found: list[tuple[int, int, int, int, bool]] = []
+
+        proto = ctypes.WINFUNCTYPE(
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(_RECT), ctypes.c_double
+        )
+
+        def cb(hmon, hdc, lprc, data):
+            mi = _MONITORINFO()
+            mi.cbSize = ctypes.sizeof(_MONITORINFO)
+            if self.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                r = mi.rcMonitor
+                found.append(
+                    (r.left, r.top, r.right - r.left, r.bottom - r.top, bool(mi.dwFlags & MONITORINFOF_PRIMARY))
+                )
+            return 1
+
+        self.user32.EnumDisplayMonitors(None, None, proto(cb), 0)
+        found.sort(key=lambda t: (t[0], t[1]))  # 左到右
+        return [
+            Monitor(index=i, left=left, top=top, width=width, height=height, primary=primary)
+            for i, (left, top, width, height, primary) in enumerate(found)
+        ]
+
+    # ------------------------------------------------------------------- frames
+    def _ensure_buffer(self, width: int, height: int) -> None:
+        if self._size == (width, height) and self._bits is not None:
+            return
+        self._release_bitmap()
+        bmi = _BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.biWidth = width
+        bmi.biHeight = -height  # 负数 = 自上而下
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = BI_RGB
+        bits = ctypes.c_void_p()
+        self._hbmp = self.gdi32.CreateDIBSection(
+            self._hdc_screen, ctypes.byref(bmi), DIB_RGB_COLORS, ctypes.byref(bits), None, 0
+        )
+        if not self._hbmp or not bits:
+            raise OSError("CreateDIBSection 失败")
+        self._old = self.gdi32.SelectObject(self._hdc_mem, self._hbmp)
+        self._bits = bits
+        self._size = (width, height)
+
+    def _release_bitmap(self) -> None:
+        if self._hbmp and self._hdc_mem:
+            self.gdi32.SelectObject(self._hdc_mem, self._old)
+            self.gdi32.DeleteObject(self._hbmp)
+        self._hbmp = None
+        self._old = None
+        self._bits = None
+        self._size = (0, 0)
+
+    def grab_rgb(self, mon: Monitor, out_width: int = 0) -> tuple[bytes, int, int]:
+        """把显示器画面拷进持久 DIB，返回 BGRA 字节（行宽 = 输出宽度×4）。
+
+        ``out_width`` 非 0 且小于显示器宽度时用 ``StretchBlt`` + HALFTONE 在 GDI 里
+        直接缩放，省掉后面 Pillow 的 resize（实测省 10–15 ms/帧）。
+        """
+        out_w = mon.width if not out_width or out_width >= mon.width else int(out_width)
+        out_h = mon.height if out_w == mon.width else max(2, round(mon.height * out_w / mon.width))
+        self._ensure_buffer(out_w, out_h)
+        if out_w != mon.width:
+            self.gdi32.SetStretchBltMode(self._hdc_mem, self.scale_mode)
+            self.gdi32.SetBrushOrgEx(self._hdc_mem, 0, 0, None)
+            ok = self.gdi32.StretchBlt(
+                self._hdc_mem, 0, 0, out_w, out_h,
+                self._hdc_screen, mon.left, mon.top, mon.width, mon.height,
+                SRCCOPY | CAPTUREBLT,
+            )
+        else:
+            ok = self.gdi32.BitBlt(
+                self._hdc_mem, 0, 0, out_w, out_h, self._hdc_screen, mon.left, mon.top, SRCCOPY | CAPTUREBLT
+            )
+            if not ok:
+                ok = self.gdi32.BitBlt(
+                    self._hdc_mem, 0, 0, out_w, out_h, self._hdc_screen, mon.left, mon.top, SRCCOPY
+                )
+        if not ok:
+            raise OSError("BitBlt/StretchBlt 失败")
+        data = ctypes.string_at(self._bits, out_w * out_h * 4)
+        return data, out_w, out_h
+
+    def close(self) -> None:
+        self._release_bitmap()
+        if self._hdc_mem:
+            self.gdi32.DeleteDC(self._hdc_mem)
+            self._hdc_mem = None
+        if self._hdc_screen:
+            self.user32.ReleaseDC(None, self._hdc_screen)
+            self._hdc_screen = None
+
+
 def _dpi_aware() -> None:
     """Make the process per-monitor DPI aware so mss sees real pixels."""
     try:
@@ -44,19 +214,40 @@ def _dpi_aware() -> None:
 
 
 class ScreenCapture:
-    """Owns one mss instance; not thread safe, create one per thread."""
+    """抓屏器，线程不安全，每个线程一个实例。
+
+    后端选择：``PEERDESK_CAPTURE`` 环境变量可强制 ``gdi`` / ``mss``，默认先 gdi 再回退 mss。
+    """
 
     def __init__(self) -> None:
         _dpi_aware()
-        import mss  # imported lazily so the module stays importable on headless CI
+        import os
 
-        factory = getattr(mss, "MSS", None) or mss.mss
-        self._sct = factory()
+        want = (os.environ.get("PEERDESK_CAPTURE") or "").strip().lower()
+        scale = (os.environ.get("PEERDESK_SCALE") or "fast").strip().lower()
+        self.scale = scale if scale in SCALE_MODES else "fast"
+        self._gdi: GdiCapture | None = None
+        self._sct = None
+        if want in ("", "gdi"):
+            try:
+                self._gdi = GdiCapture(SCALE_MODES[self.scale])
+            except Exception as exc:  # 没有桌面会话 / 权限不足时退回 mss
+                if want == "gdi":
+                    raise
+                log.info("gdi 后端不可用（%s），回退 mss", exc)
+        if self._gdi is None:
+            import mss  # 延迟导入，headless CI 上也能 import 本模块
+
+            factory = getattr(mss, "MSS", None) or mss.mss
+            self._sct = factory()
+        self.backend = "gdi" if self._gdi is not None else "mss"
         self._last_print: tuple[bytes, tuple[int, int, int, int]] | None = None
         self._cursor_visible = True
 
     # ------------------------------------------------------------------ layout
     def monitors(self) -> list[Monitor]:
+        if self._gdi is not None:
+            return self._gdi.monitors()
         out: list[Monitor] = []
         raw = list(self._sct.monitors)
         primary = raw[0] if raw else {"left": 0, "top": 0, "width": 0, "height": 0}
@@ -98,20 +289,16 @@ class ScreenCapture:
         if not mons:
             return None
         mon = mons[max(0, min(monitor, len(mons) - 1))]
-        region = {"left": mon.left, "top": mon.top, "width": mon.width, "height": mon.height}
-        shot = self._sct.grab(region)
-        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        img = self._grab_image(mon, max_width)
 
         if skip_static:
-            probe = img.convert("L").resize((48, 27))
-            data = probe.tobytes()
-            key = (data, (mon.left, mon.top, mon.width, mon.height))
+            key = self.static_key(img, mon)
             if self._last_print == key:
                 return None
             self._last_print = key
 
         width = img.width
-        if max_width and width > max_width:
+        if max_width and width > max_width and (self._gdi is None or self.scale == "pil"):
             height = max(2, int(round(img.height * max_width / width)))
             img = img.resize((max_width, height), Image.BILINEAR)
 
@@ -123,6 +310,21 @@ class ScreenCapture:
         else:
             img.save(buf, format="JPEG", quality=quality, optimize=False, subsampling=2)
         return buf.getvalue(), img.width, img.height, False
+
+    @staticmethod
+    def static_key(img: Image.Image, mon: Monitor) -> tuple[bytes, tuple[int, int, int, int]]:
+        """静帧判定用的指纹：压到 48×27 灰度后再比较。"""
+        probe = img.convert("L").resize((48, 27))
+        return probe.tobytes(), (mon.left, mon.top, mon.width, mon.height)
+
+    def _grab_image(self, mon: Monitor, out_width: int = 0) -> Image.Image:
+        if self._gdi is not None:
+            # scale=pil 时把缩放交给 Pillow（质量最好、最慢）
+            data, width, height = self._gdi.grab_rgb(mon, 0 if self.scale == "pil" else out_width)
+            return Image.frombytes("RGB", (width, height), data, "raw", "BGRX")
+        region = {"left": mon.left, "top": mon.top, "width": mon.width, "height": mon.height}
+        shot = self._sct.grab(region)
+        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     def cursor(self) -> tuple[int, int]:
         pt = ctypes.wintypes.POINT() if hasattr(ctypes, "wintypes") else None
@@ -136,10 +338,18 @@ class ScreenCapture:
             return (0, 0)
 
     def close(self) -> None:
-        try:
-            self._sct.close()
-        except Exception:
-            pass
+        if self._gdi is not None:
+            try:
+                self._gdi.close()
+            except Exception:
+                pass
+            self._gdi = None
+        if self._sct is not None:
+            try:
+                self._sct.close()
+            except Exception:
+                pass
+            self._sct = None
 
 
 class FramePacer:
@@ -175,6 +385,8 @@ def probe_display() -> dict:
     try:
         mons = cap.monitors()
         return {
+            "backend": cap.backend,
+            "scale": cap.scale,
             "monitors": [m.as_dict() for m in mons],
             "width": mons[0].width if mons else 0,
             "height": mons[0].height if mons else 0,
@@ -186,6 +398,7 @@ def probe_display() -> dict:
 if __name__ == "__main__":  # smoke test
     logging.basicConfig(level=logging.INFO)
     cap = ScreenCapture()
+    print(f"backend: {cap.backend}  scale: {cap.scale}")
     for m in cap.monitors():
         print(m)
     t0 = time.perf_counter()

@@ -48,9 +48,10 @@ def main(argv: list[str] | None = None) -> int:
 
         cap = ScreenCapture()
         mons = cap.monitors()
+        backend, scale = cap.backend, cap.scale
         cap.close()
         detail = ", ".join(f"{m.width}x{m.height}" for m in mons)
-        _line(bool(mons), f"显示器 {len(mons)} 块", detail)
+        _line(bool(mons), f"显示器 {len(mons)} 块", f"{detail}  [{backend}/{scale}]")
         failures += 0 if mons else 1
     except Exception as exc:
         _line(False, "屏幕捕获", str(exc))

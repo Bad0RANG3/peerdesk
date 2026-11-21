@@ -244,10 +244,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-audio", action="store_true", help="不采集本机播放的声音（默认采集）")
     parser.add_argument("--audio-test", action="store_true", help="用 440 Hz 合成音代替声卡（联调/无声卡机器）")
     parser.add_argument("--no-skip-static", action="store_true")
+    parser.add_argument(
+        "--scale-mode",
+        choices=("fast", "halftone", "pil"),
+        default=os.environ.get("PEERDESK_SCALE", "fast"),
+        help="抓屏缩放方式：fast=GDI 最近采样（最快）/ halftone=GDI 平滑 / pil=Pillow 双线性（最清晰但最慢）",
+    )
+    parser.add_argument(
+        "--capture",
+        choices=("auto", "gdi", "mss"),
+        default=os.environ.get("PEERDESK_CAPTURE", "auto"),
+        help="抓屏后端（默认 auto：先 GDI 再回退 mss）",
+    )
     parser.add_argument("--open", action="store_true", help="自动打开浏览器面板")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     util.setup_logging(args.verbose, str(util.config_dir() / "agent.log"))
+    # 抓屏后端/缩放方式通过环境变量传给真正建抓屏器的线程
+    if args.capture and args.capture != "auto":
+        os.environ["PEERDESK_CAPTURE"] = args.capture
+    if args.scale_mode:
+        os.environ["PEERDESK_SCALE"] = args.scale_mode
     app = AgentApp(args)
     try:
         asyncio.run(app.start())

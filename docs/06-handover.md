@@ -20,7 +20,7 @@
 | 代码量 | 约 7600 行（`peerdesk/` 6675 + `web/` 1482，加 `tests/` 与文档） |
 | 依赖 | Pillow / numpy / cryptography / mss；**没有** npm / Electron / Qt / ffmpeg / WebRTC 库 |
 | 平台 | Windows 10/11 被控端与控制端（控制端只需浏览器） |
-| 测试 | 119 个单测 + 3 个端到端（直连/中继/浏览器桥）+ 3 条负路径（`--token`/`--bad-token`/`--relay-mbps`） |
+| 测试 | 128 个单测 + 3 个端到端（直连/中继/浏览器桥）+ 3 条负路径（`--token`/`--bad-token`/`--relay-mbps`） |
 
 三端模型：
 
@@ -53,7 +53,7 @@ python -m peerdesk viewer --server 127.0.0.1:7900 --web-port 7702
 自测命令（**改完代码必跑**）：
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 119 tests，约 0.6s
+python -m unittest discover -s tests -p "test_*.py"   # 128 tests，约 0.8s
 python tests/e2e_local.py                            # 直连：约 90 帧 + 267 个声音包/5s
 python tests/e2e_local.py --relay                    # 强制中继（声音同样要过）
 python tests/e2e_web.py                              # 页面+WS+JPEG+声音+"A" 二进制+上传+下载+/dl
@@ -85,7 +85,7 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 | `peerdesk/wire.py` | 268 | 20 字节头、分片、parity、ACK/NACK 载荷、`AUDIO_HDR` |
 | `peerdesk/agent.py` / `viewer.py` | 260 / 206 | 角色编排、信令交互、CLI |
 | `peerdesk/crypto.py` | 214 | X25519 → HKDF → AEAD、重放窗口 |
-| `peerdesk/capture.py` | 196 | mss 抓屏、JPEG、自适应质量、静帧跳过 |
+| `peerdesk/capture.py` | 320 | **抓屏双后端**（GDI 持久 DIB+StretchBlt 默认 / mss 回退）、JPEG、自适应质量 |
 | `peerdesk/websocket.py` | 166 | 手写 RFC6455 服务端（无扩展、8MB 上限） |
 | `peerdesk/stun.py` / `util.py` / `doctor.py` / `signal.py` | 143 / 137 / 139 / 94 | STUN 子集、连接码与路径、自检（含声音）、信令客户端 |
 
@@ -149,7 +149,12 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
     来模拟时钟，真实时钟的初值会让"补充令牌"那段永远不执行，测试里一路 `False`。
 16. **`attempts` 只清过期项挡不住海量新 IP**（每个 IP 一条、都还没过期），必须再加 8192 条硬顶，
     超了丢最早的一批；否则一个扫描器就能把服务端内存顶爆。
-17. **限速要"先降质量、再降帧率"**：直接砍帧率会让画面变幻灯片但单帧依旧超上限；
+17. **GDI 缩放要用 `StretchBlt` 而不是 Pillow**：`StretchBlt` + `SetStretchBltMode`
+    （COLORONCOLOR=3 最快 / HALFTONE=4 平滑但慢 11 ms）在驱动里做缩放，
+    比"全尺寸 BitBlt 后再 `img.resize`"快 10–15 ms；DIB 高度必须用负数才是自上而下。
+18. **`PEERDESK_SCALE=pil` 时别让 GDI 也缩放**：两边都缩会二次失真，
+    `grab_rgb(mon, 0)` 传 0 表示不缩放、交给 Pillow。
+19. **限速要"先降质量、再降帧率"**：直接砍帧率会让画面变幻灯片但单帧依旧超上限；
     正确顺序是 `set_budget_kb(每帧预算×0.75)` 让 `FramePacer` 压质量，仍超再用
     `_effective_fps` 按实测帧大小降帧率。实测 1.5 Mbps 上限：1 帧/6 s → 4 fps / 44 KB。
 
@@ -159,7 +164,7 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 
 | 限制 | 说明 | 出路 |
 | --- | --- | --- |
-| 抓屏 25–40 ms/帧 | GDI `BitBlt` 是瓶颈，不是网络 | 0.4 试 DXGI（本机会崩，需子进程探测）；兜底做持久 DIB（-35%） |
+| 抓屏 22–24 ms/帧 | GDI `BitBlt` 是瓶颈，不是网络（已用持久 DIB + `StretchBlt` 从 37 ms 优化到 23 ms） | 0.5 试 DXGI（本机会崩，需子进程探测） |
 | MJPEG 码率高 | 1600×900 约 6.6 Mbps | 0.5 上 H.264 |
 | 声音是 G.711 µ-law | 人声清楚、音乐发毛，128 kbit/s | 0.5 评估 Opus 双栈 |
 | 无虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦 `SendInput` | 0.3 / 0.4（需驱动签名） |
@@ -224,7 +229,7 @@ gh run watch     # 或 gh run list --limit 3
 
 - [x] 仓库公开、README/文档/许可证齐全、CI 通过
 - [x] 三端可跑、直连与中继都验证过、双向文件传输可用
-- [x] 单测 119 个、端到端 3 套（均验证声音）、`doctor` 自检
+- [x] 单测 128 个、端到端 3 套（均验证声音）、`doctor` 自检
 - [x] 服务端 `--token` / `--connect-max` / `--relay-mbps` 与负路径 e2e（错误令牌必须被拒）
 - [x] 声音通道：WASAPI loopback → G.711 µ-law → WebAudio，直连/中继/浏览器桥全部实测
 - [x] 逆向报告留存（`docs/01`），证据来自本机安装目录 strings + 运行期抓包，不含官方代码/资源

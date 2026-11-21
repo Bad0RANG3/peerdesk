@@ -97,7 +97,7 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 | 报文/分片/FEC | `peerdesk/wire.py` | 20 字节头、VIDEO_FRAG/PARITY/ACK/NACK、`FragmentAssembler` |
 | 加密 | `peerdesk/crypto.py` | X25519 → HKDF → AEAD，nonce=`(direction, seq)`，重放窗口 2048 |
 | 传输 | `peerdesk/transport.py` | `PeerLink` 状态机、`ReliableStream`、`VideoSender/Receiver`、中继封装 |
-| 抓屏/编码 | `peerdesk/capture.py` | mss + Pillow，`FramePacer` 按帧大小调质量 |
+| 抓屏/编码 | `peerdesk/capture.py` | GDI 持久 DIB + `BitBlt`/`StretchBlt`（回退 mss）+ Pillow JPEG，`FramePacer` 按帧大小调质量 |
 | 声音 | `peerdesk/audio.py` | WASAPI loopback（纯 ctypes）→ 重采样 → G.711 µ-law，`AudioPump` 定拍送帧 |
 | 输入 | `peerdesk/wininput.py` | `SendInput`，虚拟桌面归一化，剪贴板读写与监视 |
 | 会话 | `peerdesk/session.py` | `HostSession` / `ViewerSession`，控制消息分发 |
@@ -109,7 +109,7 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 119 个单元测试
+python -m unittest discover -s tests -p "test_*.py"   # 128 个单元测试
 python tests/e2e_local.py                            # 进程内端到端（直连，含声音 267 帧/5 s）
 python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
 python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 声音 + 上传/下载
@@ -118,7 +118,8 @@ python tests/e2e_local.py --token s3cret --bad-token # 负路径：错误令牌�
 python tests/e2e_local.py --relay --relay-mbps 1.5   # 中继限速 + 被控端带宽自适应
 ```
 
-本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13.5–15.7 fps / 6.6 Mbps / RTT 0.4–2 ms**，
+本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13–16 fps / 6.5 Mbps / RTT 0.4–2.6 ms，
+单帧抓屏+缩放+编码 23 ms（GDI 后端；mss 后端 37 ms）**，
 声音另占 128 kbit/s（静音时自动掉到 2.5 kbit/s），中继模式功能等价。瓶颈是抓屏+JPEG（约 30–40 ms/帧），不是网络。
 
 ## 文档

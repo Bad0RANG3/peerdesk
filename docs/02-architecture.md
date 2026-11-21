@@ -42,7 +42,7 @@ PeerDesk（对端桌面）是一个**纯 Python 3.11+** 的 Windows 远程桌面
 | `signal.py` | 94 | 信令客户端（TCP JSON Lines） | `SignalingClient` |
 | `server.py` | 446 | 信令服务器 + UDP 中继 + STUN 响应 | `SignalingServer`、`Peer`、`Pair` |
 | `session.py` | 624 | 会话层：抓屏循环、控制消息分发、输入注入、文件接收、剪贴板 | `HostSession`、`ViewerSession`、`VideoSettings` |
-| `capture.py` | 196 | mss 抓屏 + JPEG 编码 + 自适应质量 + 静帧跳过 | `ScreenCapture`、`FramePacer` |
+| `capture.py` | 320 | GDI 持久 DIB + `BitBlt`/`StretchBlt` 抓屏（回退 mss）+ JPEG 编码 + 自适应质量 + 静帧跳过 | `ScreenCapture`、`GdiCapture`、`FramePacer` |
 | `audio.py` | 640 | WASAPI loopback（ctypes COM）→ 重采样 → G.711 µ-law，静音抑制 | `LoopbackCapture`、`LoopbackSource`、`AudioPump`、`MonoResampler` |
 | `wininput.py` | 327 | `SendInput` 键鼠注入、虚拟桌面归一化、剪贴板读写 | `InputInjector`、`ClipboardWatcher` |
 | `websocket.py` | 166 | 最小 RFC6455 服务端（文本/二进制/分片/ping-pong） | `WSConnection` |
@@ -77,6 +77,22 @@ AudioPump 线程 (20 ms 定拍)                事件循环                浏�
 - **静音抑制**：连续 0.5 s 纯静音后只每 25 帧发一个心跳帧（约 2.5 kbit/s），桌面安静时不白烧带宽。
 - 采集线程拥有自己的 COM 单元（WASAPI 要求），跨线程只经 `loop.call_soon_threadsafe`。
 - 浏览器用 `AudioContext` 直接把 µ-law 展开成 `Float32Array`，无需 WASM 或第三方库。
+
+### 3.0.1 抓屏后端（GDI vs mss）
+
+```
+GdiCapture（默认）                        mss（回退）
+  GetDC(NULL) 常驻                       每次 grab 新建上下文
+  CreateDIBSection 分配一次，跨帧复用      内部同样 BitBlt 到自建 DIB
+  BitBlt(SRCCOPY|CAPTUREBLT) → 全尺寸     ── 结构与 GDI 相同，但多一层封装/拷贝
+  StretchBlt + SetStretchBltMode → 目标尺寸（GDI 里缩放，省掉 Pillow resize）
+  ctypes.string_at → Image.frombytes("RGB", ..., "raw", "BGRX")
+```
+
+- 缩放模式 `PEERDESK_SCALE`（或 `--scale-mode`）：`fast`（COLORONCOLOR，最快）、
+  `halftone`（平滑，慢约 11 ms）、`pil`（把缩放交回 Pillow，最清晰但最慢）。
+- 后端选择 `PEERDESK_CAPTURE`（或 `--capture`）：`auto` 先 GDI 再回退 mss。
+- 实测（2560×1440 → 1600×900，JPEG q60，含 `Image.frombytes`）：GDI 22.7 ms，mss 36.1 ms。
 
 ### 3.1 视频（agent → viewer）
 
@@ -149,18 +165,20 @@ idle ──begin_handshake()──▶ punching ──收到对端 HELLO/PUNCH─
 
 | 场景 | 结果 |
 | --- | --- |
-| 抓屏（2560×1440，mss） | 22–28 ms |
-| `Image.frombytes` | 10–11 ms |
-| JPEG q60 编码 | 4.7 ms（首帧 57.9 ms 预热），产物 194 KB |
-| 端到端（直连，1600×900，fps=20） | ~13.5–15.7 fps，6.6 Mbps，RTT 0.3–2 ms，单帧 70–80 KB |
+| 抓屏（2560×1440 全尺寸） | BitBlt(DIB) 18.2 ms · mss 18.1 ms（两者都在驱动层花同样的时间） |
+| 抓屏 + 缩放（GDI `StretchBlt`，1600×900） | 12–14 ms（缩放发生在显存/驱动路径，不进 Python） |
+| 抓屏 + 缩放 + `frombytes` + JPEG q60 | **GDI 22.7 ms** vs mss 36.1 ms |
+| `Image.frombytes` | 3.2 ms（只做 BGRX→RGB 重排） |
+| 端到端（直连，1600×900，fps=20） | ~13–16 fps，6.5 Mbps，RTT 0.4–2.6 ms，单帧 86–103 KB，`enc_ms` 23–24（mss 后端 37） |
 | 端到端（强制中继） | ~14 fps，6.6 Mbps，功能等价 |
 | 本机回环 Web 桥 | 1024×576 JPEG 26–28 KB/帧，控制通道 `pending=0` |
 | 声音（直连，合成音） | 267 帧 / 5.3 s（20 ms/帧，0 丢帧），85 KB ≈ 128 kbit/s |
 | 声音（强制中继） | 214 帧 / 4.3 s，68 KB ≈ 128 kbit/s，功能等价 |
 | 声音（loopback 实测） | 48 kHz 立体声混音 → 16 kHz 单声道，1 s 抓满 16000 采样，rms 8293（真实扬声器输出） |
 
-瓶颈是**抓屏 + JPEG 编码**（串行 30–40 ms），不是网络。若要用满 60 fps，需要
-DXGI Desktop Duplication 或硬件 MJPEG 编码器（见路线图）。
+瓶颈仍是**抓屏 + JPEG 编码**（串行 22–24 ms），不是网络。GDI 后端已经把 Python 侧的
+缩放/重排压到最小，再往下只剩 DXGI Desktop Duplication（脏矩形 + GPU 共享纹理）
+或硬件 MJPEG 编码器（见路线图）。
 
 ## 7. 已知限制
 
