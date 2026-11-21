@@ -4,6 +4,7 @@
   const $ = (id) => document.getElementById(id);
   let ws = null;
   let state = {};
+  let lastLink = "";   // 上一次链路状态，用于去重（打洞期间会反复推）
 
   function fmtCode(v) {
     const d = (v || "").replace(/\D/g, "");
@@ -65,6 +66,7 @@
         if (msg.name) document.title = `${msg.name} · PeerDesk`;
         fillMonitors(msg.monitors || []);
         applySettings(msg.settings || {});
+        $("codeHint").textContent = "把上面的连接码发给对方，或等对方发起";
         log(`注册成功，连接码 ${fmtCode(msg.code)}`, "ok");
         break;
       case "link":
@@ -72,7 +74,10 @@
         else if (msg.state === "relay") setStatus("live", "控制端已连接 · 中继转发", msg.path);
         else if (msg.state === "punching") setStatus("warn", "控制端接入中 · 打洞", msg.path);
         else if (msg.state === "closed") setStatus("", "未连接控制端");
-        log(`链路：${msg.state}${msg.relay ? "（中继）" : ""}`);
+        if (msg.state !== lastLink) {   // 打洞期间 state 会反复推送，别刷屏
+          lastLink = msg.state;
+          log(`链路：${msg.state}${msg.relay ? "（中继）" : ""}`);
+        }
         break;
       case "stats":
         log(`帧率 ${msg.fps} fps · 码率 ${msg.mbps} Mbps · 质量 ${msg.quality} · ${msg.kb} KB/帧`);
@@ -108,11 +113,26 @@
     });
   }
 
+  /* CLI 可能给了下拉里没有的值（比如 --fps 20），临时补一个选项，
+     否则 select.value = "20" 匹配不到任何 option，界面显示成空白。 */
+  function setSelect(id, value, suffix) {
+    if (value === undefined || value === null) return;
+    const sel = $(id);
+    const text = String(value);
+    if (![...sel.options].some((o) => o.value === text)) {
+      const opt = document.createElement("option");
+      opt.value = text;
+      opt.textContent = text + (suffix || "");
+      sel.appendChild(opt);
+    }
+    sel.value = text;
+  }
+
   function applySettings(s) {
     if (s.monitor !== undefined) $("monitor").value = String(s.monitor);
-    if (s.fps !== undefined) $("fps").value = String(s.fps);
-    if (s.max_width !== undefined) $("width").value = String(s.max_width);
-    if (s.quality !== undefined) $("quality").value = String(s.quality);
+    setSelect("fps", s.fps, " fps");
+    setSelect("width", s.max_width, " px");
+    setSelect("quality", s.quality);
     if (s.clipboard !== undefined) $("allowClip").checked = !!s.clipboard;
     if (s.skip_static !== undefined) $("skipStatic").checked = !!s.skip_static;
     if (s.audio !== undefined) $("allowAudio").checked = !!s.audio;

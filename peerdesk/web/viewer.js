@@ -20,6 +20,7 @@
   let monitors = [];
   let info = {};
   let pendingBitmap = null, decoding = false;
+  let autoConnectPending = false;   // ?code=… 直达时用
 
   /* ------------------------------------------------------------------ utils */
   function toast(text, ms = 1800) {
@@ -78,6 +79,10 @@
       case "ready":
         if (msg.code) $("code").value = fmtCode(msg.code);
         if (msg.token_required && !tokenBox.value) setGate("warn", "该服务器需要令牌");
+        if (autoConnectPending) {          // ?code=…&auto=1 直达：桥就绪后立刻连
+          autoConnectPending = false;
+          $("connect").click();
+        }
         if (msg.relay_mbps) hud.dataset.limit = String(msg.relay_mbps);
         break;
       case "info":
@@ -104,7 +109,7 @@
         break;
       case "stats":
         $("hudFps").textContent =
-          (msg.fps ?? 0) + " fps" + (msg.sfps && msg.sfps !== Math.round(msg.fps) ? " (限 " + msg.sfps + ")" : "");
+          (msg.fps ?? 0) + " fps" + (msg.cap && msg.sfps ? " (限 " + msg.sfps + ")" : "");
         $("hudMbps").textContent =
           (msg.mbps ?? 0) + " Mbps" + (msg.cap ? " / 限 " + msg.cap : "");
         $("hudRtt").textContent = (msg.rtt ?? 0) + " ms";
@@ -557,8 +562,17 @@
   window.addEventListener("resize", () => { if (frameW) scheduleDraw(); });
 
   /* ------------------------------------------------------------------ start */
+  /* URL 直达：?code=604173829&server=1.2.3.4:7900&auto=1
+     带 code 时默认自动连（auto=0 可关掉），方便发一条链接给人。 */
+  const params = new URLSearchParams(location.search);
+  const urlCode = (params.get("code") || params.get("c") || "").replace(/\D/g, "");
+  const urlServer = (params.get("server") || params.get("s") || "").trim();
+  if (urlCode) $("code").value = fmtCode(urlCode);
+  if (urlServer) $("server").value = urlServer;
+  autoConnectPending = urlCode.length === 9 && params.get("auto") !== "0";
+  if (params.get("hud") === "1") hud.style.display = "block";   // 文档截图用
+
   connectWS();
-  $("server").value = location.hostname ? "" : "";
   $("code").focus();
   canvas.focus();
 })();

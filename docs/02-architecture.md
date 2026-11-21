@@ -91,7 +91,9 @@ GdiCapture（默认）                        mss（回退）
 
 - 缩放模式 `PEERDESK_SCALE`（或 `--scale-mode`）：`fast`（COLORONCOLOR，最快）、
   `halftone`（平滑，慢约 11 ms）、`pil`（把缩放交回 Pillow，最清晰但最慢）。
-- 后端选择 `PEERDESK_CAPTURE`（或 `--capture`）：`auto` 先 GDI 再回退 mss。
+- 后端选择 `PEERDESK_CAPTURE`（或 `--capture`）：`auto` 先 GDI 再回退 mss；`test` 走
+  `TestPattern` 合成信号源（渐变底 + 网格 + 时钟 + 移动方块），**完全不碰真实屏幕**，
+  文档截图和 CI 都用它，避免把桌面内容拍进公开仓库。
 - 实测（2560×1440 → 1600×900，JPEG q60，含 `Image.frombytes`）：GDI 22.7 ms，mss 36.1 ms。
 
 ### 3.1 视频（agent → viewer）

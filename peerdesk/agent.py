@@ -252,9 +252,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--capture",
-        choices=("auto", "gdi", "mss"),
+        choices=("auto", "gdi", "mss", "test"),
         default=os.environ.get("PEERDESK_CAPTURE", "auto"),
-        help="抓屏后端（默认 auto：先 GDI 再回退 mss）",
+        help="抓屏后端（auto：先 GDI 再回退 mss；test：合成画面，不读真实屏幕，给 CI/演示用）",
     )
     parser.add_argument("--open", action="store_true", help="自动打开浏览器面板")
     parser.add_argument("-v", "--verbose", action="store_true")

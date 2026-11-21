@@ -256,6 +256,28 @@ class InputInjector:
 # --------------------------------------------------------------------------- #
 # clipboard
 # --------------------------------------------------------------------------- #
+# 这些 API 的返回值/参数都是指针或 HANDLE。ctypes 默认 restype 是 c_int，
+# 在 64 位进程里会把句柄截成 32 位 -> GlobalLock 时直接 access violation
+# （现象：一连接上被控端，采集线程就崩掉，画面全黑）。必须显式声明。
+user32.OpenClipboard.argtypes = (wt.HWND,)
+user32.OpenClipboard.restype = wt.BOOL
+user32.CloseClipboard.restype = wt.BOOL
+user32.EmptyClipboard.restype = wt.BOOL
+user32.IsClipboardFormatAvailable.argtypes = (wt.UINT,)
+user32.IsClipboardFormatAvailable.restype = wt.BOOL
+user32.GetClipboardData.argtypes = (wt.UINT,)
+user32.GetClipboardData.restype = wt.HANDLE
+user32.SetClipboardData.argtypes = (wt.UINT, wt.HANDLE)
+user32.SetClipboardData.restype = wt.HANDLE
+user32.GetClipboardSequenceNumber.restype = wt.DWORD
+kernel32.GlobalAlloc.argtypes = (wt.UINT, ctypes.c_size_t)
+kernel32.GlobalAlloc.restype = wt.HANDLE
+kernel32.GlobalLock.argtypes = (wt.HANDLE,)
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = (wt.HANDLE,)
+kernel32.GlobalUnlock.restype = wt.BOOL
+
+
 def _open_clipboard(retries: int = 12) -> bool:
     for _ in range(retries):
         if user32.OpenClipboard(None):
@@ -277,7 +299,11 @@ def get_clipboard_text() -> str:
         if not ptr:
             return ""
         try:
-            return ctypes.wstring_at(ptr)
+            try:
+                return ctypes.wstring_at(ptr)
+            except (OSError, ValueError):
+                # 剪贴板里的数据不是合法 UTF-16（别的程序塞了怪东西）时别让调用方崩
+                return ""
         finally:
             kernel32.GlobalUnlock(handle)
     finally:

@@ -13,8 +13,12 @@
 
 ![viewer 会话页](docs/screenshot-viewer.png)
 
-> 上面是本机回环自测：viewer 显示的就是 agent 那台机器的桌面（所以画面里能看到它自己）。
-> HUD 实时读数 `P2P / 1600×900 @ 1264×805 / 15.7 fps / 6.67 Mbps / 0.4 ms`。
+> 上面是本机回环自测（server + agent + viewer 三进程都在这一台机器上），画面来自
+> `agent --capture test` 的**合成信号源**，不读取真实屏幕——所以仓库里的截图不会泄露任何
+> 桌面内容。HUD 实时读数 `P2P / 1600×900 @ 1280×800 / 16.8 fps / 6.66 Mbps / 0.5 ms`。
+>
+> 也可以直接用链接连：`http://127.0.0.1:7702/?code=604173829&server=127.0.0.1:7900&auto=1`
+> （带 `code` 就自动连，`auto=0` 只填不连，`hud=1` 顺便打开 HUD）。
 
 ---
 
@@ -37,7 +41,10 @@
 - **控制**：独立可靠流（累积 ACK + 64 位位图 + RTO 退避），键鼠/文本/剪贴板/文件/画质/显示器切换
 - **双向文件传输**：控制端拖拽即上传（浏览器→被控端），被控端面板填路径即可推给控制端（经 `/dl` 下载）
 - **多显示器**、静帧跳过、绝对坐标注入、Unicode 文本输入、`Ctrl+Alt+Del`
-- **浏览器 UI**：深色玻璃拟态、悬浮会话工具栏、实时 HUD，无框架无构建步骤
+- **浏览器 UI**：深色玻璃拟态、悬浮会话工具栏、实时 HUD，无框架无构建步骤；
+  支持 URL 直达 `?code=…&auto=1`（发一条链接就能连）
+- **可演示的合成信号源**：`agent --capture test` 画一张测试卡（渐变 + 网格 + 时钟 + 移动方块），
+  不读真实屏幕，文档截图与 CI 都用它
 - **自托管服务端**：TCP 信令 + UDP 中继 + STUN 复用同一个 UDP 端口
 
 ## 快速开始
@@ -95,7 +102,7 @@ dist/peerdesk.exe agent --server 1.2.3.4:7900 --code 604173829
 | `--no-audio` / `--audio-test` | agent | 不传声音 / 用 440 Hz 合成音代替声卡（无声卡联调） |
 | `--relay-only` | agent/viewer | 强制中继（排障、对称 NAT 场景） |
 | `--token` | 全部 | 服务端/客户端共享令牌（服务端设了就必须带） |
-| `--capture auto\|gdi\|mss` | agent | 抓屏后端，默认 `auto`（GDI 优先，失败回退 mss） |
+| `--capture auto\|gdi\|mss\|test` | agent | 抓屏后端，默认 `auto`（GDI 优先，失败回退 mss）；`test` 是合成画面，不读真实屏幕，用于演示/CI |
 | `--scale-mode fast\|halftone\|pil` | agent | 缩放交给谁：GDI 驱动（快）/ 平滑 / Pillow（最慢最锐） |
 | `-v` / `--log FILE` | 全部 | 详细日志 / 写日志文件 |
 
@@ -124,7 +131,7 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 128 个单元测试
+python -m unittest discover -s tests -p "test_*.py"   # 133 个单元测试
 python tests/e2e_local.py                            # 进程内端到端（直连，含声音 267 帧/5 s）
 python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
 python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 声音 + 上传/下载

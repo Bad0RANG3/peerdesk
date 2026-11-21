@@ -106,6 +106,7 @@ class HostSession:
         self._upload: dict[str, dict] = {}
         self._injector = None
         self._clip_watcher = None
+        self._input_failed = False
         self._last_clip = ""
         self._frames = 0
         self._stats_at = time.monotonic()
@@ -236,8 +237,13 @@ class HostSession:
         log.info("capture loop start")
         while self._running and self.link.established:
             t0 = time.perf_counter()
-            if self._injector is None and self.allow_input:
-                self._lazy_input()
+            if self._injector is None and self.allow_input and not self._input_failed:
+                try:
+                    self._lazy_input()
+                except Exception:
+                    # 输入/剪贴板初始化失败不该把采集循环带走（画面会全黑）
+                    self._input_failed = True
+                    log.exception("input init failed, 继续只推画面")
             try:
                 frame = await self._loop.run_in_executor(None, self._grab_once)
             except Exception:
@@ -252,7 +258,10 @@ class HostSession:
                 self._frames += 1
             elif self._force_keyframe:
                 self._force_keyframe = False
-            self._poll_clipboard()
+            try:
+                self._poll_clipboard()
+            except Exception:
+                log.exception("clipboard poll failed")
             now = time.monotonic()
             if now - self._stats_at >= 1.0:
                 self._push_stats(now)
@@ -314,7 +323,16 @@ class HostSession:
                 "sfps": self._effective_fps(),
             }
         )
-        self.on_event({"t": "stats", "fps": round(self._fps, 1), "mbps": round(stats.mbps, 2)})
+        self.on_event(
+            {
+                "t": "stats",
+                "fps": round(self._fps, 1),
+                "mbps": round(stats.mbps, 2),
+                "quality": self.pacer.quality,
+                "kb": round(self.pacer.last_size / 1024, 1),
+                "enc_ms": round(self.pacer.last_ms, 1),
+            }
+        )
 
     def _poll_clipboard(self) -> None:
         if not self.settings.clipboard or self._clip_watcher is None:

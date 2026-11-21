@@ -2,7 +2,7 @@
 
 > 给下一个接手的人（或者三个月后的自己）。目标：**10 分钟内跑起来，1 小时内敢改代码，半天内知道哪些坑已经踩过。**
 
-最后更新：2026-11-22 · 版本 0.5.0 · 提交见 `git log -1`
+最后更新：2026-11-22 · 版本 0.5.1 · 提交见 `git log -1`
 
 ---
 
@@ -16,11 +16,11 @@
 | --- | --- |
 | 仓库 | https://github.com/Bad0RANG3/peerdesk （PUBLIC，默认分支 `main`，Apache-2.0） |
 | 本地路径 | `D:\UU\peerdesk` |
-| 版本 | `peerdesk/__init__.py` → `__version__ = "0.4.0"`（文件传输 0.2，声音 0.3，鉴权/限速 0.4） |
-| 代码量 | 约 7600 行（`peerdesk/` 6675 + `web/` 1482，加 `tests/` 与文档） |
+| 版本 | `peerdesk/__init__.py` → `__version__ = "0.5.1"`（文件传输 0.2，声音 0.3，鉴权/限速 0.4，打包/GDI 0.5，截图与合成源 0.5.1） |
+| 代码量 | 约 7100 行（`peerdesk/` 5575 + `web/` 1517，加 `tests/` 与文档） |
 | 依赖 | Pillow / numpy / cryptography / mss；**没有** npm / Electron / Qt / ffmpeg / WebRTC 库 |
 | 平台 | Windows 10/11 被控端与控制端（控制端只需浏览器） |
-| 测试 | 128 个单测 + 3 个端到端（直连/中继/浏览器桥）+ 3 条负路径（`--token`/`--bad-token`/`--relay-mbps`） |
+| 测试 | 133 个单测 + 4 个端到端（直连/中继/浏览器桥/真 exe）+ 3 条负路径（`--token`/`--bad-token`/`--relay-mbps`） |
 
 三端模型：
 
@@ -53,7 +53,7 @@ python -m peerdesk viewer --server 127.0.0.1:7900 --web-port 7702
 自测命令（**改完代码必跑**）：
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 128 tests，约 0.8s
+python -m unittest discover -s tests -p "test_*.py"   # 133 tests，约 0.8s
 python tests/e2e_local.py                            # 直连：约 90 帧 + 267 个声音包/5s
 python tests/e2e_local.py --relay                    # 强制中继（声音同样要过）
 python tests/e2e_web.py                              # 页面+WS+JPEG+声音+"A" 二进制+上传+下载+/dl
@@ -75,17 +75,17 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 | 文件 | 行数 | 什么时候要看它 |
 | --- | --- | --- |
 | `peerdesk/transport.py` | 875 | **90% 的 bug 在这里**：握手、打洞、中继、可靠流、FEC、统计 |
-| `peerdesk/session.py` | 624 | 抓屏循环、输入分发、剪贴板、双向文件传输、声音起停、带宽自适应 |
+| `peerdesk/session.py` | 642 | 抓屏循环、输入分发、剪贴板、双向文件传输、声音起停、带宽自适应 |
 | `peerdesk/audio.py` | 640 | WASAPI loopback（ctypes COM）、重采样、µ-law、`AudioPump` 定拍 |
-| `peerdesk/web/viewer.js` | 564 | 控制端交互：绘制、鼠标键盘、画质菜单、拖拽上传、WebAudio 播放 |
+| `peerdesk/web/viewer.js` | 578 | 控制端交互：绘制、鼠标键盘、画质菜单、拖拽上传、WebAudio 播放 |
 | `peerdesk/web/style.css` | 499 | 视觉规范（token 在文件顶部 `:root`） |
 | `peerdesk/webui.py` | 393 | 本地 HTTP + WS 桥、Hub 背压丢帧、sticky 重放、`/dl` 下载、声音旁路广播 |
-| `peerdesk/wininput.py` | 327 | `SendInput` 注入、虚拟桌面坐标、剪贴板监视 |
+| `peerdesk/wininput.py` | 353 | `SendInput` 注入、虚拟桌面坐标、剪贴板监视 |
 | `peerdesk/server.py` | 446 | 信令 + UDP 中继（`RLY1` 头 + 配对 tag）+ STUN + 令牌/频次/限速 |
 | `peerdesk/wire.py` | 268 | 20 字节头、分片、parity、ACK/NACK 载荷、`AUDIO_HDR` |
 | `peerdesk/agent.py` / `viewer.py` | 260 / 206 | 角色编排、信令交互、CLI |
 | `peerdesk/crypto.py` | 214 | X25519 → HKDF → AEAD、重放窗口 |
-| `peerdesk/capture.py` | 320 | **抓屏双后端**（GDI 持久 DIB+StretchBlt 默认 / mss 回退）、JPEG、自适应质量 |
+| `peerdesk/capture.py` | 516 | **抓屏双后端**（GDI 持久 DIB+StretchBlt 默认 / mss 回退）、JPEG、自适应质量 |
 | `peerdesk/websocket.py` | 166 | 手写 RFC6455 服务端（无扩展、8MB 上限） |
 | `peerdesk/stun.py` / `util.py` / `doctor.py` / `signal.py` | 143 / 137 / 139 / 94 | STUN 子集、连接码与路径、自检（含声音）、信令客户端 |
 
@@ -157,6 +157,15 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 19. **限速要"先降质量、再降帧率"**：直接砍帧率会让画面变幻灯片但单帧依旧超上限；
     正确顺序是 `set_budget_kb(每帧预算×0.75)` 让 `FramePacer` 压质量，仍超再用
     `_effective_fps` 按实测帧大小降帧率。实测 1.5 Mbps 上限：1 帧/6 s → 4 fps / 44 KB。
+20. **剪贴板 API 必须声明 `restype`**：`GetClipboardData`/`GlobalLock`/`GlobalAlloc`/`SetClipboardData`
+    不声明的话 ctypes 按 `c_int` 返回，64 位进程里句柄被截成低 32 位，
+    `GlobalLock(截断句柄)` 直接 `access violation`（`0xFFFFFFFF8CFB75D0` 这种地址）。
+    曾经的真实现象：**控制端一连上，被控端采集循环就崩，画面全黑、HUD 全是 `—`**。
+    见 `peerdesk/wininput.py` 顶部那段 `argtypes/restype` 和 `tests/test_clipboard.py`。
+21. **采集循环里的"周边设施"必须各自 try/except**：`_lazy_input()`（输入注入 + 剪贴板监视）
+    和 `_poll_clipboard()` 以前裸奔在 `_capture_loop` 里，任何异常都会把整个 task 带走，
+    而 `create_task` 的异常只打一行 `Task exception was never retrieved`，界面上就是"连上了但没画面"。
+    现在失败一次就置 `_input_failed` 并继续推画面。
 
 ---
 
@@ -237,7 +246,20 @@ PyInstaller 单文件 exe + `tests/e2e_exe.py` 黑盒验证。
 - [ ] 真跨机（非回环）验证：需要两台机器 + 一个有公网 IP 或端口映射的 server
 - [x] 打包成 exe：`packaging/*.spec|build.py` → `dist/peerdesk.exe`（33 MB，四端合一），
       `tests/e2e_exe.py` 用真 exe 跑通 relay + 256 帧视频 + 594 帧声音
-- [ ] 截图更新（加入文件传输/中继 HUD 的新图）
+- [x] 截图更新（0.5.1 重截：合成信号源 + HUD + 连接码门页 + 被控端面板）
+
+### 重截文档截图（不会泄露桌面）
+
+```bash
+python scratch/shot_docs.py     # 起 server/agent(--capture test)/viewer + 两个面板，CDP 截图
+```
+
+- 画面来自 `--capture test` 的合成源，**不读真实屏幕**；以前用真桌面截图，把聊天窗口拍进了公开仓库。
+- 截图走 `scratch/shot_cdp.py`（自己实现的最小 RFC6455 + CDP `Page.captureScreenshot`）。
+  `chrome --headless --screenshot` 抓不到画布：要么 load 事件时就截（黑的），要么用
+  `--virtual-time-budget` 快进定时器（`createImageBitmap` 来不及解码，还是黑的）。
+- viewer 支持 URL 直达：`?code=604173829&server=127.0.0.1:7900&auto=1&hud=1`
+  （`auto=0` 只填不连；`hud=1` 打开 HUD），截图脚本就靠它免点击。
 
 ### 打包成 exe（怎么打、为什么这么打）
 

@@ -2,7 +2,24 @@
 
 按"对使用者价值 / 实现成本"排序。✅ 已实现，🔜 下一版，🧭 中期，🌱 远期。
 
-## 0.5（当前）
+## 0.5.1（当前）
+
+- ✅ **合成信号源** `--capture test`：`TestPattern` 画渐变底 + 网格 + 时钟 + 移动方块，
+  **完全不读真实屏幕**。文档截图、演示、CI 都用它——之前的 README 截图是真桌面，
+  把人家的聊天窗口拍进了公开仓库。
+- ✅ **URL 直达** `?code=<9位>&server=<host:port>&auto=1&hud=1`：一条链接点开就连，
+  截图脚本、给同事发"帮我看一下"都靠它。
+- ✅ **文档截图重截**：viewer 会话页（合成画面 + HUD 读数）、连接码门页、被控端面板。
+  工具是 `scratch/shot_docs.py` + `scratch/shot_cdp.py`（手写最小 CDP 客户端），
+  因为 `chrome --headless --screenshot` 抓不到 `<canvas>` 内容。
+- ✅ **修掉一个真 bug**：剪贴板 API 未声明 `restype`，64 位句柄被截断，`GlobalLock` 直接
+  access violation —— 控制端一连上，被控端采集循环就崩、画面全黑。顺手让采集循环对
+  "输入/剪贴板初始化失败"免疫（置 `_input_failed` 继续推画面）。
+- ✅ 被控端面板：`--fps 20` 这种下拉里没有的值不再显示成空白；统计行补上质量/KB；
+  打洞期间不再刷屏。
+- ✅ 133 个单元测试（新增 `tests/test_clipboard.py` 5 个）。
+
+## 0.5（已完成）
 
 - ✅ **单文件 exe 打包**：`packaging/peerdesk.spec` + `packaging/build.py`，
   PyInstaller onefile 产出 `dist/peerdesk.exe`（33 MB，agent/viewer/server/doctor 四端合一，
@@ -26,7 +43,8 @@
 - ✅ **带宽自适应**：服务器把 `relay_mbps` 下发，被控端 `HostSession.set_rate_limit()` 先压 JPEG
   质量（`FramePacer.set_budget_kb`），仍超就按实测帧大小降帧率（`_effective_fps`）；
   实测 1.5 Mbps 上限下从"1 帧 / 6 s"变成 4 fps / 44 KB/帧 / 链路 1.51 Mbps。
-- ✅ 128 个单元测试（新增 `tests/test_server.py` 13 个、`tests/test_ratelimit.py` 7 个、
+- ✅ 133 个单元测试（新增 `tests/test_server.py` 13 个、`tests/test_ratelimit.py` 7 个、
+  `tests/test_clipboard.py` 5 个（剪贴板 ctypes 签名 + 采集循环容错）、
   `tests/test_capture.py` 9 个），
   `e2e_local --token` / `--bad-token` / `--relay-mbps` 三条负路径也覆盖。
 

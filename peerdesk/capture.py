@@ -5,7 +5,8 @@
 - ``gdi``（默认）：持久 DIB section + ``BitBlt``，每帧只拷像素，2560×1440 约 12 ms；
 - ``mss``：``mss`` 每次抓屏新建上下文，同样分辨率约 19 ms。
 
-选择顺序：环境变量 ``PEERDESK_CAPTURE=gdi|mss`` 强制指定，否则先试 gdi，失败回退 mss。
+选择顺序：环境变量 ``PEERDESK_CAPTURE=gdi|mss|test`` 强制指定，否则先试 gdi，失败回退 mss。
+``test`` 是合成画面（不碰真实屏幕）：CI 没有交互桌面、或者做演示截图/性能对比时用。
 """
 
 from __future__ import annotations
@@ -15,8 +16,9 @@ import io
 import logging
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger("peerdesk.capture")
 
@@ -213,6 +215,104 @@ def _dpi_aware() -> None:
             pass
 
 
+_CJK_FONTS = (
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\Deng.ttf",
+)
+
+
+@lru_cache(maxsize=16)
+def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """优先用系统里的中文字体；实在没有就退回 PIL 内置位图字体（中文会变方框）。"""
+    for path in _CJK_FONTS:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # Pillow < 10.1 没有 size 参数
+        return ImageFont.load_default()
+
+
+class TestPattern:
+    """合成"桌面"：渐变底 + 网格 + 时钟 + 运动方块，完全不读真实屏幕。
+
+    用途：① CI / 服务会话里没有交互桌面时也能跑端到端；② 演示与截图（不泄露真实桌面）；
+    ③ 抓屏链路的性能基线（渲染成本可控，不随桌面内容波动）。
+    """
+
+    def __init__(self, width: int = 1920, height: int = 1080) -> None:
+        self.width = width
+        self.height = height
+        self._t0 = time.monotonic()
+        self._bg: dict[tuple[int, int], Image.Image] = {}
+
+    def monitors(self) -> list[Monitor]:
+        return [Monitor(index=0, left=0, top=0, width=self.width, height=self.height, primary=True)]
+
+    def _background(self, width: int, height: int) -> Image.Image:
+        cached = self._bg.get((width, height))
+        if cached is not None:
+            return cached
+        img = Image.new("RGB", (width, height))
+        px = img.load()
+        for y in range(height):
+            # 深蓝 → 青绿的竖向渐变
+            f = y / max(1, height - 1)
+            r = int(16 + 12 * f)
+            g = int(26 + 90 * f * f)
+            b = int(46 + 70 * (1 - f))
+            for x in range(width):
+                px[x, y] = (r, g, b)
+        draw = ImageDraw.Draw(img)
+        step = max(32, height // 18)
+        for x in range(0, width, step):
+            draw.line([(x, 0), (x, height)], fill=(44, 72, 104), width=1)
+        for y in range(0, height, step):
+            draw.line([(0, y), (width, y)], fill=(44, 72, 104), width=1)
+        self._bg[(width, height)] = img
+        return img
+
+    def render(self, out_width: int = 0) -> Image.Image:
+        width = self.width
+        height = self.height
+        if out_width and out_width < width:
+            height = max(2, int(round(height * out_width / width)))
+            width = out_width
+        img = self._background(width, height).copy()
+        draw = ImageDraw.Draw(img)
+        small = _font(max(11, height // 44))
+        big = _font(max(20, height // 14))
+
+        t = time.monotonic() - self._t0
+        frames = int(t * 20)
+        title = "PeerDesk 测试画面"
+        draw.text((width // 2, height // 2 - height // 12), title, font=big, fill=(235, 245, 255), anchor="mm")
+        lines = [
+            f"{width}x{height} · {t:7.2f}s · 帧 {frames}",
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            "合成信号源（--capture test）：不读取真实屏幕",
+        ]
+        for i, text in enumerate(lines):
+            draw.text(
+                (width // 2, height // 2 + height // 40 + i * (height // 24)),
+                text,
+                font=small,
+                fill=(170, 205, 235),
+                anchor="mm",
+            )
+        # 运动块：4 秒一循环，肉眼 / 静帧检测都能看出画面在动
+        span = max(1, width - width // 8)
+        x = int((t % 4.0) / 4.0 * span)
+        box = (x, height - height // 6, x + width // 8, height - height // 9)
+        draw.rectangle(box, fill=(64, 196, 255))
+        draw.text((box[0] + 6, box[1] + 2), "moving", font=small, fill=(8, 20, 30))
+        return img
+
+
 class ScreenCapture:
     """抓屏器，线程不安全，每个线程一个实例。
 
@@ -228,24 +328,29 @@ class ScreenCapture:
         self.scale = scale if scale in SCALE_MODES else "fast"
         self._gdi: GdiCapture | None = None
         self._sct = None
-        if want in ("", "gdi"):
+        self._test: TestPattern | None = TestPattern() if want in ("test", "pattern") else None
+        if self._test is not None:
+            pass
+        elif want in ("", "gdi"):
             try:
                 self._gdi = GdiCapture(SCALE_MODES[self.scale])
             except Exception as exc:  # 没有桌面会话 / 权限不足时退回 mss
                 if want == "gdi":
                     raise
                 log.info("gdi 后端不可用（%s），回退 mss", exc)
-        if self._gdi is None:
+        if self._gdi is None and self._test is None:
             import mss  # 延迟导入，headless CI 上也能 import 本模块
 
             factory = getattr(mss, "MSS", None) or mss.mss
             self._sct = factory()
-        self.backend = "gdi" if self._gdi is not None else "mss"
+        self.backend = "test" if self._test is not None else ("gdi" if self._gdi is not None else "mss")
         self._last_print: tuple[bytes, tuple[int, int, int, int]] | None = None
         self._cursor_visible = True
 
     # ------------------------------------------------------------------ layout
     def monitors(self) -> list[Monitor]:
+        if self._test is not None:
+            return self._test.monitors()
         if self._gdi is not None:
             return self._gdi.monitors()
         out: list[Monitor] = []
@@ -298,7 +403,7 @@ class ScreenCapture:
             self._last_print = key
 
         width = img.width
-        if max_width and width > max_width and (self._gdi is None or self.scale == "pil"):
+        if max_width and width > max_width and (self._gdi is None or self.scale == "pil") and self._test is None:
             height = max(2, int(round(img.height * max_width / width)))
             img = img.resize((max_width, height), Image.BILINEAR)
 
@@ -318,6 +423,8 @@ class ScreenCapture:
         return probe.tobytes(), (mon.left, mon.top, mon.width, mon.height)
 
     def _grab_image(self, mon: Monitor, out_width: int = 0) -> Image.Image:
+        if self._test is not None:
+            return self._test.render(out_width)
         if self._gdi is not None:
             # scale=pil 时把缩放交给 Pillow（质量最好、最慢）
             data, width, height = self._gdi.grab_rgb(mon, 0 if self.scale == "pil" else out_width)
