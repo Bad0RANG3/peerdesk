@@ -2,7 +2,7 @@
 
 > 给下一个接手的人（或者三个月后的自己）。目标：**10 分钟内跑起来，1 小时内敢改代码，半天内知道哪些坑已经踩过。**
 
-最后更新：2026-11-21 · 版本 0.2.0-dev · 提交见 `git log -1`
+最后更新：2026-11-21 · 版本 0.2.0 · 提交见 `git log -1`
 
 ---
 
@@ -16,11 +16,11 @@
 | --- | --- |
 | 仓库 | https://github.com/Bad0RANG3/peerdesk （PUBLIC，默认分支 `main`，Apache-2.0） |
 | 本地路径 | `D:\UU\peerdesk` |
-| 版本 | `peerdesk/__init__.py` → `__version__ = "0.1.0"`（下一版 0.2.0） |
+| 版本 | `peerdesk/__init__.py` → `__version__ = "0.2.0"`（file transfer 起于 0.2） |
 | 代码量 | 约 6600 行（`peerdesk/` 5300 + `tests/` 800 + `web/` 800 内嵌在 peerdesk 下） |
 | 依赖 | Pillow / numpy / cryptography / mss；**没有** npm / Electron / Qt / ffmpeg / WebRTC 库 |
 | 平台 | Windows 10/11 被控端与控制端（控制端只需浏览器） |
-| 测试 | 85 个单测 + 3 个端到端（直连/中继/浏览器桥，含双向文件传输） |
+| 测试 | 85 个单测 + 3 个端到端（直连/中继/浏览器桥，含双向文件传输与 /dl 下载） |
 
 三端模型：
 
