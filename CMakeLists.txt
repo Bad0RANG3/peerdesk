@@ -56,6 +56,14 @@ target_link_libraries(peerdesk_transport
     PUBLIC peerdesk_core Qt6::Core Qt6::Network
 )
 
+add_library(peerdesk_client STATIC
+    src/client/signaling_client.cpp
+    src/client/signaling_client.h
+)
+target_link_libraries(peerdesk_client
+    PUBLIC peerdesk_transport Qt6::Core Qt6::Network
+)
+
 add_library(peerdesk_session STATIC
     src/session/session_types.cpp
     src/session/session_types.h
@@ -107,12 +115,14 @@ if(MSVC)
     target_compile_options(peerdesk_core PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_server PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_transport PRIVATE /W4 /permissive-)
+    target_compile_options(peerdesk_client PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_session PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_platform PRIVATE /W4 /permissive-)
 else()
     target_compile_options(peerdesk_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_server PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_transport PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(peerdesk_client PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_session PRIVATE -Wall -Wextra -Wpedantic)
     if(TARGET peerdesk_platform)
         target_compile_options(peerdesk_platform PRIVATE -Wall -Wextra -Wpedantic)
@@ -173,6 +183,13 @@ target_link_libraries(peerdesk-session-tests
     PRIVATE peerdesk_session peerdesk_server Qt6::Test
 )
 
+add_executable(peerdesk-signaling-client-tests
+    tests/signaling_client_test.cpp
+)
+target_link_libraries(peerdesk-signaling-client-tests
+    PRIVATE peerdesk_client peerdesk_server Qt6::Test
+)
+
 if(WIN32)
     add_executable(peerdesk-platform-tests
         tests/platform_test.cpp
@@ -190,6 +207,7 @@ add_test(NAME peerdesk-stun COMMAND peerdesk-stun-tests)
 add_test(NAME peerdesk-server COMMAND peerdesk-server-tests)
 add_test(NAME peerdesk-peer-link COMMAND peerdesk-peer-link-tests)
 add_test(NAME peerdesk-session COMMAND peerdesk-session-tests)
+add_test(NAME peerdesk-signaling-client COMMAND peerdesk-signaling-client-tests)
 if(WIN32)
     add_test(NAME peerdesk-platform COMMAND peerdesk-platform-tests)
 endif()
@@ -203,6 +221,7 @@ install(TARGETS
     peerdesk-server-tests
     peerdesk-peer-link-tests
     peerdesk-session-tests
+    peerdesk-signaling-client-tests
     RUNTIME DESTINATION bin)
 
 if(WIN32)
