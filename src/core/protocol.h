@@ -80,6 +80,18 @@ struct VideoFragment {
 [[nodiscard]] QByteArray packVideoFragment(const VideoFragment &fragment);
 [[nodiscard]] std::optional<VideoFragment> unpackVideoFragment(const QByteArray &payload);
 
+struct ParityFragment {
+    quint32 frameId = 0;
+    quint8 groupIndex = 0;
+    quint8 shards = 0;
+    QByteArray data;
+};
+
+inline constexpr int kParityHeaderLen = 8;
+
+[[nodiscard]] QByteArray packParityFragment(const ParityFragment &fragment);
+[[nodiscard]] std::optional<ParityFragment> unpackParityFragment(const QByteArray &payload);
+
 struct AckPayload {
     quint32 cumulative = 0;
     quint64 bitmap = 0;

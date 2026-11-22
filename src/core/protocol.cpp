@@ -150,6 +150,33 @@ std::optional<VideoFragment> unpackVideoFragment(const QByteArray &payload)
     return fragment;
 }
 
+QByteArray packParityFragment(const ParityFragment &fragment)
+{
+    QByteArray payload(kParityHeaderLen + fragment.data.size(), '\0');
+    putU32(payload.data(), fragment.frameId);
+    payload[4] = static_cast<char>(fragment.groupIndex);
+    payload[5] = static_cast<char>(fragment.shards);
+    payload[6] = 0;
+    payload[7] = 0;
+    std::memcpy(payload.data() + kParityHeaderLen,
+                fragment.data.constData(),
+                fragment.data.size());
+    return payload;
+}
+
+std::optional<ParityFragment> unpackParityFragment(const QByteArray &payload)
+{
+    if (payload.size() < kParityHeaderLen) {
+        return std::nullopt;
+    }
+    ParityFragment fragment;
+    fragment.frameId = getU32(payload.constData());
+    fragment.groupIndex = static_cast<quint8>(payload[4]);
+    fragment.shards = static_cast<quint8>(payload[5]);
+    fragment.data = payload.mid(kParityHeaderLen);
+    return fragment;
+}
+
 QByteArray packAck(const AckPayload &ack)
 {
     QByteArray payload(12, '\0');
