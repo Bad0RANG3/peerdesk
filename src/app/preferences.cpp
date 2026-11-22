@@ -212,6 +212,40 @@ void Preferences::setViewer(const ViewerPreferences &preferences)
     settings_->sync();
 }
 
+WindowPreferences Preferences::window() const
+{
+    WindowPreferences preferences;
+    if (!settings_) {
+        return preferences;
+    }
+    const QSettings &settings = *settings_;
+    preferences.geometry = settings
+        .value(QStringLiteral("window/geometry"))
+        .toByteArray();
+    preferences.maximized =
+        settings.value(QStringLiteral("window/maximized"), false).toBool();
+    preferences.closeToTray =
+        settings.value(QStringLiteral("window/closeToTray"), true).toBool();
+    return preferences;
+}
+
+void Preferences::setWindow(const WindowPreferences &preferences)
+{
+    if (!settings_) {
+        return;
+    }
+    settings_->setValue(
+        QStringLiteral("window/geometry"),
+        preferences.geometry);
+    settings_->setValue(
+        QStringLiteral("window/maximized"),
+        preferences.maximized);
+    settings_->setValue(
+        QStringLiteral("window/closeToTray"),
+        preferences.closeToTray);
+    settings_->sync();
+}
+
 void Preferences::sync()
 {
     if (settings_) {

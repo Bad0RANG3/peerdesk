@@ -42,6 +42,7 @@
 - DXGI/GDI 抓屏、多显示器、自适应 JPEG、WASAPI loopback、µ-law 声音。
 - 键鼠、文本/IME、剪贴板、`Ctrl+Alt+Del`、全屏、双向文件传输。
 - Qt 连接页、被控端页、Viewer 会话页、HUD、画质/显示器菜单、拖放和自动隐藏工具栏。
+- 设置对话框、系统托盘、关闭到托盘策略，以及主窗口几何/最大化状态持久化。
 
 ---
 
@@ -119,8 +120,10 @@ Windows GUI 测试程序直接运行不一定会把 QtTest 摘要打印到 Power
 | `src/ui/viewer_page.*` | Viewer 画布、输入合帧、HUD、工具栏、遮罩、拖放、全屏 |
 | `src/ui/app_window.*` | 页面导航、自动进 Viewer、挂断/结束返回连接页 |
 | `src/ui/connection_page.*` / `host_panel.*` | 9 位码入口、被控端设置/统计/日志 |
+| `src/ui/settings_dialog.*` | 服务器/令牌/画质/声音/接收目录/托盘设置与校验 |
+| `src/app/preferences.*` | 主窗口、控制端、被控端偏好持久化 |
 | `apps/peerdesk-client/main.cpp` | 启动参数、平台后端装配、demo 与截图入口 |
-| `tests/ui_test.cpp` | 画布坐标、输入、连接/结束状态、demo 隔离、页面导航 |
+| `tests/ui_test.cpp` | 画布坐标、输入、连接/结束状态、demo 隔离、页面导航、托盘与窗口恢复 |
 
 ### 关键入口
 
@@ -189,6 +192,10 @@ payload 长度、session id。
     避免扫描器顶爆内存。
 16. **demo 必须真正隔离**：`--viewer-demo` 只显示合成帧，键鼠、文件、音频都不发；
     否则截图/演示可能误操作真实桌面。
+17. **关闭到托盘要考虑托盘不可用**：系统没有托盘时不能只隐藏窗口，否则用户既看不到界面
+    也无法退出；应回退为正常关闭并发出退出信号。
+18. **窗口恢复要校验可见性**：保存的几何可能来自已拔掉的显示器；恢复后必须与当前屏幕
+    求交，否则窗口会出现在屏幕外。
 
 ---
 
@@ -205,7 +212,7 @@ payload 长度、session id。
 | 中继限速是开环的 | 没有 RTT/丢包反馈 | GCC/BBR 式拥塞控制 |
 | 信令令牌走明文 TCP | 媒体仍是 AEAD，但令牌可被同链路嗅探 | TLS 反代或 Noise 握手 |
 | 连接码即 PSK | 知道 9 位码即可连，和同类产品模型一致 | 后续增加显式确认 |
-| 没有安装器/托盘/自启 | 目前直接运行两个 exe | 产品化收尾 |
+| 没有安装器/开机自启 | 目前直接运行两个 exe；托盘与关闭到托盘已实现 | 产品化收尾 |
 
 > 合成 Viewer 的 HUD 数字是固定演示值，不是实测性能；文档和验收报告不得混用。
 
@@ -251,7 +258,7 @@ git push origin main
 
 - [x] 原生 Windows MinGW 构建
 - [x] 11 个 CTest 套件（`--repeat until-fail:3` 全通过）
-- [x] `peerdesk-ui` 连续 100 次通过
+- [x] `peerdesk-ui` 20 个用例连续 100 次通过
 - [x] `docs/screenshot-native-viewer.png` 布局检查
 - [x] `git diff --cached --check`
 - [ ] 真实跨机、真实丢包、长时间会话和安装包（本阶段不宣称完成）
@@ -261,7 +268,7 @@ git push origin main
 ## 9. 下一步优先级
 
 1. **真实跨机验收**：两台 Windows + 公网 server；直连、中继、NAT、5% 丢包、长会话。
-2. **产品化收尾**：重连、托盘、设置页、窗口状态、安装包、README/CI 全部切到 C++/Qt。
+2. **产品化收尾**：自动重连、开机自启策略、安装包、README/CI 全部切到 C++/Qt。
 3. **交互细节拉齐**：相对鼠标/游戏模式、工具栏淡入淡出、传输中取消、多文件状态。
 4. **DXGI 增量优化**：脏矩形、GPU 共享纹理，减少整帧 CPU 往返。
 5. **H.264 / Opus**：动态加载，失败回退 MJPEG / G.711。
@@ -278,9 +285,10 @@ git push origin main
 - [x] Qt 连接页、被控端页、Viewer 会话页与统一窗口壳
 - [x] Viewer 等比缩放、坐标映射、键鼠/滚轮/IME、剪贴板、文本、文件拖放、全屏、HUD
 - [x] demo 模式只显示合成画面，禁止真实输入和文件发送
+- [x] 设置对话框、系统托盘、关闭到托盘与窗口状态持久化
 - [x] 逆向报告留存（`docs/01`），证据来自本机 strings + 运行期抓包，不含官方代码/资源
 - [ ] 真跨机（非回环）验证
-- [ ] 安装包、托盘、设置页、窗口状态持久化
+- [ ] Windows 安装包与可配置开机自启
 - [ ] 完整迁移验收后删除全部 Python 文件与旧打包脚本
 
 ### 重截原生文档截图（不会泄露桌面）
@@ -293,10 +301,13 @@ $env:PATH = "C:\Qt\6.8.3\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;$env:PATH"
   --screenshot docs\screenshot-native-host.png
 .\build\cpp\peerdesk-client.exe --capture test --page viewer --viewer-demo `
   --screenshot docs\screenshot-native-viewer.png
+.\build\cpp\peerdesk-client.exe --capture test --page settings `
+  --screenshot docs\screenshot-native-settings.png
 ```
 
 - 使用 `--capture test` / `--viewer-demo` 时不读真实桌面，临时偏好也不会污染用户配置。
 - Viewer 画面来自 `SyntheticScreenSource`；HUD 数字是固定 demo 值，不能当性能报告。
+- 设置截图直接抓取设置对话框；该模式使用临时偏好，不写真实配置。
 - 截图入口等待 450 ms 后抓窗口，不要用系统截图工具抢在首帧前。
 
 > 交接联系人：Bad0RANG3 · 协议疑问先读 `docs/03-protocol-pdtp1.md`，再看

@@ -5,6 +5,7 @@
 #include "session/media_sources.h"
 #include "ui/app_window.h"
 #include "ui/host_panel.h"
+#include "ui/settings_dialog.h"
 #include "ui/ui_theme.h"
 #include "ui/viewer_page.h"
 
@@ -120,6 +121,7 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("PeerDesk"));
     QApplication::setApplicationVersion(QStringLiteral(PEERDESK_VERSION));
     QApplication::setApplicationDisplayName(QStringLiteral("PeerDesk"));
+    QApplication::setQuitOnLastWindowClosed(false);
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
@@ -141,7 +143,7 @@ int main(int argc, char *argv[])
         QStringLiteral("code"));
     const QCommandLineOption pageOption(
         QStringList{QStringLiteral("page")},
-        QStringLiteral("启动页面：remote、host 或 viewer"),
+        QStringLiteral("启动页面：remote、host、viewer 或 settings"),
         QStringLiteral("page"),
         QStringLiteral("remote"));
     const QCommandLineOption viewerDemoOption(
@@ -180,7 +182,8 @@ int main(int argc, char *argv[])
     const QString page = parser.value(pageOption).trimmed().toLower();
     if (page != QStringLiteral("remote")
         && page != QStringLiteral("host")
-        && page != QStringLiteral("viewer")) {
+        && page != QStringLiteral("viewer")
+        && page != QStringLiteral("settings")) {
         printError(QStringLiteral("无效的启动页面：%1").arg(page));
         return 2;
     }
@@ -253,6 +256,11 @@ int main(int argc, char *argv[])
         syntheticAudio || viewerDemo);
 
     pd::ui::AppWindow window(&host, &viewer);
+    QObject::connect(
+        &window,
+        &pd::ui::AppWindow::quitRequested,
+        &application,
+        &QCoreApplication::quit);
     if (isolated) {
         window.hostPanel()->setAutoStart(false);
     }
@@ -301,6 +309,8 @@ int main(int argc, char *argv[])
         window.showHostPage();
     } else if (page == QStringLiteral("viewer")) {
         window.showViewerPage();
+    } else if (page == QStringLiteral("settings")) {
+        window.showSettings();
     }
 
     QObject::connect(
@@ -317,8 +327,14 @@ int main(int argc, char *argv[])
     window.activateWindow();
 
     if (hasScreenshot) {
-        QTimer::singleShot(450, &window, [&window, screenshotPath]() {
-            const QPixmap screenshot = window.grab();
+        QTimer::singleShot(450, &window, [&window, page, screenshotPath]() {
+            QWidget *target = &window;
+            if (page == QStringLiteral("settings")
+                && window.settingsDialog()
+                && window.settingsDialog()->isVisible()) {
+                target = window.settingsDialog();
+            }
+            const QPixmap screenshot = target->grab();
             if (screenshot.isNull()
                 || !screenshot.save(screenshotPath, "PNG")) {
                 printError(QStringLiteral("无法保存截图：%1")

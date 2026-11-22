@@ -111,6 +111,8 @@ add_library(peerdesk_ui STATIC
     src/ui/connection_page.h
     src/ui/host_panel.cpp
     src/ui/host_panel.h
+    src/ui/settings_dialog.cpp
+    src/ui/settings_dialog.h
     src/ui/ui_theme.cpp
     src/ui/ui_theme.h
     src/ui/ui_widgets.cpp

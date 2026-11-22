@@ -395,6 +395,18 @@ void ViewerController::persist()
     preferences_->setViewer(preferences);
 }
 
+void ViewerController::setServer(const QString &server)
+{
+    server_ = server.trimmed();
+    persist();
+}
+
+void ViewerController::setToken(const QString &token)
+{
+    token_ = token.trimmed();
+    persist();
+}
+
 void ViewerController::setState(State state)
 {
     if (state_ == state) {

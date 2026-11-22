@@ -5,26 +5,78 @@
 #include "app/viewer_controller.h"
 #include "ui/connection_page.h"
 #include "ui/host_panel.h"
+#include "ui/settings_dialog.h"
 #include "ui/ui_theme.h"
 #include "ui/viewer_page.h"
 
+#include <QAction>
+#include <QApplication>
+#include <QCloseEvent>
 #include <QEvent>
 #include <QGraphicsOpacityEffect>
+#include <QGuiApplication>
+#include <QHideEvent>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
+#include <QLinearGradient>
+#include <QMenu>
+#include <QMoveEvent>
+#include <QPainter>
+#include <QPixmap>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QStackedWidget>
 #include <QStyle>
+#include <QSystemTrayIcon>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace pd::ui {
 namespace {
 
 constexpr int kHeaderHeight = 72;
+constexpr int kWindowSaveDelayMs = 400;
+
+QIcon makeWindowIcon()
+{
+    QPixmap pixmap(64, 64);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QLinearGradient gradient(0, 0, 0, 64);
+    gradient.setColorAt(0.0, QColor(QStringLiteral("#5b9bff")));
+    gradient.setColorAt(1.0, QColor(QStringLiteral("#3d7bfd")));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(gradient);
+    painter.drawRoundedRect(QRectF(4, 4, 56, 56), 17, 17);
+    QFont font = uiFont(24, QFont::Bold);
+    font.setPixelSize(35);
+    painter.setFont(font);
+    painter.setPen(Qt::white);
+    painter.drawText(
+        QRectF(4, 1, 56, 56),
+        Qt::AlignCenter,
+        QStringLiteral("P"));
+    return QIcon(pixmap);
+}
+
+bool intersectsAnyScreen(const QRect &geometry)
+{
+    const QList<QScreen *> screens = QGuiApplication::screens();
+    return std::any_of(
+        screens.cbegin(),
+        screens.cend(),
+        [&geometry](const QScreen *screen) {
+            return screen
+                && screen->availableGeometry().intersects(geometry);
+        });
+}
 
 void setNavChecked(QPushButton *button, bool checked)
 {
@@ -43,15 +95,26 @@ AppWindow::AppWindow(
     : BackdropWidget(parent)
     , host_(host)
     , viewer_(viewer)
+    , preferences_(
+          host_->preferences() ? host_->preferences()
+                               : viewer_->preferences())
 {
     Q_ASSERT(host_);
     Q_ASSERT(viewer_);
     setObjectName(QStringLiteral("appWindow"));
     setWindowTitle(QStringLiteral("PeerDesk · 对端桌面"));
+    setWindowIcon(makeWindowIcon());
     setMinimumSize(820, 640);
     resize(1080, 840);
     buildUi();
+    buildTray();
     connectSignals();
+    restoringWindow_ = true;
+    restoreWindowState();
+    restoringWindow_ = false;
+    if (windowSaveTimer_) {
+        windowSaveTimer_->stop();
+    }
     updateViewerState();
     updateNavigation();
 }
@@ -122,6 +185,15 @@ void AppWindow::buildUi()
     headerLayout->addWidget(navigation, 0, Qt::AlignVCenter);
 
     headerLayout->addStretch(1);
+    settingsButton_ = new QPushButton(QStringLiteral("设置"), header_);
+    settingsButton_->setObjectName(
+        QStringLiteral("headerSettingsButton"));
+    settingsButton_->setCursor(Qt::PointingHandCursor);
+    settingsButton_->setMinimumHeight(31);
+    settingsButton_->setAccessibleName(QStringLiteral("设置"));
+    settingsButton_->setToolTip(
+        QStringLiteral("连接、画质、文件与窗口设置"));
+    headerLayout->addWidget(settingsButton_, 0, Qt::AlignVCenter);
     privacyPill_ = new PillLabel(header_);
     privacyPill_->setText(QStringLiteral("端到端加密"));
     privacyPill_->setTone(PillLabel::Tone::Green);
@@ -185,8 +257,78 @@ void AppWindow::buildUi()
     connectionPage_->focusCode();
 }
 
+void AppWindow::buildTray()
+{
+    trayMenu_ = new QMenu(this);
+
+    auto *showAction = trayMenu_->addAction(
+        QStringLiteral("显示 PeerDesk"));
+    connect(
+        showAction,
+        &QAction::triggered,
+        this,
+        &AppWindow::showMainWindow);
+
+    auto *remoteAction = trayMenu_->addAction(
+        QStringLiteral("远程协助"));
+    connect(remoteAction, &QAction::triggered, this, [this]() {
+        showMainWindow();
+        showRemotePage();
+    });
+
+    auto *hostAction = trayMenu_->addAction(
+        QStringLiteral("本机被控"));
+    connect(hostAction, &QAction::triggered, this, [this]() {
+        showMainWindow();
+        showHostPage();
+    });
+
+    auto *settingsAction = trayMenu_->addAction(
+        QStringLiteral("设置"));
+    connect(
+        settingsAction,
+        &QAction::triggered,
+        this,
+        &AppWindow::showSettings);
+
+    trayMenu_->addSeparator();
+    auto *quitAction = trayMenu_->addAction(
+        QStringLiteral("退出 PeerDesk"));
+    connect(
+        quitAction,
+        &QAction::triggered,
+        this,
+        &AppWindow::requestQuit);
+
+    trayIcon_ = new QSystemTrayIcon(windowIcon(), this);
+    trayIcon_->setToolTip(QStringLiteral("PeerDesk · 对端桌面"));
+    trayIcon_->setContextMenu(trayMenu_);
+    connect(
+        trayIcon_,
+        &QSystemTrayIcon::activated,
+        this,
+        [this](QSystemTrayIcon::ActivationReason reason) {
+            if (reason == QSystemTrayIcon::Trigger
+                || reason == QSystemTrayIcon::DoubleClick) {
+                showMainWindow();
+            }
+        });
+    if (QSystemTrayIcon::isSystemTrayAvailable()) {
+        trayIcon_->show();
+    }
+}
+
 void AppWindow::connectSignals()
 {
+    windowSaveTimer_ = new QTimer(this);
+    windowSaveTimer_->setSingleShot(true);
+    windowSaveTimer_->setInterval(kWindowSaveDelayMs);
+    connect(
+        windowSaveTimer_,
+        &QTimer::timeout,
+        this,
+        &AppWindow::saveWindowState);
+
     connect(
         remoteNavButton_,
         &QPushButton::clicked,
@@ -202,6 +344,11 @@ void AppWindow::connectSignals()
         &ConnectionPage::hostModeRequested,
         this,
         &AppWindow::showHostPage);
+    connect(
+        settingsButton_,
+        &QPushButton::clicked,
+        this,
+        &AppWindow::showSettings);
     connect(
         connectionPage_,
         &ConnectionPage::connectRequested,
@@ -385,6 +532,165 @@ QWidget *AppWindow::currentPage() const
     return stack_->currentWidget();
 }
 
+bool AppWindow::trayAvailable() const
+{
+    if (trayAvailabilityOverridden_) {
+        return trayAvailableForTesting_;
+    }
+    return QSystemTrayIcon::isSystemTrayAvailable();
+}
+
+void AppWindow::setTrayAvailableForTesting(bool available)
+{
+    trayAvailabilityOverridden_ = true;
+    trayAvailableForTesting_ = available;
+    if (!available && trayIcon_) {
+        trayIcon_->hide();
+    }
+}
+
+void AppWindow::showMainWindow()
+{
+    const bool maximized =
+        wasMaximizedBeforeHide_
+        || windowState().testFlag(Qt::WindowMaximized);
+    if (!isVisible() || isMinimized()) {
+        if (maximized) {
+            showMaximized();
+        } else {
+            showNormal();
+        }
+    }
+    wasMaximizedBeforeHide_ = false;
+    raise();
+    activateWindow();
+}
+
+void AppWindow::showSettings()
+{
+    showMainWindow();
+    ensureSettingsDialog();
+    settingsDialog_->reload();
+    settingsDialog_->show();
+    settingsDialog_->raise();
+    settingsDialog_->activateWindow();
+}
+
+void AppWindow::ensureSettingsDialog()
+{
+    if (settingsDialog_) {
+        return;
+    }
+    settingsDialog_ = new SettingsDialog(
+        host_,
+        viewer_,
+        preferences_,
+        connectionPage_,
+        this);
+    connect(
+        settingsDialog_,
+        &SettingsDialog::settingsSaved,
+        this,
+        [this]() {
+            showToast(QStringLiteral("设置已保存"));
+        });
+}
+
+void AppWindow::saveWindowState()
+{
+    if (!preferences_) {
+        return;
+    }
+    if (windowSaveTimer_) {
+        windowSaveTimer_->stop();
+    }
+
+    WindowPreferences state = preferences_->window();
+    const Qt::WindowStates windowState = this->windowState();
+    if (windowState.testFlag(Qt::WindowFullScreen)) {
+        state.maximized = wasMaximized_;
+    } else if (windowState.testFlag(Qt::WindowMaximized)) {
+        state.maximized = true;
+    } else if (!windowState.testFlag(Qt::WindowMinimized)) {
+        state.geometry = saveGeometry();
+        state.maximized = false;
+    }
+    preferences_->setWindow(state);
+}
+
+void AppWindow::requestQuit()
+{
+    if (quitting_) {
+        return;
+    }
+    quitting_ = true;
+    saveWindowState();
+    if (!close()) {
+        hide();
+    }
+    emit quitRequested();
+}
+
+void AppWindow::restoreWindowState()
+{
+    if (!preferences_) {
+        centerOnPrimaryScreen();
+        return;
+    }
+
+    const WindowPreferences state = preferences_->window();
+    bool restored = false;
+    if (!state.geometry.isEmpty()) {
+        restored = restoreGeometry(state.geometry);
+    }
+    if (!restored || !intersectsAnyScreen(frameGeometry())) {
+        centerOnPrimaryScreen();
+    }
+    if (state.maximized) {
+        setWindowState(windowState() | Qt::WindowMaximized);
+    }
+}
+
+void AppWindow::centerOnPrimaryScreen()
+{
+    QScreen *screen = QGuiApplication::primaryScreen();
+    const QRect available = screen
+        ? screen->availableGeometry()
+        : QRect(0, 0, 1080, 840);
+    resize(
+        std::min(width(), available.width()),
+        std::min(height(), available.height()));
+    const QRect frame = frameGeometry();
+    move(
+        available.center().x() - frame.width() / 2,
+        available.center().y() - frame.height() / 2);
+}
+
+void AppWindow::scheduleWindowStateSave()
+{
+    if (restoringWindow_
+        || !windowSaveTimer_
+        || !isVisible()
+        || isMinimized()
+        || isMaximized()
+        || isFullScreen()) {
+        return;
+    }
+    windowSaveTimer_->start();
+}
+
+bool AppWindow::prepareTray()
+{
+    if (!trayAvailable() || !trayIcon_) {
+        return false;
+    }
+    if (trayAvailabilityOverridden_) {
+        return true;
+    }
+    trayIcon_->show();
+    return trayIcon_->isVisible();
+}
+
 void AppWindow::showToast(const QString &message)
 {
     if (message.trimmed().isEmpty()) {
@@ -507,6 +813,13 @@ void AppWindow::resizeEvent(QResizeEvent *event)
 {
     BackdropWidget::resizeEvent(event);
     positionToast();
+    scheduleWindowStateSave();
+}
+
+void AppWindow::moveEvent(QMoveEvent *event)
+{
+    BackdropWidget::moveEvent(event);
+    scheduleWindowStateSave();
 }
 
 void AppWindow::changeEvent(QEvent *event)
@@ -515,6 +828,51 @@ void AppWindow::changeEvent(QEvent *event)
     if (event->type() == QEvent::WindowStateChange && viewerPage_) {
         syncFullScreenState();
     }
+}
+
+void AppWindow::hideEvent(QHideEvent *event)
+{
+    QWidget::hideEvent(event);
+    if (!quitting_) {
+        saveWindowState();
+    }
+}
+
+void AppWindow::closeEvent(QCloseEvent *event)
+{
+    saveWindowState();
+    if (quitting_) {
+        event->accept();
+        return;
+    }
+
+    const bool closeToTray = preferences_
+        ? preferences_->window().closeToTray
+        : true;
+    if (closeToTray && prepareTray()) {
+        wasMaximizedBeforeHide_ =
+            windowState().testFlag(Qt::WindowMaximized);
+        if (settingsDialog_) {
+            settingsDialog_->hide();
+        }
+        event->ignore();
+        hide();
+        if (!trayAvailabilityOverridden_
+            && !trayHintShown_
+            && QSystemTrayIcon::supportsMessages()) {
+            trayHintShown_ = true;
+            trayIcon_->showMessage(
+                QStringLiteral("PeerDesk 仍在运行"),
+                QStringLiteral("远程协助与本机被控会保持在线，可从托盘恢复或退出。"),
+                QSystemTrayIcon::Information,
+                3500);
+        }
+        return;
+    }
+
+    quitting_ = true;
+    event->accept();
+    emit quitRequested();
 }
 
 } // namespace pd::ui

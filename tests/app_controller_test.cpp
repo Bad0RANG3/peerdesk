@@ -918,6 +918,18 @@ private slots:
         QCOMPARE(viewerValues.qualityId, QStringLiteral("hd"));
         QVERIFY(!viewerValues.audio);
         QCOMPARE(viewerValues.receiveDirectory, viewerReceive.path());
+
+        pd::WindowPreferences windowValues;
+        windowValues.geometry =
+            QByteArray("peerdesk-window-geometry");
+        windowValues.maximized = true;
+        windowValues.closeToTray = false;
+        storedHost.setWindow(windowValues);
+        Preferences reloadedWindow(hostIni);
+        const WindowPreferences restoredWindow = reloadedWindow.window();
+        QCOMPARE(restoredWindow.geometry, windowValues.geometry);
+        QVERIFY(restoredWindow.maximized);
+        QVERIFY(!restoredWindow.closeToTray);
     }
 };
 

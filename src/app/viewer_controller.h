@@ -54,6 +54,8 @@ public:
     [[nodiscard]] QString code() const { return code_; }
     [[nodiscard]] QString server() const { return server_; }
     [[nodiscard]] QString token() const { return token_; }
+    void setServer(const QString &server);
+    void setToken(const QString &token);
     [[nodiscard]] QString peerName() const { return peerName_; }
     [[nodiscard]] bool active() const { return active_; }
     [[nodiscard]] bool streaming() const;

@@ -6,6 +6,7 @@
 #include "ui/code_input.h"
 #include "ui/connection_page.h"
 #include "ui/host_panel.h"
+#include "ui/settings_dialog.h"
 #include "ui/ui_theme.h"
 #include "ui/viewer_page.h"
 
@@ -19,11 +20,14 @@
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScreen>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QToolButton>
 #include <QWheelEvent>
 #include <QtTest>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 
@@ -55,10 +59,16 @@ private slots:
     void viewerDemoRendersNativeSession();
     void viewerEndedClearsFrameAndShowsBack();
     void appWindowKeepsViewerDuringLiveSession();
+    void windowGeometryRoundTrip();
+    void windowGeometryFallsBackWhenOffscreen();
+    void closeWithoutTrayQuits();
+    void closeToTrayHidesAndExplicitQuitWorks();
+    void settingsUpdateControllersAndConnectionPage();
 };
 
 void UiTest::initTestCase()
 {
+    QApplication::setQuitOnLastWindowClosed(false);
     pd::ui::applyTheme(*qApp);
 }
 
@@ -519,6 +529,189 @@ void UiTest::appWindowKeepsViewerDuringLiveSession()
     QCOMPARE(window.currentPage(), window.connectionPage());
     QVERIFY(!window.viewerPage()->sessionLive());
     QVERIFY(!viewer.active());
+}
+
+void UiTest::windowGeometryRoundTrip()
+{
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow first(&host, &viewer);
+    first.hostPanel()->setAutoStart(false);
+    first.resize(820, 680);
+    first.move(24, 24);
+    first.show();
+    QTest::qWait(30);
+    const QSize expectedSize = first.size();
+    const QByteArray expectedGeometry = first.saveGeometry();
+    first.saveWindowState();
+    first.hide();
+
+    const pd::WindowPreferences saved = preferences->window();
+    QCOMPARE(saved.geometry, expectedGeometry);
+    QVERIFY(!saved.maximized);
+
+    pd::ui::AppWindow second(&host, &viewer);
+    second.hostPanel()->setAutoStart(false);
+    QCOMPARE(second.size(), expectedSize);
+    const QRect restored = second.frameGeometry();
+    const QList<QScreen *> screens = QGuiApplication::screens();
+    QVERIFY(std::any_of(
+        screens.cbegin(),
+        screens.cend(),
+        [&restored](const QScreen *screen) {
+            return screen
+                && screen->availableGeometry().intersects(restored);
+        }));
+    second.hide();
+}
+
+void UiTest::windowGeometryFallsBackWhenOffscreen()
+{
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow first(&host, &viewer);
+    first.hostPanel()->setAutoStart(false);
+    first.show();
+    first.move(5000, 5000);
+    first.saveWindowState();
+    first.hide();
+
+    pd::ui::AppWindow second(&host, &viewer);
+    second.hostPanel()->setAutoStart(false);
+    const QRect restored = second.frameGeometry();
+    const QList<QScreen *> screens = QGuiApplication::screens();
+    QVERIFY(std::any_of(
+        screens.cbegin(),
+        screens.cend(),
+        [&restored](const QScreen *screen) {
+            return screen
+                && screen->availableGeometry().intersects(restored);
+        }));
+    second.hide();
+}
+
+void UiTest::closeWithoutTrayQuits()
+{
+    const auto preferences = testPreferences();
+    pd::WindowPreferences windowPreferences = preferences->window();
+    windowPreferences.closeToTray = false;
+    preferences->setWindow(windowPreferences);
+
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.setTrayAvailableForTesting(true);
+    window.show();
+    QTest::qWait(20);
+
+    QSignalSpy quits(&window, &pd::ui::AppWindow::quitRequested);
+    QVERIFY(window.close());
+    QCOMPARE(quits.count(), 1);
+    QVERIFY(!window.isVisible());
+
+    window.requestQuit();
+    QCOMPARE(quits.count(), 1);
+}
+
+void UiTest::closeToTrayHidesAndExplicitQuitWorks()
+{
+    const auto preferences = testPreferences();
+    pd::WindowPreferences windowPreferences = preferences->window();
+    windowPreferences.closeToTray = true;
+    preferences->setWindow(windowPreferences);
+
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.setTrayAvailableForTesting(true);
+    window.show();
+    QTest::qWait(20);
+
+    QSignalSpy quits(&window, &pd::ui::AppWindow::quitRequested);
+    QVERIFY(!window.close());
+    QCOMPARE(quits.count(), 0);
+    QVERIFY(!window.isVisible());
+
+    window.showMainWindow();
+    QVERIFY(window.isVisible());
+
+    window.requestQuit();
+    QCOMPARE(quits.count(), 1);
+    QVERIFY(!window.isVisible());
+    window.requestQuit();
+    QCOMPARE(quits.count(), 1);
+}
+
+void UiTest::settingsUpdateControllersAndConnectionPage()
+{
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.setTrayAvailableForTesting(false);
+    window.show();
+    QTest::qWait(20);
+    window.settingsButton()->click();
+
+    auto *dialog = window.settingsDialog();
+    QVERIFY(dialog);
+    QVERIFY(dialog->isVisible());
+    QSignalSpy saved(dialog, &pd::ui::SettingsDialog::settingsSaved);
+
+    dialog->serverInput()->setText(
+        QStringLiteral("127.0.0.1:not-a-port"));
+    dialog->saveButton()->click();
+    QCOMPARE(saved.count(), 0);
+    QVERIFY(dialog->errorLabel()->isVisible());
+
+    QTemporaryDir receiveDirectory;
+    QVERIFY(receiveDirectory.isValid());
+    const QString server = QStringLiteral("remote.example:8100");
+    const QString token = QStringLiteral("new-secret");
+    dialog->serverInput()->setText(server);
+    dialog->tokenInput()->setText(token);
+    const int qualityIndex =
+        dialog->qualityCombo()->findData(QStringLiteral("hd"));
+    QVERIFY(qualityIndex >= 0);
+    dialog->qualityCombo()->setCurrentIndex(qualityIndex);
+    dialog->audioToggle()->setChecked(false);
+    dialog->receiveDirectoryInput()->setText(receiveDirectory.path());
+    dialog->closeToTrayToggle()->setChecked(false);
+    dialog->saveButton()->click();
+
+    QCOMPARE(saved.count(), 1);
+    QCOMPARE(host.server(), server);
+    QCOMPARE(host.token(), token);
+    QCOMPARE(viewer.server(), server);
+    QCOMPARE(viewer.token(), token);
+    QCOMPARE(viewer.qualityId(), QStringLiteral("hd"));
+    QVERIFY(!viewer.audioEnabled());
+    QCOMPARE(window.connectionPage()->server(), server);
+    QCOMPARE(window.connectionPage()->token(), token);
+    QCOMPARE(preferences->host().receiveDirectory, receiveDirectory.path());
+    QCOMPARE(preferences->viewer().receiveDirectory, receiveDirectory.path());
+    QVERIFY(!preferences->window().closeToTray);
+    QVERIFY(dialog->isHidden());
 }
 
 QTEST_MAIN(UiTest)

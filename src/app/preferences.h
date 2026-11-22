@@ -30,6 +30,12 @@ struct ViewerPreferences {
     QString receiveDirectory;
 };
 
+struct WindowPreferences {
+    QByteArray geometry;
+    bool maximized = false;
+    bool closeToTray = true;
+};
+
 class Preferences final {
 public:
     enum class Mode {
@@ -49,6 +55,8 @@ public:
     void setHost(const HostPreferences &preferences);
     [[nodiscard]] ViewerPreferences viewer() const;
     void setViewer(const ViewerPreferences &preferences);
+    [[nodiscard]] WindowPreferences window() const;
+    void setWindow(const WindowPreferences &preferences);
     void sync();
 
 private:
