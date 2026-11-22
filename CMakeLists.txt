@@ -78,6 +78,23 @@ target_link_libraries(peerdesk_session
 )
 
 if(WIN32)
+    add_library(peerdesk_platform STATIC
+        src/platform/pcm_resampler.cpp
+        src/platform/pcm_resampler.h
+        src/platform/wasapi_audio.cpp
+        src/platform/wasapi_audio.h
+        src/platform/windows_clipboard.cpp
+        src/platform/windows_clipboard.h
+        src/platform/windows_input.cpp
+        src/platform/windows_input.h
+        src/platform/windows_screen_source.cpp
+        src/platform/windows_screen_source.h
+    )
+    target_link_libraries(peerdesk_platform
+        PUBLIC peerdesk_session Qt6::Core Qt6::Gui
+        PRIVATE ole32 uuid
+    )
+
     target_compile_definitions(peerdesk_core PUBLIC
         WIN32_LEAN_AND_MEAN
         NOMINMAX
@@ -91,11 +108,15 @@ if(MSVC)
     target_compile_options(peerdesk_server PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_transport PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_session PRIVATE /W4 /permissive-)
+    target_compile_options(peerdesk_platform PRIVATE /W4 /permissive-)
 else()
     target_compile_options(peerdesk_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_server PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_transport PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_session PRIVATE -Wall -Wextra -Wpedantic)
+    if(TARGET peerdesk_platform)
+        target_compile_options(peerdesk_platform PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 add_executable(peerdesk-server
@@ -152,6 +173,15 @@ target_link_libraries(peerdesk-session-tests
     PRIVATE peerdesk_session peerdesk_server Qt6::Test
 )
 
+if(WIN32)
+    add_executable(peerdesk-platform-tests
+        tests/platform_test.cpp
+    )
+    target_link_libraries(peerdesk-platform-tests
+        PRIVATE peerdesk_platform Qt6::Test
+    )
+endif()
+
 enable_testing()
 add_test(NAME peerdesk-core COMMAND peerdesk-tests)
 add_test(NAME peerdesk-crypto COMMAND peerdesk-crypto-tests)
@@ -160,6 +190,9 @@ add_test(NAME peerdesk-stun COMMAND peerdesk-stun-tests)
 add_test(NAME peerdesk-server COMMAND peerdesk-server-tests)
 add_test(NAME peerdesk-peer-link COMMAND peerdesk-peer-link-tests)
 add_test(NAME peerdesk-session COMMAND peerdesk-session-tests)
+if(WIN32)
+    add_test(NAME peerdesk-platform COMMAND peerdesk-platform-tests)
+endif()
 
 install(TARGETS
     peerdesk-server
@@ -171,3 +204,7 @@ install(TARGETS
     peerdesk-peer-link-tests
     peerdesk-session-tests
     RUNTIME DESTINATION bin)
+
+if(WIN32)
+    install(TARGETS peerdesk-platform-tests RUNTIME DESTINATION bin)
+endif()

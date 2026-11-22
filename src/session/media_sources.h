@@ -60,6 +60,7 @@ public:
     virtual void key(const QString &code, bool down) = 0;
     virtual void typeText(const QString &text) = 0;
     virtual void ctrlAltDelete() = 0;
+    virtual void releaseAll() {}
 };
 
 class IClipboard {

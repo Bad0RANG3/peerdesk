@@ -309,6 +309,9 @@ void HostSession::stopStreaming()
     statsTimer_->stop();
     clipboardTimer_->stop();
     stopAudio();
+    if (inputSink_) {
+        inputSink_->releaseAll();
+    }
     receiver_.abortAll();
     if (fileSender_->active()) {
         fileSender_->cancel();
