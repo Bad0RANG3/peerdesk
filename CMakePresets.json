@@ -17,6 +17,16 @@
         "CMAKE_C_COMPILER": "C:/Qt/Tools/mingw1310_64/bin/gcc.exe",
         "CMAKE_CXX_COMPILER": "C:/Qt/Tools/mingw1310_64/bin/g++.exe"
       }
+    },
+    {
+      "name": "windows-mingw-ci",
+      "displayName": "Windows / Qt 6.8 / MinGW (CI)",
+      "inherits": "windows-mingw",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT_DIR}",
+        "CMAKE_C_COMPILER": "$env{IQTA_TOOLS}/mingw1310_64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "$env{IQTA_TOOLS}/mingw1310_64/bin/g++.exe"
+      }
     }
   ],
   "buildPresets": [
@@ -24,12 +34,24 @@
       "name": "windows-mingw",
       "configurePreset": "windows-mingw",
       "jobs": 8
+    },
+    {
+      "name": "windows-mingw-ci",
+      "configurePreset": "windows-mingw-ci",
+      "jobs": 4
     }
   ],
   "testPresets": [
     {
       "name": "windows-mingw",
       "configurePreset": "windows-mingw",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-mingw-ci",
+      "configurePreset": "windows-mingw-ci",
       "output": {
         "outputOnFailure": true
       }

@@ -14,6 +14,14 @@ logs/
 scratch/
 *.log
 *.session.json
+*.pdb
+*.ilk
+
+# CMake / 本地构建
+CMakeUserPresets.json
+compile_commands.json
+install/
+package/
 
 # 端到端测试抓到的临时帧
 tests/out/
