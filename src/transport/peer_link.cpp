@@ -153,6 +153,62 @@ void PeerLink::close()
     setState(QStringLiteral("closed"));
 }
 
+void PeerLink::resetPeer()
+{
+    if (closing_) {
+        return;
+    }
+    if (established_ && crypto_
+        && socket_->state() == QAbstractSocket::BoundState) {
+        (void)sendPacket(PacketType::Bye, 0, 0, {});
+    }
+
+    peerCandidates_.clear();
+    peerAddress_.clear();
+    peerPort_ = 0;
+
+    relayAddress_.clear();
+    relayPort_ = 0;
+    relayOutTag_ = 0;
+    usingRelay_ = false;
+
+    sessionId_ = randomBytes(4);
+    const QByteArray tagBytes = randomBytes(4);
+    sessionTag_ = qFromBigEndian<quint32>(tagBytes.constData());
+    keyPair_ = KeyPair::generate();
+    crypto_.reset();
+    helloClientBytes_.clear();
+    helloHostBytes_.clear();
+
+    handshakeStarted_ = 0.0;
+    helloSentAt_ = -1e9;
+    lastRxAt_ = 0.0;
+    lastPingAt_ = 0.0;
+    lastAckAt_ = 0.0;
+    established_ = false;
+    remoteSessionId_.clear();
+    remoteDeviceId_.clear();
+
+    videoSender_.reset();
+    videoReceiver_.reset();
+    controlFragments_.reset();
+    controlStream_.reset();
+    pingSequence_ = 0;
+    pingsOut_.clear();
+    keyframeRequests_ = 0;
+
+    sentBytesWindow_.clear();
+    recvBytesWindow_.clear();
+    sentFramesWindow_.clear();
+    recvFramesWindow_.clear();
+    const QString reflexive = stats_.reflexive;
+    stats_ = LinkStats{};
+    stats_.reflexive = reflexive;
+
+    setState(QStringLiteral("idle"));
+    emitLog(QStringLiteral("peer state reset"));
+}
+
 void PeerLink::setPsk(const QByteArray &psk)
 {
     psk_ = psk;

@@ -70,6 +70,7 @@ public:
         const QString &bindAddress = QStringLiteral("0.0.0.0"),
         quint16 port = 0,
         QString *error = nullptr);
+    void resetPeer();
     void close();
 
     void setPsk(const QByteArray &psk);

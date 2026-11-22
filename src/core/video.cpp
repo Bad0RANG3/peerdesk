@@ -89,6 +89,13 @@ QList<WirePacket> VideoSender::retransmit(
     return output;
 }
 
+void VideoSender::reset()
+{
+    frameId_ = 0;
+    cache_.clear();
+    order_.clear();
+}
+
 VideoReceiver::VideoReceiver(
     FrameHandler onFrame, KeyframeHandler onNeedKeyframe, int fecK)
     : onFrame_(std::move(onFrame))
@@ -173,6 +180,13 @@ QList<VideoNack> VideoReceiver::tick(double now)
         }
     }
     return requests;
+}
+
+void VideoReceiver::reset()
+{
+    frames_.clear();
+    lastDelivered_ = 0;
+    lostFrames_ = 0;
 }
 
 void VideoReceiver::deliver(quint32 frameId, FrameState &state)

@@ -138,6 +138,7 @@ public:
 
     [[nodiscard]] QList<QByteArray> split(const QByteArray &body);
     [[nodiscard]] std::optional<QByteArray> feed(const QByteArray &payload);
+    void reset();
 
 private:
     struct Pending {

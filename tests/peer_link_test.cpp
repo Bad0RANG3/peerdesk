@@ -337,6 +337,61 @@ private slots:
         QVERIFY(waitUntil([&]() { return !hostAudio.isEmpty(); }));
         QCOMPARE(hostAudio.constFirst(), audio);
     }
+
+    void peerResetReusesSocketAndReconnects()
+    {
+        const QByteArray psk = QByteArrayLiteral("reset-test-secret");
+        PeerLink host(true, psk);
+        PeerLink client(false, psk);
+        QString error;
+        QVERIFY2(
+            host.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        QVERIFY2(
+            client.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        const quint16 hostPort = host.localPort();
+        const quint16 clientPort = client.localPort();
+
+        const auto connectPeers = [&]() {
+            host.addCandidates(client.localCandidates());
+            client.addCandidates(host.localCandidates());
+            host.beginHandshake();
+            client.beginHandshake();
+            return waitUntil(
+                [&]() { return host.established() && client.established(); });
+        };
+
+        QVERIFY(connectPeers());
+        host.resetPeer();
+        client.resetPeer();
+        QCOMPARE(host.localPort(), hostPort);
+        QCOMPARE(client.localPort(), clientPort);
+        QCOMPARE(host.state(), QStringLiteral("idle"));
+        QCOMPARE(client.state(), QStringLiteral("idle"));
+        QVERIFY(!host.established());
+        QVERIFY(!client.established());
+        QVERIFY(host.peerCandidates().isEmpty());
+        QVERIFY(client.peerCandidates().isEmpty());
+
+        QList<QByteArray> frames;
+        connect(
+            &client,
+            &PeerLink::videoFrameReceived,
+            [&frames](const QByteArray &frame, bool) {
+                frames.append(frame);
+            });
+        QVERIFY(connectPeers());
+        QTRY_COMPARE_WITH_TIMEOUT(
+            host.state(), QStringLiteral("direct"), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            client.state(), QStringLiteral("direct"), 3000);
+
+        const QByteArray jpeg(12000, 'r');
+        host.sendVideo(jpeg, true);
+        QVERIFY(waitUntil([&]() { return !frames.isEmpty(); }));
+        QCOMPARE(frames.constFirst(), jpeg);
+    }
 };
 
 QTEST_GUILESS_MAIN(PeerLinkTest)

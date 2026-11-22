@@ -404,6 +404,13 @@ std::optional<QByteArray> ControlFragments::feed(const QByteArray &payload)
     return result;
 }
 
+void ControlFragments::reset()
+{
+    nextMessageId_ = 0;
+    pending_.clear();
+    pendingOrder_.clear();
+}
+
 QByteArray wrapRelay(quint32 tag, const QByteArray &packet)
 {
     QByteArray datagram(kRelayHeaderLen + packet.size(), '\0');

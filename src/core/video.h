@@ -26,6 +26,7 @@ public:
     [[nodiscard]] QList<WirePacket> build(const QByteArray &data, bool keyframe);
     [[nodiscard]] QList<WirePacket> retransmit(
         quint32 frameId, const QList<quint16> &missing) const;
+    void reset();
 
     [[nodiscard]] quint32 frameId() const { return frameId_; }
 
@@ -65,6 +66,7 @@ public:
         quint8 shards,
         const QByteArray &data);
     [[nodiscard]] QList<VideoNack> tick(double now);
+    void reset();
 
     [[nodiscard]] int lostFrames() const { return lostFrames_; }
     [[nodiscard]] quint32 lastDelivered() const { return lastDelivered_; }

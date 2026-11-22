@@ -77,6 +77,15 @@ void ReliableStream::onData(quint32 seq, const QByteArray &payload)
     }
 }
 
+void ReliableStream::reset()
+{
+    nextSeq_ = 0;
+    pending_.clear();
+    recvNext_ = 0;
+    recvBuffer_.clear();
+    lastAckCum_ = -1;
+}
+
 AckPayload ReliableStream::ackPayload()
 {
     AckPayload ack;

@@ -27,6 +27,7 @@ public:
     void tick(double now);
     void onAck(quint32 cumulative, quint64 bitmap);
     void onData(quint32 seq, const QByteArray &payload);
+    void reset();
 
     [[nodiscard]] AckPayload ackPayload();
     [[nodiscard]] bool needsAck() const;
