@@ -338,9 +338,9 @@ void HostSession::setSettings(const VideoSettings &settings)
         lastFingerprint_.clear();
         lastFingerprintMonitor_ = -1;
     }
-    if (settings_.audio) {
+    if (running_ && settings_.audio) {
         startAudio();
-    } else {
+    } else if (!settings_.audio) {
         stopAudio();
     }
 }
@@ -452,7 +452,7 @@ void HostSession::sendControl(const QJsonObject &message)
 
 void HostSession::startAudio()
 {
-    if (audioRunning_ || !settings_.audio) {
+    if (audioRunning_ || !settings_.audio || !running_) {
         return;
     }
     if (!audioSource_) {
@@ -706,7 +706,7 @@ void HostSession::applySettings(const QJsonObject &message)
     lastFingerprint_.clear();
     lastFingerprintMonitor_ = -1;
 
-    if (settings_.audio) {
+    if (running_ && settings_.audio) {
         startAudio();
     } else {
         stopAudio();

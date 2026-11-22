@@ -85,6 +85,23 @@ target_link_libraries(peerdesk_session
     PUBLIC peerdesk_transport Qt6::Core Qt6::Gui
 )
 
+add_library(peerdesk_app STATIC
+    src/app/quality_presets.cpp
+    src/app/quality_presets.h
+    src/app/preferences.cpp
+    src/app/preferences.h
+    src/app/audio_output.cpp
+    src/app/audio_output.h
+    src/app/host_controller.cpp
+    src/app/host_controller.h
+    src/app/viewer_controller.cpp
+    src/app/viewer_controller.h
+)
+target_link_libraries(peerdesk_app
+    PUBLIC peerdesk_client peerdesk_session
+        Qt6::Core Qt6::Gui Qt6::Multimedia
+)
+
 if(WIN32)
     add_library(peerdesk_platform STATIC
         src/platform/pcm_resampler.cpp
@@ -117,6 +134,7 @@ if(MSVC)
     target_compile_options(peerdesk_transport PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_client PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_session PRIVATE /W4 /permissive-)
+    target_compile_options(peerdesk_app PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_platform PRIVATE /W4 /permissive-)
 else()
     target_compile_options(peerdesk_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -124,6 +142,7 @@ else()
     target_compile_options(peerdesk_transport PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_client PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_session PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(peerdesk_app PRIVATE -Wall -Wextra -Wpedantic)
     if(TARGET peerdesk_platform)
         target_compile_options(peerdesk_platform PRIVATE -Wall -Wextra -Wpedantic)
     endif()
@@ -190,6 +209,13 @@ target_link_libraries(peerdesk-signaling-client-tests
     PRIVATE peerdesk_client peerdesk_server Qt6::Test
 )
 
+add_executable(peerdesk-app-controller-tests
+    tests/app_controller_test.cpp
+)
+target_link_libraries(peerdesk-app-controller-tests
+    PRIVATE peerdesk_app peerdesk_server Qt6::Test
+)
+
 if(WIN32)
     add_executable(peerdesk-platform-tests
         tests/platform_test.cpp
@@ -208,6 +234,7 @@ add_test(NAME peerdesk-server COMMAND peerdesk-server-tests)
 add_test(NAME peerdesk-peer-link COMMAND peerdesk-peer-link-tests)
 add_test(NAME peerdesk-session COMMAND peerdesk-session-tests)
 add_test(NAME peerdesk-signaling-client COMMAND peerdesk-signaling-client-tests)
+add_test(NAME peerdesk-app-controller COMMAND peerdesk-app-controller-tests)
 if(WIN32)
     add_test(NAME peerdesk-platform COMMAND peerdesk-platform-tests)
 endif()
@@ -222,6 +249,7 @@ install(TARGETS
     peerdesk-peer-link-tests
     peerdesk-session-tests
     peerdesk-signaling-client-tests
+    peerdesk-app-controller-tests
     RUNTIME DESTINATION bin)
 
 if(WIN32)

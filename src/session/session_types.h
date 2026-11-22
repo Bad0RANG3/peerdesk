@@ -2,6 +2,7 @@
 
 #include <QJsonObject>
 #include <QList>
+#include <QMetaType>
 #include <QString>
 
 namespace pd {
@@ -62,3 +63,7 @@ private:
 [[nodiscard]] QString defaultReceiveDirectory();
 
 } // namespace pd
+
+Q_DECLARE_METATYPE(pd::MonitorInfo)
+Q_DECLARE_METATYPE(pd::VideoSettings)
+Q_DECLARE_METATYPE(QList<pd::MonitorInfo>)

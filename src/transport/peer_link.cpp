@@ -627,12 +627,15 @@ void PeerLink::handleHello(
     }
 
     helloClientBytes_ = body;
-    remoteSessionId_ = object->value(QStringLiteral("sid")).toString();
+    const QString sid = object->value(QStringLiteral("sid")).toString();
+    const bool newRemoteSession =
+        remoteSessionId_ != sid && !sid.isEmpty();
+    remoteSessionId_ = sid;
     const QString id = object->value(QStringLiteral("id")).toString();
     if (!id.isEmpty()) {
         remoteDeviceId_ = id;
     }
-    if (!hasPeer()) {
+    if (!hasPeer() || !established_ || newRemoteSession) {
         peerAddress_ = sender;
         peerPort_ = port;
     }
@@ -697,12 +700,15 @@ void PeerLink::handleHelloAck(
         return;
     }
 
-    if (!hasPeer()) {
+    const QString sid = object->value(QStringLiteral("sid")).toString();
+    const bool newRemoteSession =
+        remoteSessionId_ != sid && !sid.isEmpty();
+    if (!hasPeer() || (!established_ && !crypto_) || newRemoteSession) {
         peerAddress_ = sender;
         peerPort_ = port;
     }
     helloHostBytes_ = body;
-    remoteSessionId_ = object->value(QStringLiteral("sid")).toString();
+    remoteSessionId_ = sid;
     const QString id = object->value(QStringLiteral("id")).toString();
     if (!id.isEmpty()) {
         remoteDeviceId_ = id;
@@ -750,7 +756,8 @@ void PeerLink::handleEncrypted(
     if (!plain) {
         return;
     }
-    if (!hasPeer() && !usingRelay_) {
+    if (!usingRelay_
+        && (!hasPeer() || peerAddress_ != sender || peerPort_ != port)) {
         peerAddress_ = sender;
         peerPort_ = port;
         emitLog(QStringLiteral("path locked %1").arg(endpointText(sender, port)));
