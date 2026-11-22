@@ -115,6 +115,8 @@ add_library(peerdesk_ui STATIC
     src/ui/ui_theme.h
     src/ui/ui_widgets.cpp
     src/ui/ui_widgets.h
+    src/ui/viewer_page.cpp
+    src/ui/viewer_page.h
 )
 target_link_libraries(peerdesk_ui
     PUBLIC peerdesk_app Qt6::Core Qt6::Gui Qt6::Widgets

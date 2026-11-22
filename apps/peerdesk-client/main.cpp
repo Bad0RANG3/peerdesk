@@ -6,6 +6,7 @@
 #include "ui/app_window.h"
 #include "ui/host_panel.h"
 #include "ui/ui_theme.h"
+#include "ui/viewer_page.h"
 
 #ifdef Q_OS_WIN
 #include "platform/wasapi_audio.h"
@@ -20,6 +21,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QTimer>
 
 #include <cstdio>
@@ -138,9 +141,12 @@ int main(int argc, char *argv[])
         QStringLiteral("code"));
     const QCommandLineOption pageOption(
         QStringList{QStringLiteral("page")},
-        QStringLiteral("启动页面：remote 或 host"),
+        QStringLiteral("启动页面：remote、host 或 viewer"),
         QStringLiteral("page"),
         QStringLiteral("remote"));
+    const QCommandLineOption viewerDemoOption(
+        QStringList{QStringLiteral("viewer-demo")},
+        QStringLiteral("用合成画面启动原生 Viewer 会话页"));
     const QCommandLineOption captureOption(
         QStringList{QStringLiteral("capture")},
         QStringLiteral("采集后端：native 或 test"),
@@ -163,6 +169,7 @@ int main(int argc, char *argv[])
         tokenOption,
         codeOption,
         pageOption,
+        viewerDemoOption,
         captureOption,
         audioTestOption,
         screenshotOption,
@@ -172,8 +179,15 @@ int main(int argc, char *argv[])
 
     const QString page = parser.value(pageOption).trimmed().toLower();
     if (page != QStringLiteral("remote")
-        && page != QStringLiteral("host")) {
+        && page != QStringLiteral("host")
+        && page != QStringLiteral("viewer")) {
         printError(QStringLiteral("无效的启动页面：%1").arg(page));
+        return 2;
+    }
+
+    const bool viewerDemo = parser.isSet(viewerDemoOption);
+    if (viewerDemo && page != QStringLiteral("viewer")) {
+        printError(QStringLiteral("--viewer-demo 需要配合 --page viewer"));
         return 2;
     }
 
@@ -188,7 +202,7 @@ int main(int argc, char *argv[])
     const bool syntheticAudio = parser.isSet(audioTestOption);
     const bool hasScreenshot = parser.isSet(screenshotOption);
     const bool isolated =
-        hasScreenshot || syntheticCapture || syntheticAudio;
+        hasScreenshot || syntheticCapture || syntheticAudio || viewerDemo;
 
     bool delayOk = true;
     const int exitAfter = parser.isSet(exitAfterOption)
@@ -235,15 +249,58 @@ int main(int argc, char *argv[])
     installPlatformBackends(
         host,
         viewer,
-        syntheticCapture,
-        syntheticAudio);
+        syntheticCapture || viewerDemo,
+        syntheticAudio || viewerDemo);
 
     pd::ui::AppWindow window(&host, &viewer);
     if (isolated) {
         window.hostPanel()->setAutoStart(false);
     }
-    if (page == QStringLiteral("host")) {
+    if (viewerDemo) {
+        pd::SyntheticScreenSource demoSource(1600, 900, true);
+        QTimer demoTimer;
+        window.resize(1600, 900);
+
+        const auto renderDemoFrame = [&window, &demoSource]() {
+            pd::CaptureRequest request;
+            request.monitor = 0;
+            request.maxWidth = 1600;
+            request.pixelFormat = QStringLiteral("rgb");
+            const pd::CaptureResult capture = demoSource.capture(request);
+            if (!capture.ok()) {
+                return;
+            }
+
+            QJsonArray monitors;
+            for (const pd::MonitorInfo &monitor : demoSource.monitors()) {
+                monitors.append(QJsonObject{
+                    {QStringLiteral("index"), monitor.index},
+                    {QStringLiteral("x"), monitor.left},
+                    {QStringLiteral("y"), monitor.top},
+                    {QStringLiteral("w"), monitor.width},
+                    {QStringLiteral("h"), monitor.height},
+                    {QStringLiteral("primary"), monitor.primary},
+                    {QStringLiteral("name"), monitor.name},
+                });
+            }
+            window.viewerPage()->showDemoFrame(
+                capture.image,
+                QStringLiteral("STUDIO-PC"),
+                monitors);
+        };
+
+        renderDemoFrame();
+        window.showViewerPage();
+        QObject::connect(
+            &demoTimer,
+            &QTimer::timeout,
+            &window,
+            renderDemoFrame);
+        demoTimer.start(66);
+    } else if (page == QStringLiteral("host")) {
         window.showHostPage();
+    } else if (page == QStringLiteral("viewer")) {
+        window.showViewerPage();
     }
 
     QObject::connect(

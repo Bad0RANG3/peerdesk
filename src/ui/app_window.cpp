@@ -6,7 +6,9 @@
 #include "ui/connection_page.h"
 #include "ui/host_panel.h"
 #include "ui/ui_theme.h"
+#include "ui/viewer_page.h"
 
+#include <QEvent>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -16,6 +18,7 @@
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace pd::ui {
@@ -59,22 +62,22 @@ void AppWindow::buildUi()
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    auto *header = new QWidget(this);
-    header->setObjectName(QStringLiteral("appHeader"));
-    header->setFixedHeight(kHeaderHeight);
-    header->setStyleSheet(QStringLiteral(
+    header_ = new QWidget(this);
+    header_->setObjectName(QStringLiteral("appHeader"));
+    header_->setFixedHeight(kHeaderHeight);
+    header_->setStyleSheet(QStringLiteral(
         "QWidget#appHeader {"
         "  background: rgba(11, 13, 18, 0.72);"
         "  border-bottom: 1px solid rgba(255, 255, 255, 0.065);"
         "}"));
-    auto *headerLayout = new QHBoxLayout(header);
+    auto *headerLayout = new QHBoxLayout(header_);
     headerLayout->setContentsMargins(24, 0, 24, 0);
     headerLayout->setSpacing(18);
 
-    auto *brand = new BrandMark(header);
+    auto *brand = new BrandMark(header_);
     headerLayout->addWidget(brand, 0, Qt::AlignVCenter);
 
-    auto *brandText = new QWidget(header);
+    auto *brandText = new QWidget(header_);
     auto *brandTextLayout = new QVBoxLayout(brandText);
     brandTextLayout->setContentsMargins(0, 0, 0, 0);
     brandTextLayout->setSpacing(0);
@@ -91,7 +94,7 @@ void AppWindow::buildUi()
     headerLayout->addWidget(brandText, 0, Qt::AlignVCenter);
     headerLayout->addStretch(1);
 
-    auto *navigation = new QWidget(header);
+    auto *navigation = new QWidget(header_);
     navigation->setObjectName(QStringLiteral("appNavigation"));
     navigation->setStyleSheet(QStringLiteral(
         "QWidget#appNavigation {"
@@ -119,11 +122,11 @@ void AppWindow::buildUi()
     headerLayout->addWidget(navigation, 0, Qt::AlignVCenter);
 
     headerLayout->addStretch(1);
-    privacyPill_ = new PillLabel(header);
+    privacyPill_ = new PillLabel(header_);
     privacyPill_->setText(QStringLiteral("端到端加密"));
     privacyPill_->setTone(PillLabel::Tone::Green);
     headerLayout->addWidget(privacyPill_, 0, Qt::AlignVCenter);
-    root->addWidget(header);
+    root->addWidget(header_);
 
     stack_ = new QStackedWidget(this);
     stack_->setObjectName(QStringLiteral("pageStack"));
@@ -131,8 +134,10 @@ void AppWindow::buildUi()
         "QStackedWidget#pageStack { background: transparent; }"));
     connectionPage_ = new ConnectionPage(stack_);
     hostPanel_ = new HostPanel(host_, true, stack_);
+    viewerPage_ = new ViewerPage(viewer_, stack_);
     stack_->addWidget(connectionPage_);
     stack_->addWidget(hostPanel_);
+    stack_->addWidget(viewerPage_);
     root->addWidget(stack_, 1);
 
     const ViewerPreferences viewerPreferences = viewer_->preferences()
@@ -214,7 +219,14 @@ void AppWindow::connectSignals()
                     &error)) {
                 connectionPage_->setError(error);
                 showToast(error);
+                return;
             }
+            const QString peer = viewer_->peerName().isEmpty()
+                ? QStringLiteral("远端设备")
+                : viewer_->peerName();
+            viewerPage_->beginSession(peer, code);
+            viewerPage_->showConnecting(peer);
+            showViewerPage();
         });
     connect(
         connectionPage_,
@@ -222,6 +234,7 @@ void AppWindow::connectSignals()
         this,
         [this]() {
             viewer_->hangUp();
+            viewerPage_->resetSession();
             connectionPage_->setConnected(false);
             showToast(QStringLiteral("远程会话已断开"));
         });
@@ -231,6 +244,7 @@ void AppWindow::connectSignals()
         this,
         [this](ViewerController::State) {
             updateViewerState();
+            updateNavigation();
         });
     connect(
         viewer_,
@@ -246,6 +260,9 @@ void AppWindow::connectSignals()
         [this](const QString &message) {
             connectionPage_->setError(message);
             showToast(message);
+            if (viewerPage_->connectionOverlay()->isVisible()) {
+                showViewerPage();
+            }
         });
     connect(
         viewer_,
@@ -255,6 +272,7 @@ void AppWindow::connectSignals()
             connectionPage_->setConnected(false);
             connectionPage_->setStatus(reason, PillLabel::Tone::Amber);
             showToast(reason);
+            showViewerPage();
         });
     connect(
         viewer_,
@@ -283,10 +301,63 @@ void AppWindow::connectSignals()
         &HostPanel::toastRequested,
         this,
         &AppWindow::showToast);
+    connect(
+        viewerPage_,
+        &ViewerPage::toastRequested,
+        this,
+        &AppWindow::showToast);
+    connect(
+        viewerPage_,
+        &ViewerPage::hangupRequested,
+        this,
+        [this]() {
+            viewer_->hangUp();
+            viewerPage_->resetSession();
+            connectionPage_->setConnected(false);
+            connectionPage_->setStatus(QStringLiteral("远程会话已断开"));
+            showRemotePage();
+            showToast(QStringLiteral("远程会话已断开"));
+        });
+    connect(
+        viewerPage_,
+        &ViewerPage::backRequested,
+        this,
+        [this]() {
+            viewer_->hangUp();
+            viewerPage_->resetSession();
+            connectionPage_->setConnected(false);
+            connectionPage_->setStatus(QStringLiteral("准备连接"));
+            showRemotePage();
+        });
+    connect(
+        viewerPage_,
+        &ViewerPage::fullScreenRequested,
+        this,
+        &AppWindow::setFullScreen);
+    connect(
+        viewerPage_,
+        &ViewerPage::exitFullScreenRequested,
+        this,
+        [this]() {
+            setFullScreen(false);
+        });
+    connect(
+        viewerPage_,
+        &ViewerPage::textSendRequested,
+        this,
+        [this](const QString &text) {
+            if (!text.isEmpty()) {
+                showToast(QStringLiteral("文本已发送到远端"));
+            }
+        });
 }
 
 void AppWindow::showRemotePage()
 {
+    if (viewerPage_ && viewerPage_->sessionLive()) {
+        showViewerPage();
+        return;
+    }
     stack_->setCurrentWidget(connectionPage_);
     updateNavigation();
     connectionPage_->focusCode();
@@ -297,6 +368,16 @@ void AppWindow::showHostPage()
     stack_->setCurrentWidget(hostPanel_);
     updateNavigation();
     hostPanel_->activate();
+}
+
+void AppWindow::showViewerPage()
+{
+    stack_->setCurrentWidget(viewerPage_);
+    updateNavigation();
+    if (viewerPage_->sessionLive()
+        && viewerPage_->connectionOverlay()->isHidden()) {
+        viewerPage_->canvas()->setFocus(Qt::OtherFocusReason);
+    }
 }
 
 QWidget *AppWindow::currentPage() const
@@ -327,7 +408,9 @@ void AppWindow::updateViewerState()
     case ViewerController::State::Idle:
         if (!connectionPage_->connected()) {
             connectionPage_->setBusy(false);
-            connectionPage_->setStatus(QStringLiteral("准备连接"));
+            if (!viewerPage_->sessionLive()) {
+                connectionPage_->setStatus(QStringLiteral("准备连接"));
+            }
         }
         break;
     case ViewerController::State::Connecting:
@@ -339,9 +422,26 @@ void AppWindow::updateViewerState()
                 : QStringLiteral("正在与 %1 建立加密通道…")
                       .arg(viewer_->peerName()),
             PillLabel::Tone::Amber);
+        if (viewerPage_->sessionLive() && !viewerPage_->demoMode()) {
+            viewerPage_->showConnecting(
+                viewer_->peerName().isEmpty()
+                    ? QStringLiteral("远端设备")
+                    : viewer_->peerName());
+        }
         break;
     case ViewerController::State::Streaming:
         connectionPage_->setConnected(true, viewer_->peerName());
+        if (!viewerPage_->sessionLive()) {
+            viewerPage_->beginSession(
+                viewer_->peerName().isEmpty()
+                    ? QStringLiteral("远端设备")
+                    : viewer_->peerName(),
+                viewer_->code());
+        }
+        viewerPage_->showStreaming(viewer_->peerName());
+        if (stack_->currentWidget() == connectionPage_) {
+            showViewerPage();
+        }
         break;
     case ViewerController::State::Error:
         connectionPage_->setError(
@@ -359,6 +459,40 @@ void AppWindow::updateNavigation()
     setNavChecked(hostNavButton_, hostPage);
 }
 
+void AppWindow::setFullScreen(bool enter)
+{
+    if (enter == isFullScreen()) {
+        syncFullScreenState();
+        return;
+    }
+    viewerPage_->canvas()->releaseInputs();
+    if (enter) {
+        wasMaximized_ = isMaximized();
+        showFullScreen();
+    } else if (wasMaximized_) {
+        showMaximized();
+    } else {
+        showNormal();
+    }
+    syncFullScreenState();
+}
+
+void AppWindow::syncFullScreenState()
+{
+    const bool fullScreen = isFullScreen();
+    if (header_) {
+        header_->setVisible(!fullScreen);
+    }
+    if (fullScreen) {
+        viewerPage_->canvas()->releaseInputs();
+    }
+    if (viewerPage_ && viewerPage_->fullScreenButton()) {
+        viewerPage_->fullScreenButton()->setText(
+            fullScreen ? QStringLiteral("退出全屏")
+                       : QStringLiteral("全屏"));
+    }
+}
+
 void AppWindow::positionToast()
 {
     if (!toast_ || toast_->isHidden()) {
@@ -373,6 +507,14 @@ void AppWindow::resizeEvent(QResizeEvent *event)
 {
     BackdropWidget::resizeEvent(event);
     positionToast();
+}
+
+void AppWindow::changeEvent(QEvent *event)
+{
+    BackdropWidget::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange && viewerPage_) {
+        syncFullScreenState();
+    }
 }
 
 } // namespace pd::ui
