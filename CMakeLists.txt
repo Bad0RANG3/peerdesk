@@ -40,6 +40,14 @@ add_library(peerdesk_core STATIC
 target_include_directories(peerdesk_core PUBLIC src)
 target_link_libraries(peerdesk_core PUBLIC Qt6::Core Qt6::Network PRIVATE monocypher)
 
+add_library(peerdesk_server STATIC
+    src/server/server.cpp
+    src/server/server.h
+)
+target_link_libraries(peerdesk_server
+    PUBLIC peerdesk_core Qt6::Core Qt6::Network
+)
+
 if(WIN32)
     target_compile_definitions(peerdesk_core PUBLIC
         WIN32_LEAN_AND_MEAN
@@ -51,9 +59,19 @@ endif()
 
 if(MSVC)
     target_compile_options(peerdesk_core PRIVATE /W4 /permissive-)
+    target_compile_options(peerdesk_server PRIVATE /W4 /permissive-)
 else()
     target_compile_options(peerdesk_core PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(peerdesk_server PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_executable(peerdesk-server
+    apps/peerdesk-server/main.cpp
+)
+target_compile_definitions(peerdesk-server PRIVATE
+    PEERDESK_VERSION="${PROJECT_VERSION}"
+)
+target_link_libraries(peerdesk-server PRIVATE peerdesk_server)
 
 add_executable(peerdesk-tests
     tests/protocol_test.cpp
@@ -75,15 +93,25 @@ add_executable(peerdesk-stun-tests
 )
 target_link_libraries(peerdesk-stun-tests PRIVATE peerdesk_core Qt6::Test)
 
+add_executable(peerdesk-server-tests
+    tests/server_test.cpp
+)
+target_link_libraries(peerdesk-server-tests
+    PRIVATE peerdesk_server Qt6::Test
+)
+
 enable_testing()
 add_test(NAME peerdesk-core COMMAND peerdesk-tests)
 add_test(NAME peerdesk-crypto COMMAND peerdesk-crypto-tests)
 add_test(NAME peerdesk-transport COMMAND peerdesk-transport-tests)
 add_test(NAME peerdesk-stun COMMAND peerdesk-stun-tests)
+add_test(NAME peerdesk-server COMMAND peerdesk-server-tests)
 
 install(TARGETS
+    peerdesk-server
     peerdesk-tests
     peerdesk-crypto-tests
     peerdesk-transport-tests
     peerdesk-stun-tests
+    peerdesk-server-tests
     RUNTIME DESTINATION bin)
