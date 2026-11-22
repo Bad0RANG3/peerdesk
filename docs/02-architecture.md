@@ -1,215 +1,201 @@
 # PeerDesk 架构
 
-PeerDesk（对端桌面）是一个**纯 Python 3.11+** 的 Windows 远程桌面，不依赖浏览器引擎、
-不依赖 WebRTC 后端、不依赖 npm 生态。三个进程角色共用一个包：
+PeerDesk 0.7 是 **C++20 + Qt 6.8** 的 Windows 远程桌面。服务端、传输、会话、
+平台层和客户端界面共用同一套原生代码；媒体通过自研 **PDTP/1** UDP 协议传输，
+信令使用 TCP JSON Lines。
 
-```
-        ┌──────────────┐   信令 TCP(JSON Lines)   ┌──────────────┐
-        │    agent     │◀────────────────────────▶│    server    │
-        │  (被控端)     │                          │  (自托管)     │
-        └──────┬───────┘                          └──────┬───────┘
-               │  PDTP/1 over UDP（打洞直连/中继）        │
-               │                                         │
-        ┌──────▼───────┐        同一 socket 兼做 STUN ────┘
-        │    viewer    │
-        │  (控制端)     │──▶ 本地 HTTP+WS ──▶ 浏览器 canvas
-        └──────────────┘
+```text
+被控端 peerdesk-client ──TCP 信令──▶ peerdesk-server ◀──TCP 信令── 控制端 peerdesk-client
+                         └──── PDTP/1 over UDP：直连或 RLY1 中继 ────┘
+STUN 与中继共用 peerdesk-server 的 UDP 端口
 ```
 
-## 1. 进程与部署形态
+## 1. 设计原则
 
-| 角色 | 命令 | 作用 |
-| --- | --- | --- |
-| agent | `peerdesk agent --server HOST:7900 --code 604173829 --web-port 7701` | 显示 9 位连接码，抓屏、注入输入，本地面板给操作者看状态/改参数 |
-| viewer | `peerdesk viewer --web-port 7702` | 打开页面输入连接码，接收视频、转发键鼠 |
-| server | `peerdesk server --port 7900 --udp-port 7901` | 信令（TCP）+ 中继与 STUN（UDP 同端口） |
-| doctor | `peerdesk doctor` | 环境自检（依赖/显示器/输入/加密/UDP/STUN） |
+- **连接码优先**：输入 9 位码即可建立会话，不引入账号体系。
+- **直连优先**：先交换主机地址和 STUN 反射地址，打洞失败后自动升级中继。
+- **端到端加密**：连接码参与密钥派生，中继只转发 AEAD 密文。
+- **控制可靠、媒体可丢**：键鼠/文件使用可靠消息；视频使用 FEC/NACK；音频使用帧内冗余。
+- **原生交互**：连接、被控、会话、设置和托盘都在 Qt 窗口内完成。
+- **可自托管**：一个服务端进程同时提供信令、STUN 和中继，便于自有网络部署。
 
-三种典型部署：
+## 2. 进程与模块
 
-1. **完全自托管**：一台有公网 IP 的机器跑 `peerdesk server`，两端指向它。
-2. **内网直连**：同一局域网可以不起 server（把候选写死），或起在内网任意一台机器上。
-3. **中继兜底**：对称 NAT/企业防火墙下 6 秒自动升级中继，画质不变、延迟略高。
+### 2.1 可执行程序
 
-## 2. 模块划分
-
-| 文件 | 行数 | 职责 | 关键对象 |
-| --- | --- | --- | --- |
-| `wire.py` | 268 | 报文格式、分片、XOR FEC、ACK/NACK 位图 | `Header`、`FragmentAssembler`、`ParityGroup` |
-| `crypto.py` | 214 | X25519 → HKDF → ChaCha20-Poly1305、重放窗口 | `KeyPair`、`SessionKeys`、`CryptoContext` |
-| `transport.py` | 876 | UDP 传输：握手、打洞、中继、可靠控制流、视频发送/接收、统计 | `PeerLink`、`ReliableStream`、`VideoSender`、`VideoReceiver` |
-| `stun.py` | 143 | 自实现 STUN Binding 子集（与媒体共用 socket） | `build_request/parse_mapped/query_stun` |
-| `signal.py` | 94 | 信令客户端（TCP JSON Lines） | `SignalingClient` |
-| `server.py` | 446 | 信令服务器 + UDP 中继 + STUN 响应 | `SignalingServer`、`Peer`、`Pair` |
-| `session.py` | 642 | 会话层：抓屏循环、控制消息分发、输入注入、文件接收、剪贴板 | `HostSession`、`ViewerSession`、`VideoSettings` |
-| `capture.py` | 606 | 抓屏后端调度（DXGI → GDI → mss）、GDI 持久 DIB + `BitBlt`/`StretchBlt`、合成源、JPEG 编码 + 自适应质量 + 静帧跳过 | `ScreenCapture`、`GdiCapture`、`TestPattern`、`FramePacer` |
-| `dxgi.py` | 736 | DXGI Desktop Duplication：D3D11 设备/输出枚举、staging texture、`RowPitch` 行宽整理、last-frame 缓存、子进程探测与 access-lost 重试 | `DxgiCapture`、`probe_dxgi`、`DxgiError` |
-| `audio.py` | 640 | WASAPI loopback（ctypes COM）→ 重采样 → G.711 µ-law，静音抑制 | `LoopbackCapture`、`LoopbackSource`、`AudioPump`、`MonoResampler` |
-| `wininput.py` | 353 | `SendInput` 键鼠注入、虚拟桌面归一化、剪贴板读写 | `InputInjector`、`ClipboardWatcher` |
-| `websocket.py` | 166 | 最小 RFC6455 服务端（文本/二进制/分片/ping-pong） | `WSConnection` |
-| `webui.py` | 393 | 本地 HTTP 静态资源 + WS 桥 + Hub 扇出（丢旧帧背压） | `Hub`、`ViewerHub`、`AgentHub`、`WebUI` |
-| `web/*` | 1516 | 浏览器 UI（深色玻璃拟态 + 连接码页 + 悬浮工具栏 + HUD） | `viewer.js`、`agent.js`、`style.css` |
-| `agent.py` / `viewer.py` | 483 | 两个角色的主编排（CLI → 信令 → PeerLink → 面板） | `AgentApp`、`ViewerApp` |
-| `doctor.py` | 140 | 自检 | `run_checks()` |
-
-服务端策略对象：`SignalingServer` 持有 `token` / `relay_mbps` / `connect_max` / `connect_window`；
-`TokenBucket` 是每对会话的中继令牌桶（`rate = mbps × 125000` B/s，1 s 突发），
-`Pair.bucket` 在转发前 `allow(len(data))`，不通过就丢包。被控端侧对应
-`HostSession.set_rate_limit()` + `FramePacer.set_budget_kb()` + `_effective_fps()`。
-
-## 3. 数据流
-
-### 3.0 声音（agent → viewer）
-
-```
-AudioPump 线程 (20 ms 定拍)                事件循环                浏览器
-  LoopbackCapture.read_raw()  ─┐
-  MonoResampler → 320 采样      ├─ ulaw_encode → 320 B
-  wire.pack_audio(seq, ts, 320, 当前帧, 上一帧)
-      └──TYPE_AUDIO / STREAM_AUDIO──▶ PeerLink.send_audio （不重传，丢包靠冗余帧顶）
-                                     └─ ViewerSession.on_audio → Hub.post_audio
-                                          └─WS 二进制 "A" + AUDIO_HDR──▶ WebAudio 抖动缓冲
-```
-
-要点：
-- **20 ms 一帧、128 kbit/s**，与视频同一条 UDP 通道但**不走**可靠流也不进 FEC 组——
-  声音等不起重传，宁可丢一个 20 ms 断点。
-- 每个报文里带**上一帧**（`prev_len`），单包丢失时接收端先补上一帧，听感上不出现爆音。
-- **静音抑制**：连续 0.5 s 纯静音后只每 25 帧发一个心跳帧（约 2.5 kbit/s），桌面安静时不白烧带宽。
-- 采集线程拥有自己的 COM 单元（WASAPI 要求），跨线程只经 `loop.call_soon_threadsafe`。
-- 浏览器用 `AudioContext` 直接把 µ-law 展开成 `Float32Array`，无需 WASM 或第三方库。
-
-### 3.0.1 抓屏后端（DXGI / GDI / mss）
-
-```
-DXGI（默认优先）                          GDI（兼容回退）                    mss（最后回退）
-  子进程 _dxgi_probe 探测                   GetDC(NULL) 常驻                  每次 grab 新建上下文
-  D3D11CreateDevice → EnumOutputs          CreateDIBSection 分配一次         内部同样 BitBlt 到自建 DIB
-  DuplicateOutput → AcquireNextFrame       BitBlt(SRCCOPY|CAPTUREBLT)        结构与 GDI 相同，但多一层封装/拷贝
-  CopyResource → staging texture           StretchBlt + SetStretchBltMode
-  Map → RowPitch 去 padding                ctypes.string_at → Image.frombytes
-  ctypes.string_at → Image.frombytes
-```
-
-- `ScreenCapture` 是调度层：`auto` 依次尝试 **DXGI → GDI → mss**。DXGI 先在隐藏子进程中跑
-  `_dxgi_probe`（`python -m peerdesk _dxgi_probe`，frozen exe 里是 `peerdesk.exe _dxgi_probe`），
-  走完整设备/输出/`DuplicateOutput`/抓一帧/关闭流程；子进程崩溃或 10 秒超时只影响探测结果，
-  不会拖垮 agent 主进程。探测结果在进程内缓存，`PEERDESK_DXGI_PROBE=0` 可禁用。
-- DXGI 运行期出现 `DXGI_ERROR_ACCESS_LOST` 时先释放并重建 duplication 重试；在 `auto` 模式下
-  连续失败则关闭 DXGI 并回退 GDI/mss。显式 `--capture dxgi` 不静默回退，会抛
-  `RuntimeError`，方便定位驱动/会话问题。
-- DXGI 当前只支持未旋转输出，每帧仍是 `CopyResource` + `Map` 的整帧 CPU 拷贝；
-  `RowPitch` 大于 `width × 4` 时用 `_pack_rows` 去掉 GPU 行尾 padding。没有新帧时复用
-  last-frame 缓存，避免白等 `AcquireNextFrame`。
-- 缩放模式 `PEERDESK_SCALE`（或 `--scale-mode`）：`fast`（最近采样，最快）、
-  `halftone`（GDI 平滑，慢约 11 ms）、`pil`（把缩放交回 Pillow，最清晰但最慢）。
-  DXGI 在 `pil` 模式返回全尺寸，由 `ScreenCapture.grab()` 统一缩放，避免二次缩放。
-- `test` 走 `TestPattern` 合成信号源（渐变底 + 网格 + 时钟 + 移动方块），**完全不碰真实屏幕**，
-  文档截图和 CI 都用它，避免把桌面内容拍进公开仓库。
-- 本机实测（2560×1440 → 1600×900，JPEG q60，含 `Image.frombytes`）：DXGI 10.1 ms、
-  GDI 22.0 ms、mss 36.1 ms（均为 p50）。
-
-### 3.1 视频（agent → viewer）
-
-```
-抓屏线程 (executor)           事件循环 (asyncio)                     浏览器
-  ScreenCapture.grab() ─┐
-  JPEG + FramePacer     │  HostSession._capture_loop
-  (质量自适应/静帧跳过)  └──▶ PeerLink.send_video(jpeg, keyframe)
-                             VideoSender.build() → DATA×n + PARITY×m
-                             _send_packet() → header(20B) + AEAD(plen)
-                             ──UDP──▶ viewer: PeerLink.datagram_received
-                                      VideoReceiver.on_fragment/on_parity
-                                      交付 → ViewerSession._on_frame
-                                      ViewerHub.post_frame → WS 二进制帧("J"+JPEG)
-                                      ──WS──▶ viewer.js: createImageBitmap → canvas
-```
-
-关键点：
-
-- 抓屏在**线程池**里跑（`run_in_executor`），JPEG 编码也在那里，事件循环只做发包与拼帧，
-  避免 10–28 ms 的抓屏/编码卡住控制通道。
-- `FramePacer` 按"上一帧字节数 / 目标 140 KB"调整 JPEG 质量（32–92），
-  上限受 `VideoSettings.quality` 约束；静帧时跳过发送（`skip_static`）。
-- Web UI 的 Hub 有**背压丢帧**：浏览器来不及消费时只保留最新一帧，宁可跳帧不排队。
-
-### 3.2 控制（双向）
-
-```
-浏览器键鼠事件 ──WS──▶ ViewerHub.on_json → 映射为 {t:"m"|"k"|"text"|"clip"|...}
-   → ViewerSession.send() → PeerLink.send_control(obj)
-   → ReliableStream.send(json) → DATA(stream=CONTROL, payload="<I"seq + json)
-   ──UDP──▶ agent: ReliableStream.on_data → HostSession._dispatch
-   → InputInjector.move_abs/button/key/type_text  或  set_clipboard_text
-   → 回 ACK（累积 + 位图）
-```
-
-`HostSession._dispatch` 支持：`hello`、`settings`、`keyframe_req`、`mouse`、`key`、`text`、
-`clip`、`file_begin|data|end`、`reboot`。输入坐标是**归一化帧坐标**，
-`_map_to_virtual` 负责映射到虚拟桌面（多显示器时按 `SM_XVIRTUALSCREEN` 系列常量换算）。
-
-### 3.3 状态机（`PeerLink`）
-
-```
-idle ──begin_handshake()──▶ punching ──收到对端 HELLO/PUNCH──▶ direct
-                                  │                              │
-                                  └─6s 未直连 或 --relay-only──▶ relay
-                                                                 │
-任何状态 ──close()/对端 BYE/RX 超时 25s──▶ closed
-```
-
-`_set_state` 只在状态变化或每 1 秒回调一次 `on_state`（早期实现 20 ms 一次，把 UI 刷爆了）。
-
-## 4. 线程与调度
-
-| 执行体 | 内容 |
+| 程序 | 作用 |
 | --- | --- |
-| asyncio 主循环 | UDP 传输、信令、WS 桥、HTTP、控制分发 |
-| 线程池（默认 executor） | 抓屏 + JPEG 编码（每次抓屏一拍） |
-| `thread_capture()` | 每线程一个 `ScreenCapture` 实例（mss 不是线程安全的） |
-| 定时任务 | 心跳 4s、ACK 刷新、NACK 扫描、stats 1s、RX 超时检查 25s |
+| `peerdesk-server.exe` | TCP 信令、连接码注册与配对、UDP STUN、UDP 中继、令牌和限速 |
+| `peerdesk-client.exe` | Qt 控制端和被控端，内含连接页、被控端面板、Viewer、设置和托盘 |
+| `peerdesk-link-harness.exe` | 链路联调工具，用于构造和观察 `PeerLink` 行为 |
 
-## 5. 配置与运行期文件
+### 2.2 静态库
 
-- 配置目录：`%APPDATA%\peerdesk`（`config_dir()`）
-- 接收文件：`%USERPROFILE%\Downloads\PeerDesk`（`download_dir()`）
-- 日志：`--log` 指定的文件，或控制台；`-v` 开 DEBUG
-- 会话参数（`VideoSettings`）：`fps`、`max_width`、`quality`、`monitor`、`skip_static`、`clipboard`、`pixel_format`
-
-## 6. 实测性能（本机 2560×1440 / i7 级 CPU / 无独显加速路径）
-
-| 场景 | 结果 |
+| 路径 | 职责 |
 | --- | --- |
-| 抓屏 + 缩放 + `frombytes` + JPEG q60 | **DXGI 10.1 ms** · **GDI 22.0 ms** · mss 36.1 ms（p50） |
-| 同上，p95 | DXGI 12.3 ms · GDI 28.1 ms |
-| 完整链路拆分（DXGI p50） | grab 3.6 ms + `frombytes` 3.1 ms + resize 1.5 ms + JPEG 2.0 ms |
-| `ScreenCapture.grab`（1600 宽，JPEG q60） | DXGI 10.9 / p95 11.7 ms，约 112 KB · GDI 18.3 / p95 23.3 ms，约 113 KB |
-| 端到端（直连，1600×900，fps=20） | DXGI `enc_ms` ~11.9，GDI ~22.2；RTT 0.4–2.6 ms |
-| 端到端（强制中继） | ~14 fps，6.6 Mbps，功能等价 |
-| 本机回环 Web 桥 | 1024×576 JPEG 26–28 KB/帧，控制通道 `pending=0` |
-| 声音（直连，合成音） | 267 帧 / 5.3 s（20 ms/帧，0 丢帧），85 KB ≈ 128 kbit/s |
-| 声音（强制中继） | 214 帧 / 4.3 s，68 KB ≈ 128 kbit/s，功能等价 |
-| 声音（loopback 实测） | 48 kHz 立体声混音 → 16 kHz 单声道，1 s 抓满 16000 采样，rms 8293（真实扬声器输出） |
+| `src/core/` | 20 字节报文头、JSON 载荷、视频/控制分片、XOR FEC、可靠流、STUN、X25519/HKDF/AEAD、重放窗口 |
+| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计和链路状态 |
+| `src/server/` | TCP JSON Lines 信令、UDP 中继、STUN、连接频次限制和每会话令牌桶 |
+| `src/client/` | TCP 信令客户端、注册/配对、候选更新和错误映射 |
+| `src/session/` | 被控端/控制端会话、视频、音频、输入、剪贴板、文件和统计 |
+| `src/app/` | `HostController`、`ViewerController`、偏好、五档画质、音频播放 |
+| `src/ui/` | Qt 窗口壳、连接页、被控端页、Viewer、设置、主题和通用控件 |
+| `src/platform/` | GDI 抓屏、WASAPI loopback、PCM 重采样、Win32 输入和剪贴板 |
+| `apps/`、`tools/` | 两个正式程序和链路联调入口 |
 
-瓶颈仍是**整帧抓屏拷贝 + JPEG 编码**，不是网络：DXGI 已把 p50 从 GDI 的 22 ms 降到
-10 ms 左右，但还没有利用脏矩形、GPU 共享纹理或 H.264/硬件编码（见路线图）。
+平台层当前只实现 Windows 路径；非 Windows 构建可以保留合成信号源，但不具备真实桌面采集、
+系统声音、输入注入或剪贴板桥接。
 
-## 7. 已知限制
+## 3. 控制面与数据面
 
-1. MJPEG 无帧间压缩：同画质下码率约为 H.264 的 5–10 倍（本机 6.6 Mbps vs 同类 1–2 Mbps）。
-2. 声音是 G.711 µ-law（8 bit/16 kHz），够"听得到、听得清人声"，但不是音乐级；Opus 需要额外依赖。
-3. 无虚拟显示器/虚拟 HID 驱动：分辨率跟随真实桌面，部分反作弊会拦 `SendInput`。
-4. 剪贴板只同步文本（图片/文件待补）。
-5. 限速是"先降质量再降帧率"的粗粒度控制，没有基于 RTT/丢包的拥塞控制（无 BBR/GCC）。
-6. 中继是单进程 UDP 转发：已有 `--token` 鉴权、`--relay-mbps` 令牌桶限速与
-   `--connect-max` 连接频次限制，但仍是单机单进程，没有分布式配额与计费，
-   也没有 TLS——信令靠连接码派生 PSK 保护媒体，令牌本身走明文 TCP。
-7. 浏览器桥只监听 `127.0.0.1`，跨机访问需要 SSH 隧道或反代（有意为之）。
-8. DXGI 后端只支持未旋转输出；每帧仍整帧拷贝到 staging texture，没有脏矩形/共享纹理优化。
-   DXGI 不可用或运行期 access lost 时依赖 GDI/mss 回退，显式 `--capture dxgi` 则直接报错。
-9. DXGI 显示器拓扑只在 `DxgiCapture` 初始化时枚举一次；运行中修改分辨率、热插拔或切换扩展坞后，
-   `monitors()` 仍返回旧快照，需要重启 agent 才能重新选择输出。
-10. DXGI 只枚举默认 D3D11 适配器上的输出；多 GPU 机器上挂在其他适配器上的显示器可能缺失，
-    且不会自动与 GDI 的显示器列表合并。
-11. `ID3D11DeviceContext::Map` 成功但 `pData == NULL` 时当前直接抛错，尚未调用 `Unmap`；
-    正常驱动不会触发，属防御性资源清理项。
+### 3.1 信令与配对
+
+1. 被控端向服务器发送 `register`，携带 9 位数字码的摘要、名称和本地 UDP 候选。
+2. 服务器保存注册信息，返回 `registered`、STUN/中继地址、令牌要求和带宽配置。
+3. 控制端发送 `connect`，服务器检查在线状态、令牌和连接频次。
+4. 被控端收到 `viewer`，控制端收到 `peer`，双方获得 `sid`、对端候选、
+   中继地址和各自的中继 tag。
+5. 候选变化通过 `cands`/`peer_cands` 增量同步；额外路径通过
+   `relay_hello`/`peer_relay_hello` 保持中继可达。
+6. 任一端 `bye` 或 TCP 断开时，服务器向另一端发送 `peer_bye`/`peer_gone`/
+   `viewer_gone` 并释放配对。
+
+当前 `reconnect` 只承担有限的信令通知，并没有完整恢复配对、媒体密钥、文件或会话状态。
+界面不得把它描述成“自动重连已完成”。
+
+### 3.2 PeerLink
+
+`PeerLink` 是 UDP 数据面的核心，负责：
+
+- 绑定本地 UDP socket，枚举本地 IPv4 候选，并通过服务器 STUN 发现反射地址。
+- 交换 HELLO/HELLO_ACK，派生双向密钥并校验连接码验证值。
+- 向全部候选每 100 ms 发送 PUNCH，收到响应后锁定直连路径。
+- 6 秒未直连时把原始 PDTP 数据报封装为 `RLY1 + tag`，改走服务端中继。
+- 维护 4 秒保活、握手阶段每秒加密 PING、25 秒 RX 超时和 20 ms 链路 tick。
+- 接收视频分片、FEC、NACK、控制消息、音频和统计，并把状态回调给会话层。
+
+状态主线：
+
+```text
+idle ──开始握手──▶ punching ──路径响应──▶ direct
+                         │
+                         └─6 秒未直连──▶ relay
+
+任意状态 ──BYE / RX 超时 / 主动关闭──▶ closed
+```
+
+`session` 包头字段是每端随机生成的链路 tag，不是信令层的 `sid`。两者不能混用。
+
+### 3.3 视频数据流
+
+```text
+抓屏/缩放 → JPEG → VideoSender
+  → 视频分片 DATA + XOR PARITY
+  → 包头 + AEAD
+  → UDP 直连或 RLY1 中继
+  → VideoReceiver 重组/恢复
+  → ViewerPage 解码、缩放和绘制
+```
+
+- 抓屏由 Qt 主线程上的采集定时器驱动。
+- `HostSession` 根据画质、目标帧率和带宽上限调整 JPEG 质量与发送节奏。
+- 静帧可跳过发送；仍会周期提供关键帧基准。
+- 丢片由 NACK 请求重传；关键帧丢失会请求新的关键帧。
+- 解码后的 `QImage` 交给 Viewer 画布，坐标按实际画面矩形归一化。
+
+### 3.4 音频数据流
+
+```text
+WASAPI loopback 采集线程
+  → 重采样为 16 kHz 单声道 PCM16
+  → G.711 µ-law，20 ms/帧
+  → 当前帧 + 上一帧冗余
+  → TYPE_AUDIO，不可靠发送
+  → Viewer 抖动缓冲 → QAudioSink
+```
+
+声音不进入视频 FEC 组，也不使用可靠重传。连续静音后会降低发帧频率；控制端关闭声音时，
+会通知被控端停止采集，而不是只在本机静音。
+
+### 3.5 控制、文件与剪贴板
+
+控制消息经独立可靠流发送，载荷内包含自己的消息序号。主要消息包括：
+
+`hello`、`settings`、`keyframe_req`、`mouse`、`key`、`text`、`clip`、
+`file_begin`、`file_data`、`file_end`、`reboot`、`stats`。
+
+- 鼠标使用归一化画面坐标，被控端再映射到 Windows 虚拟桌面。
+- 键盘使用 Win32 `SendInput`；失焦、断开和全屏切换会释放已按下的键和鼠标按钮。
+- 剪贴板只同步文本，单次上限 256 KiB，双向变化均有限流。
+- 文件通过 base64 控制消息分块，每块 24 KiB，单文件上限 512 MiB。
+- 文件名只接受安全 basename，落盘使用临时文件加重命名，默认写入系统 Downloads
+  下的 `PeerDesk` 目录。
+- `reboot` 目前只返回“收到重启指令（未执行）”，不是实际的远程重启能力。
+
+可靠性细节和已知选择性 ACK 缺陷见 [PDTP/1 协议规范](03-protocol-pdtp1.md)。
+
+## 4. 控制器与 UI
+
+`HostController` 和 `ViewerController` 是 Qt UI 的稳定门面：
+
+- 管理 `SignalingClient`、`PeerLink`、`HostSession`/`ViewerSession` 的生命周期。
+- 把会话状态、统计、错误、文件进度和音频状态转换为 Qt 信号。
+- 保存被控端和控制端偏好，包括服务器、令牌、连接码、画质、显示器和声音选项。
+- 向 UI 暴露启动、停止、挂断、切画质、切显示器、发送输入和文件等动作。
+
+`AppWindow` 只负责页面导航和窗口级行为；`ConnectionPage`、`HostPanel`、
+`ViewerPage`、`SettingsDialog` 各自处理自己的控件状态。Viewer 画布不直接操作传输层。
+
+画质档位：
+
+| 档位 | 最大宽度 | JPEG 质量 | 目标帧率 |
+| --- | ---: | ---: | ---: |
+| 流畅 | 1280 | 45 | 24 |
+| 均衡 | 1600 | 62 | 30 |
+| 高清 | 1920 | 72 | 40 |
+| 超清 | 2560 | 80 | 50 |
+| 原画 | 3840 | 88 | 60 |
+
+实际帧率还会受到抓屏耗时、编码耗时和服务器中继带宽上限影响。
+
+## 5. 线程模型
+
+Qt 事件循环是主执行体。以下工作都在主线程完成：
+
+- Qt 窗口、画布绘制、菜单、托盘和偏好读写。
+- TCP 信令和 UDP socket 回调。
+- GDI 抓屏、缩放和整帧 JPEG 编码。
+- 视频发送、Viewer JPEG 解码和画布更新。
+- `QAudioSink` 播放。
+- 文件分块、剪贴板和大部分会话控制。
+
+当前唯一明确的额外采集线程是 `WasapiLoopbackSource` 内部的 `std::thread`。
+它负责从 WASAPI loopback 读取 PCM，随后把数据交回会话路径。
+
+代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准。文档不得把主线程上的定时采集
+描述成多线程流水线，也不得宣称已达到某个性能指标。
+
+## 6. 配置、日志与运行边界
+
+- 正常模式把服务器、令牌、连接码、画质、显示器和窗口状态保存为 Qt 偏好。
+- 截图、合成采集、合成音源和 Viewer demo 使用临时偏好，不覆盖日常配置。
+- 日志只输出到启动程序的控制台，没有独立日志目录或滚动归档。
+- 被控端默认接收目录是系统 Downloads 下的 `PeerDesk`。
+- 服务端可选共享令牌、连接频次限制和每会话中继上限。
+
+## 7. 安全边界
+
+- 9 位连接码是会话预共享密钥的一部分；知道码且网络可达的人可以发起配对。
+- 服务器不保存明文连接码，只保存摘要；中继无法解出媒体内容。
+- 服务器仍能看到连接关系、候选地址、流量大小和时序，也能丢包或阻断会话。
+- HTTP/TCP 信令当前是明文；`--token` 只保护入口，不能替代 TLS 或传输加密。
+- 公网部署应使用 TLS 终结代理或可信内网，并限制服务端入口暴露。
+
+## 8. 当前架构限制
+
+- 视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码。
+- 抓屏只有 GDI，每帧需要完整抓取和缩放。
+- 声音是固定 G.711 µ-law，没有 Opus。
+- 仿真器和游戏常见的能力仍缺虚拟显示器、虚拟 HID 和相对鼠标模式。
+- 选择性 ACK 位图存在语义缺陷，控制流乱序补洞不能视为可靠。
+- 真实跨机、弱网和长会话仍需验收；回环测试与合成画面不能代替。

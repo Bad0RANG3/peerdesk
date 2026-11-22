@@ -1,221 +1,398 @@
 # PDTP/1 协议规范
 
-> PeerDesk Transport Protocol v1 —— 一条 UDP 连接上同时跑控制流、视频流、文件流，
-> 自带加密、打洞、中继回退与 FEC。实现见 `peerdesk/wire.py`、`peerdesk/crypto.py`、
-> `peerdesk/transport.py`。
+> PeerDesk Transport Protocol v1。控制面使用 TCP JSON Lines，媒体面使用一条 UDP
+> 数据通道；连接码决定会话预共享材料，X25519 + HKDF 派生双向 AEAD 密钥。
+> 实现位于 `src/core/`、`src/transport/`、`src/session/`、`src/client/` 和
+> `src/server/`。
 
-## 1. 设计取舍
+本文描述的是 **0.7.0 已经落地的协议行为**，不是目标设计稿。已知缺陷会明确标注，
+不能把尚未可靠工作的能力当成稳定接口。
 
-| 维度 | UU远程（被逆向对象） | PeerDesk | 理由 |
-| --- | --- | --- | --- |
-| NAT 穿透 | libwebrtc ICE（`basic_ice_controller`、`p2p_transport_channel`） | 自实现候选交换 + UDP 打洞 + 6s 后中继 | ICE 完整实现体量过大，两端都是我们的进程，候选集可以直接信令交换 |
-| 加密 | DTLS-SRTP（`dtls_srtp_transport.cc`、`srtp_filter.cc`） | X25519 + HKDF + ChaCha20-Poly1305（每包 AEAD） | 免去 DTLS 握手状态机；连接码直接进 HKDF 当 PSK |
-| 拥塞/可靠 | QUIC(ngtcp2) + KCP + 自研 mux + FEC | 视频不可靠 + 应用层 NACK/FEC；控制流独立可靠重传 | 视频不需要逐包重传，控制必须可靠 |
-| 信令 | HTTPS REST（`/api/v1/transport/rpc/request`）+ 长连 | 纯 TCP JSON Lines | 自托管部署简单，无证书依赖（生产可套 TLS 反代） |
-| 中继 | `Socks5HttpRelay`/`Socks5RelayRunnable` + secured relay | 服务端 UDP 转发，`RLY1` 头带配对 tag | 一个 UDP 端口即可服务全部会话 |
+## 1. 传输分层
 
-## 2. 报文格式
-
-每个 UDP 数据报 = 20 字节明文头 + 密文体（AEAD 密文 + 16 字节 tag）。
-
-```
- 0        2   3   4               8               12  13  14    16        20
- +---------+---+---+---------------+---------------+---+---+-----+---------+
- |  magic  |ver|typ|      seq      |     ts_ms     |str|flg|plen | session |
- |  "PD"   | 1 |   |   uint32 BE   |   uint32 BE   | B | B | u16 | u32 BE  |
- +---------+---+---+---------------+---------------+---+---+-----+---------+
+```text
+TCP JSON Lines       注册、配对、候选、令牌、中继入口
+        │
+        ▼
+UDP PDTP/1           20 字节明文头 + AEAD 体
+        ├─ Video     整帧 JPEG 分片、XOR FEC、NACK、关键帧请求
+        ├─ Control   独立可靠流、累积 ACK、应用消息
+        ├─ Audio     G.711 µ-law，不可靠，当前帧 + 上一帧冗余
+        ├─ Stats     统计流枚举
+        └─ Relay     RLY1 包装后的原始 PDTP 数据报
 ```
 
-`struct "<2sBBIIBBHI"`（20 B，小端）：
+信令层的 `sid` 与 UDP 包头的 `session` 不是同一个值。`session` 是链路级随机 tag，
+只用于区分和校验当前数据面会话。
+
+## 2. UDP 数据报
+
+### 2.1 固定头
+
+所有 PDTP/1 数据报以 20 字节清晰头开始。多字节整数按 **小端** 打包。
+
+```text
+ 0      2  3  4                 8                 12  13  14     16       20
++--------+--+--+-----------------+------------------+---+---+------+--------+
+| "PD"   |v |t | seq (u32 LE)    | tsMs (u32 LE)    |str|flg| plen |session |
++--------+--+--+-----------------+------------------+---+---+------+--------+
+```
 
 | 字段 | 宽度 | 说明 |
-| --- | --- | --- |
-| `magic` | 2 | 固定 `b"PD"` |
-| `ver` | 1 | 固定 `1` |
-| `typ` | 1 | 见下表 |
-| `seq` | 4 | 每包自增，同时是 AEAD nonce 计数器（重放窗口按它判重） |
-| `ts_ms` | 4 | 发送端单调毫秒（会话相对，**不是** epoch 毫秒） |
-| `stream` | 1 | 0=video 1=control 2=file 3=stats 4=audio |
-| `flags` | 1 | bit0 KEYFRAME，bit1 LAST_FRAG，bit2 RELIABLE |
-| `plen` | 2 | 载荷长度 **+16**（含 AEAD tag），作为 AAD 一部分被校验 |
-| `session` | 4 | 会话标识（握手后双方一致） |
+| --- | ---: | --- |
+| `magic` | 2 | 固定 `PD` |
+| `version` | 1 | 固定 `1` |
+| `type` | 1 | 包类型，见 2.3 |
+| `seq` | 4 | 发送序号；同时进入 AEAD nonce 和重放窗口 |
+| `tsMs` | 4 | 会话相对的发送毫秒时间，不是 Unix epoch |
+| `stream` | 1 | 逻辑流，见 2.4 |
+| `flags` | 1 | 视频/可靠标志，见 2.5 |
+| `plen` | 2 | 头部之后的载荷长度 |
+| `session` | 4 | 链路随机 tag |
 
-`plen` 把 16 字节 tag 算进去，是为了让接收端在解密前就能按长度切包，且 AAD 里
-天然包含"这一包应该有多长"这一事实——截断/追加都会解密失败。
+加密包的 `plen = 明文载荷长度 + 16`，16 字节是 Monocypher AEAD tag。明文
+`HELLO`、`HELLO_ACK` 和 `PUNCH` 使用原载荷长度。头部本身不加密，但整个 20 字节头
+作为 AEAD 的 AAD；修改任一字段都会导致认证失败。
 
-### 2.1 消息类型
+### 2.2 信封与 AEAD
 
-| 值 | 名称 | 方向 | 载荷 |
-| --- | --- | --- | --- |
-| 1 | HELLO | 双向 | JSON：`{role, nonce, ts, pub(32B hex), cands:[...], dev, v}` |
-| 2 | HELLO_ACK | host→client | 同 HELLO 结构（host 侧） |
-| 3 | HELLO_FIN | 双向 | 空，确认己方已收齐对端 HELLO |
-| 4 | PUNCH | 双向 | 空，纯打洞探针（不可靠，0.1s 间隔） |
-| 5 | PUNCH_ACK | 双向 | 空 |
-| 6 | DATA | 双向 | 视频分片 / 控制消息 / 文件块，见 `stream` |
-| 7 | PARITY | 双向 | `<IHBB>` frame_id, group_idx, shards, rsv + XOR 校验片 |
-| 8 | ACK | 双向 | `<III>` ack_cum, bitmap_lo, bitmap_hi（64 位位图） |
-| 9 | NACK | 双向 | `<IH>` frame_id, count + `count × u16` 缺失分片号 |
-| 10 | PING | 双向 | 空，4s 心跳 |
-| 11 | PONG | 双向 | 空 |
-| 12 | BYE | 双向 | 空，优雅关闭 |
-| 13 | AUDIO | host→client | `<IIHH>` seq, ts_ms, samples, prev_len + 上一帧 + 当前帧（µ-law） |
+1. 发送端递增 32 位包序号，构造 20 字节头，把 `plen` 设为
+   `payload.size() + 16`。
+2. 明文载荷用 Monocypher `crypto_aead_init_ietf` 加密，密钥来自 HKDF。
+3. 16 字节认证标签追加在密文后，形成 UDP 载荷体。
+4. 接收端先按头部长度切包，再以完整头部作为 AAD 解密；认证失败时不能推进重放窗口。
 
-`UNRELIABLE_TYPES = {PUNCH, PUNCH_ACK, DATA, PARITY, PING, PONG, AUDIO}` —— 其余（HELLO*、ACK、NACK、BYE）走重传/独立处理。
+重放窗口宽度为 2048。包序号 `seq` 是包头序号，不等于应用层控制消息序号。
 
-## 3. 握手与密钥
+### 2.3 包类型
 
-```
-client                                    host
-  |-- HELLO {pub_c, cands, nonce_c} ------->|   (0.25s 一发，15s 超时)
-  |<------------- HELLO_ACK {pub_h,...} ---|
-  |-- HELLO_FIN --------------------------->|
-  |<-------------------------- HELLO_FIN ---|
-  |========= 双方各自派生密钥，开始 DATA ===|
-```
+| 值 | 类型 | 方向/用途 |
+| ---: | --- | --- |
+| 1 | `HELLO` | 控制端 → 被控端；紧凑 JSON，明文 |
+| 2 | `HELLO_ACK` | 被控端 → 控制端；紧凑 JSON，明文 |
+| 3 | `HELLO_FIN` | 枚举保留；当前没有三路握手流程 |
+| 4 | `PUNCH` | 双向 UDP 打洞探针，明文 |
+| 5 | `PUNCH_ACK` | 双向打洞确认 |
+| 6 | `DATA` | 视频分片、控制消息或文件流 |
+| 7 | `PARITY` | 视频 XOR FEC 校验片 |
+| 8 | `ACK` | 控制可靠流累积确认 + 64 位位图 |
+| 9 | `NACK` | 视频缺片请求 |
+| 10 | `PING` | 保活和握手探测 |
+| 11 | `PONG` | 回显对端 `PING` 载荷 |
+| 12 | `BYE` | 主动结束链路 |
+| 13 | `AUDIO` | G.711 µ-law 音频载荷 |
 
-1. 双方各生成一对 X25519 临时密钥，`pub` 放进 HELLO。
-2. `transcript = SHA256("peerdesk/1" || 0x00 || hello_host_bytes || 0x00 || hello_client_bytes)`
-   —— **按角色固定顺序**拼接，这样两端在不同时刻计算也得到同一份摘要。
-3. `psk` 来自 9 位连接码：`psk = SHA256("peerdesk-psk" || salt || 0x00 || digits)`；
-   `psk_digest = SHA256("peerdesk/1" || 0x00 || "psk" || 0x00 || psk)`。
-4. `salt = SHA256(transcript || psk_digest)`；`shared = X25519(priv, peer_pub)`。
-5. 方向密钥：
-   - `K_h2c = HKDF-SHA256(ikm=shared, salt=salt, info="peerdesk/1 host->client", 32)`
-   - `K_c2h = HKDF-SHA256(ikm=shared, salt=salt, info="peerdesk/1 client->host", 32)`
-6. 每包 `nonce = struct ">IQ"(direction, seq)`：host 发送用 direction=0，client 用 1；
-   `AAD = 20 字节头`。接收端方向相反（host 收 client 的包用 direction=1）。
+`HELLO_FIN` 只是预留值，接收端不能把它解释成当前已经存在的三路握手。
 
-> HELLO 重发必须复用**同一份 body 字节**（`_hello_host_bytes` / `_hello_client_bytes` 缓存）。
-> 早期实现每次重发都重建带时间戳的 body，导致两端 transcript 不一致、密钥不同——
-> 表现为"握手成功但所有数据解密失败"，是联调时踩过的坑。
+### 2.4 逻辑流
 
-### 3.1 重放/乱序
+| 值 | 名称 | 状态 |
+| ---: | --- | --- |
+| 0 | `video` | 当前使用 |
+| 1 | `control` | 当前使用 |
+| 2 | `file` | 仅枚举；文件实际走控制消息 |
+| 3 | `stats` | 枚举保留 |
+| 4 | `audio` | 音频使用独立 `AUDIO` 包类型，不以 `DATA` 发送 |
 
-`ReplayWindow(width=2048)`：维护"已见最高位 + 位图"，`seq` 已在窗口内则丢弃；
-解密失败不推进窗口之外的状态。ACK/NACK 与视频乱序靠各自序号独立处理。
+### 2.5 标志位
 
-## 4. 控制流（可靠）
+| 位 | 名称 | 含义 |
+| ---: | --- | --- |
+| `0x01` | `KEYFRAME` | 当前视频帧是完整关键帧 |
+| `0x02` | `LAST_FRAGMENT` | 当前视频分片是本帧最后一片 |
+| `0x04` | `RELIABLE` | 控制消息走可靠重传 |
 
-控制消息装在 `stream=CONTROL` 的 DATA 包里，载荷前 4 字节是**消息序号**：
+### 2.6 尺寸常量
 
-```
-DATA payload = struct "<I"(msg_seq) || body
-```
+| 常量 | 值 | 说明 |
+| --- | ---: | --- |
+| `kMaxDatagram` | 1400 字节 | UDP 数据报上限 |
+| `kPayloadMtu` | 1364 字节 | 1400 − 20 − 16 |
+| `kVideoPayloadMtu` | 1296 字节 | 再减 8 字节视频分片头 |
+| 控制分片阈值 | 1200 字节 | 超过后使用 9 字节控制分片头 |
 
-**注意**：包头 `seq` 是 AEAD nonce 计数器（每包自增），消息序号必须单独放在载荷里。
-把消息序号塞进包头会造成 nonce 复用 + 重放窗口丢弃 → ACK 全丢、控制通道永远不确认。
+## 3. 连接码与握手
 
-`ReliableStream`：
+### 3.1 连接码
 
-- 发送：`seq` 从 0 递增，`pending[seq] = [payload, deadline, retries]`。
-- RTO：初始 150 ms，每次重传翻倍，上限 1200 ms；重传 14 次后放弃（视为链路失效）。
-- 接收：严格按序交付，乱序先缓存；重复丢弃。
-- ACK：`ack_cum = recv_next - 1` + 64 位位图（位 i 表示 `ack_cum-i` 已收到）。
-  **累积语义**：收到 `ack_cum` 即认为 ≤ `ack_cum` 全部落地。
+- 合法连接码为 9 位数字，首位不能是 `0`。
+- 用户界面按 `3-3-3` 分组显示，传输和派生使用去分隔符的 9 位数字。
+- 连接码是当前会话的主要预共享秘密；没有账号体系。
 
-上层消息：`hello/settings/keyframe_req/mouse/key/text/clip/file_begin|data|end/reboot/stats/info`（JSON，UTF-8）。
-
-## 5. 视频流（不可靠 + FEC + NACK）
-
-1. 抓屏 → JPEG（自适应质量 32–92，目标 ~140 KB/帧）→ 分片：
-   `VIDEO_FRAG = struct "<IHH"(frame_id, frag_idx, frag_cnt) || chunk`，每片 ≤ `PAYLOAD_MTU - 6`。
-2. 每 8 片一组（`FEC_K=8`，组内 ≥3 片才发校验）：
-   `PARITY = "<IHBB"(frame_id, group_idx, shards, 0) || XOR(组内各片, 按最长片 0 补齐)`。
-3. 接收端按 `frame_id` 建 `FragmentAssembler`；收齐即交付 → 送 Web UI。
-4. 缺片时：
-   - 有同组校验片且只缺 1 片 → 直接 XOR 恢复（`parity ^ 其余片 = 缺失片`）。
-   - 否则每 50 ms 对在途帧（≤4 帧）发 NACK，最多带 32 个缺片号；发送端从 10 帧回滚缓存里重传。
-5. 帧超过 **450 ms** 未拼齐即丢弃；若丢的是关键帧，回一条 `keyframe_req` 要新的 IDR。
-6. 发送端每秒推一次 `stats`（fps/Mbps/RTT/质量/编码耗时），近版本另带
-   `cap`（当前生效的带宽上限，Mbps，0=不限）与 `sfps`（限速后实际目标帧率）。
-   受限时顺序是**先降质量、再降帧率**：`FramePacer.target_kb = 上限字节率/fps×0.75`，
-   若实测帧大小仍超，`_effective_fps = fps × 上限/需求`（下限 1）。
-
-## 5.1 音频流（不可靠、无 FEC、帧内冗余）
-
-```
- AUDIO_HDR = struct "<IIHH"  (12 B)
- ┌──────────┬──────────┬──────────┬───────────┬──────────────┬──────────────┐
- │ seq u32  │ ts_ms u32│samples u16│prev_len u16│ 上一帧（µ-law）│ 当前帧（µ-law）│
- └──────────┴──────────┴──────────┴───────────┴──────────────┴──────────────┘
+```text
+psk      = SHA256("peerdesk-psk" || salt || 0x00 || digits)
+codeId   = SHA256("peerdesk-id" || 0x00 || digits).toHex().left(32)
+verifier = SHA256("peerdesk-psk" || psk).toHex().left(16)
 ```
 
-1. 固定 **16 kHz / 单声道 / 20 ms**，`samples = 320`，当前帧 320 字节；上一帧同样 320 字节，
-   所以单个数据报 20 + 12 + 640 + 16(tag) = **688 B < 1400**，永远不进分片器。
-2. **不进 FEC 组、不发 NACK**：20 ms 的声音等一次重传就过期了。丢包时接收端用
-   `prev_len` 里的上一帧补位（听感上是"少 20 ms"而不是"爆一声"），然后按 `seq` 去重。
-3. `seq` 单调自增；静音抑制期间 seq 会出现空洞，接收端必须以 `seq` 判断连续性，
-   不能假设连续。`ts_ms` 是会话相对毫秒，供抖动缓冲估算节奏。
-4. 编解码固定 **G.711 µ-law (`pcmu`)**：8 bit/采样、零依赖、浏览器 256 项查表即可还原，
-   128 kbit/s 在 6.6 Mbps 的视频旁边可以忽略；静音抑制后约 2.5 kbit/s。
-5. 音频与视频共用同一个 UDP 五元组与加密上下文（同一条 `PeerLink`），
-   因此打洞/中继切换对声音透明。
+`salt` 是派生接口保留的附加输入；当前客户端调用使用空 `salt`，但协议要求双方输入
+一致。`codeId` 是服务端注册表的查找键，不直接出现在 JSON 信令中。
 
-## 6. 打洞与中继
+### 3.2 HELLO
 
-- 候选来源：本机全部 IPv4（`local_ipv4s()`）+ 服务端 STUN 得到的 srflx + 对端经信令交换的候选。
-- 打洞：向全部候选每 100 ms 发 PUNCH，收到任意 PUNCH/PUNCH_ACK 即锁定该路径（direct）。
-- 6 秒仍未直连 → 升级中继：数据报外面套 `RLY1` 头
+控制端先发送明文 `HELLO`，被控端返回明文 `HELLO_ACK`。载荷是紧凑 JSON，至少包含：
 
-```
- +--------+----------------+------------------+
- | "RLY1" | tag (uint32)   | 原始 PDTP 报文   |
- +--------+----------------+------------------+
-```
+| 字段 | 说明 |
+| --- | --- |
+| `v` | 协议版本，当前为 `1` |
+| `sid` | 本次信令会话 id 的十六进制文本 |
+| `pub` | X25519 公钥的 Base64（32 字节） |
+| `psk` | 上述 verifier 的十六进制文本 |
+| `role` | `client` 或 `host` |
+| `id` | 设备标识 |
+| `cands` | 候选数组，元素含 `host`、`port`、`kind` |
+| `ts` | 发送时的 Unix 毫秒时间 |
 
-  服务端按 tag 找到配对的另一端转发（tag 由服务端在 `connect` 时生成，奇数为 agent、偶数为 viewer）。
-- 中继模式下 RTT/带宽由服务端承担，客户端 UI 显示"中继"。
-- `--relay-only` 强制走中继（自测/对称 NAT 排障用）。
-- 强制中继的引导：server 只有在收到 agent HELLO 后才知道其 UDP 地址，viewer 过早的
-  HELLO 可能被丢弃。host 派生密钥并回 HELLO_ACK 后立即发一包加密 PING；双方在
-  `established` 前每 1 s 重发加密 PING，直到任意包解密成功并锁定中继路径。
+重发 `HELLO` 或 `HELLO_ACK` 必须复用第一次构造的原始 JSON 字节，不能重新生成候选、
+时间戳或密钥。否则两端 transcript 不同，会出现“握手看似成功但所有加密包都无法解封”。
 
-## 7. STUN（自实现子集）
+### 3.3 密钥派生
 
-与媒体共用同一个 UDP socket（保证 srflx 端口就是媒体端口），靠报文前两字节区分：
+双方拿到对端 32 字节 X25519 公钥后计算共享秘密，再执行：
 
-- `0x0001` = Binding Request，`0x0101` = Binding Success。
-- magic cookie `0x2112A442`，12 字节 txid。
-- 只实现 `XOR-MAPPED-ADDRESS(0x0020)`；解析时**必须校验 family 字节**
-  （0x01=IPv4 需要 4 字节，0x02=IPv6 需要 16 字节），否则坏包会被拼成"合法但错误"的地址。
+```text
+transcript = SHA256("peerdesk/1" || 0x00 || helloHost || 0x00 || helloClient)
+pskDigest  = SHA256("peerdesk/1" || 0x00 || "psk" || 0x00 || psk)
+salt       = SHA256(transcript || pskDigest)
 
-## 8. 信令协议（JSON Lines over TCP）
-
-```
-client → server: {"t":"register","code":"604173829","name":"PC-01","cands":[{host,port,kind}]}
-server → client: {"t":"registered","code":"604 173 829","relay":[host,port],"server_time":...}
-
-viewer → server: {"t":"connect","code":"604173829","cands":[...],"name":"..."}
-server → agent : {"t":"viewer","sid":..,"cands":[viewer 候选],"name":..,"relay":[h,p],"relay_tag":T_a}
-server → viewer: {"t":"peer","sid":..,"cands":[agent 候选],"name":..,"relay":[h,p],"relay_tag":T_v}
-
-两端后续增量候选：{"t":"cands","cands":[...]} → 对端收到 "peer_cands"
-保活：{"t":"ping"} → {"t":"pong"}
-关闭：{"t":"bye"} → 对端 "peer_bye"；TCP 断开 → 对端 "peer_gone"
-错误：{"t":"error","reason":"bad_code|offline|unknown_type|bad_token|rate_limited"}
+hostToClient = KDF(shared, salt, "peerdesk/1 host->client", 32)
+clientToHost = KDF(shared, salt, "peerdesk/1 client->host", 32)
 ```
 
-**鉴权与限速（可选，默认关闭）**：
+`helloHost` 永远是被控端的原始 JSON，`helloClient` 永远是控制端的原始 JSON；
+不能按本地发送顺序交换。`KDF` 是基于 HMAC-SHA256 的 RFC 5869
+extract-then-expand 派生。共享秘密为全零时派生必须失败。
 
-- 服务器带 `--token` 时，`register` 与 `connect` 的报文里都要带 `"token":"..."`；
-  缺失或不匹配回 `{"t":"error","reason":"bad_token"}`，随后连接被关闭。比较用
-  `hmac.compare_digest`，不看长度也不提前返回。
-- `registered` / `viewer` / `peer` 回包都带 `"token_required":true|false` 与
-  `"relay_mbps":<float>`（0=不限）。浏览器连接码面板据此提示"该服务器需要令牌"。
-- 连接频次：服务器按来源 IP 做滑动窗口（`--connect-max` 默认 10 次 / `--connect-window` 默认 60 s），
-  超限回 `{"t":"error","reason":"rate_limited"}`。`attempts` 表会清过期项，并在超过 8192 条时
-  丢弃最早的一批，防止被大量来源 IP 撑爆内存。
-- 中继限速：每对会话一个令牌桶（速率 `relay_mbps × 125000` B/s，1 s 突发容量），
-  超出的报文在服务端直接丢弃（视频是流，丢包由 FEC/NACK 兜住）；会话结束时日志打印
-  `通过 N 包 / 限速丢包 M`。
+### 3.4 nonce 与重放
 
-服务端只保存 `code_id = SHA256("peerdesk-id"||0x00||digits)[:32]`，**不落明文连接码**。
+- 方向值写入 nonce 前 4 字节，使用 **大端**：被控端发送为 `0`，控制端发送为 `1`。
+- 后 8 字节是包序号 `seq`，同样使用 **大端**。
+- nonce 固定 12 字节，AEAD tag 固定 16 字节。
+- 解密失败、方向不匹配或 `session` tag 不匹配都不应更新重放窗口。
+- 窗口宽度为 2048；新包成功认证后才标记为已接收。
 
-## 9. 安全边界（如实说明）
+### 3.5 打洞、保活与中继
 
-- 连接码即 PSK：知道 9 位码的人可以完成握手（与 UU远程同一模型）。9 位数字空间 10⁹，
-  服务端建议加尝试频率限制（路线图）。
-- 服务器能看到元数据（谁连谁、候选地址、流量大小），看不到媒体内容（无密钥）。
-- 中继是明文转发密文包，无法解密，但可以丢包——属可用性问题不是机密性问题。
-- 控制通道有重放保护；视频通道不做逐包重放保护（丢一帧无害，且 seq 单调配合窗口过滤）。
+- `HELLO` 默认每 250 ms 重发一次，握手超时为 15 秒。
+- 收到候选后每 100 ms 对候选发送 `PUNCH`；收到有效响应即可锁定直连路径。
+- 网络路径确认后每 4 秒发送保活 PING；握手阶段每秒发送加密 PING。
+- 25 秒没有收到有效数据视为链路超时。
+- 开始握手后 6 秒仍未建立直连，且服务器提供了中继端点，则升级为 RLY1 中继。
+- 中继只是 UDP 转发：PDTP 载荷始终为密文，中继端不能解密媒体。
+
+## 4. 视频数据
+
+### 4.1 分片
+
+视频帧按最多 1296 字节切成 `DATA` 包。每个视频载荷先放 8 字节分片头：
+
+```text
+frameId u32 LE + index u16 LE + count u16 LE + JPEG bytes
+```
+
+- `frameId` 由发送端递增，用于重组、NACK 和 FEC。
+- `index` 从 0 开始，`count` 是整帧分片数。
+- 最后一片设置 `LAST_FRAGMENT`；关键帧的每一片都设置 `KEYFRAME`。
+
+### 4.2 XOR FEC
+
+每 8 个连续分片组成一组：
+
+- 少于 3 片时不发送 parity。
+- `PARITY` 载荷头为 8 字节：
+  `frameId u32 LE + groupIndex u8 + shards u8 + 2 字节保留`。
+- 校验数据是对组内所有分片逐字节 XOR，长度取组内最大分片。
+- 取长度时短分片按零补齐。单个缺片可由同组 parity 恢复；多个缺片需要 NACK。
+
+### 4.3 NACK 与关键帧
+
+- 接收端每 50 ms 检查最多 4 个未完成帧，每次最多请求 32 个缺片。
+- 相同帧的 NACK 有 50 ms 限频，避免重复请求风暴。
+- 一帧超过 450 ms 仍未拼齐则丢弃并增加丢帧计数。
+- 丢弃的是关键帧时，接收端请求新的关键帧。
+- 发送端缓存最近 10 帧的分片，用于响应 NACK。
+- 视频不参与控制流的可靠重传；丢包由 FEC、NACK 和关键帧刷新处理。
+
+## 5. 控制可靠流
+
+### 5.1 消息编号与分片
+
+控制消息使用单独的 `ReliableStream`。每个 `DATA/control` 载荷前有一个
+**u32 小端消息序号**，随后才是消息或分片：
+
+```text
+[u32 acknowledgeable sequence][control payload]
+```
+
+当 JSON 载荷超过 1200 字节时分片。每个分片头为 9 字节：
+
+```text
+0xF1 + messageId u32 LE + index u16 LE + count u16 LE + body bytes
+```
+
+`messageId` 只在一次分片重组内标识消息，和可靠流的 u32 序号不是同一个概念。
+接收端同时最多保留 16 个未完成分片消息。
+
+### 5.2 ACK 与重传
+
+- ACK 载荷为 12 字节：`cumulative u32 LE + bitmapLow u32 LE + bitmapHigh u32 LE`。
+- 初始 RTO 为 150 ms，按指数退避，最大 1200 ms。
+- 最多重传 14 次；超过后丢弃该待确认项。
+- 控制流 goal 是“可靠、有序”；补齐 ACK 缺陷前，乱序补洞不能视为可靠。
+
+### 5.3 已知选择性 ACK 缺陷
+
+这是一个已经确认、尚未修复的实现缺陷，不能把它包装成“可用”：
+
+- `ackPayload()` 的注释和发送语义按
+  “bit i 表示 `cumulative - i`”写。
+- `onAck()` 实际却把 bit i 解释为 `cumulative - i - 1`。
+- 接收缓冲只保存 `recvNext_` 之后的乱序包，不能可靠表达真正位于累积确认之前的空洞。
+- `tests/transport_test.cpp:121` 当前固化了这个错误语义。
+
+因此当前只能说累积 ACK 与基本 RTO 正常，**选择性重传和乱序补洞不可靠**。
+后续修复目标语义统一定为：
+
+```text
+bit i = cumulative + 1 + i
+```
+
+修复时需要同时改发送端、接收端和测试，并补充乱序、重复、越界和伪 ACK 用例。
+
+## 6. 音频
+
+### 6.1 采集与编码
+
+- Windows WASAPI loopback 采集系统播放声音。
+- 重采样为 16 kHz、单声道、PCM16。
+- 每帧 20 ms，即 320 个采样、640 字节 PCM。
+- 使用 G.711 µ-law 编码，每帧约 320 字节。
+
+### 6.2 音频载荷
+
+`AUDIO` 载荷头固定 12 字节：
+
+```text
+sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
++ previous µ-law bytes + current µ-law bytes
+```
+
+- `samples` 是当前 PCM 采样数，正常为 320。
+- `previousLen` 是上一帧编码长度，首帧可以为 0。
+- 当前帧和上一帧同时携带，接收端可在丢一帧时用冗余覆盖。
+- 连续静音 25 帧后，每 25 帧只保留一个静音帧，降低空口占用。
+- Viewer 使用 `QAudioSink` 播放，缓存上限约 360 ms。
+
+音频不进入视频 FEC 组，也不使用可靠重传。
+
+## 7. 控制消息、文件与剪贴板
+
+### 7.1 主要控制消息
+
+| `t` | 说明 |
+| --- | --- |
+| `hello` | 加密链路建立后的角色确认 |
+| `settings` | 画质、帧率、显示器、声音、剪贴板等会话设置 |
+| `keyframe_req` | 请求新的完整视频关键帧 |
+| `mouse` | 归一化画面坐标、按钮、滚轮 |
+| `key` | 键码、按下/释放、文本输入 |
+| `clip` | 文本剪贴板同步 |
+| `file_begin` / `file_data` / `file_end` | 文件传输 |
+| `reboot` | 只回提示，不执行重启 |
+| `stats` | 会话统计 |
+
+控制消息是 JSON；一次控制流发送的载荷由 u32 可靠序号包裹，超过 1200 字节再走
+`0xF1` 分片头。
+
+### 7.2 文件
+
+- 文件使用 `file_begin`、`file_data`、`file_end` 控制消息。
+- 内容字段 `d` 使用 Base64，每块 24 KiB。
+- 单文件上限 512 MiB。
+- 文件名只允许安全 basename；接收端拒绝路径分隔符、空名和超长名称。
+- 接收端使用 `QSaveFile` 写入，存在同名文件时生成唯一路径。
+- 每一侧同一时间只能有一个主动发送；接收端可以管理多个传输。
+- 默认接收目录是系统 Downloads 下的 `PeerDesk`。
+
+### 7.3 剪贴板与重启
+
+- 剪贴板只同步文本，双向，单次上限 256 KiB。
+- 剪贴板变化检测在会话运行期启用；关闭“剪贴板同步”后不会把新内容写入链路。
+- `reboot` 当前只提示“收到重启指令（未执行）”，不是可用的远程重启能力。
+
+## 8. 信令与中继
+
+### 8.1 TCP JSON Lines
+
+信令是长度有界的 JSON Lines：每行一条 JSON，单行上限 1 MiB。客户端消息包括：
+
+`register`、`connect`、`reconnect`、`ping`、`cands`、`relay_hello`、`bye`。
+
+服务端下行包括：
+
+`registered`、`viewer`、`peer`、`peer_gone`、`viewer_gone`、`pong`、`error`，
+以及转交给对端的 `peer_cands`、`peer_relay_hello`、`peer_bye`。
+
+### 8.2 注册与配对
+
+1. 被控端发送 `register`，携带 `codeId`、设备名、会话 `sid`、本地候选和令牌。
+2. 服务端返回 `registered`，包含连接码、STUN/中继 UDP 地址、`server_time`、
+   `token_required` 和 `relay_mbps`。
+3. 控制端发送 `connect`，服务端检查令牌、在线状态和每 IP 连接频次。
+4. 被控端收到 `viewer`，控制端收到 `peer`；双方得到相同 `sid`、对端候选、
+   中继地址、各自的 `relay_tag` 和 `relay_mbps`。
+5. 双方用同一连接码派生 psk，在 UDP 候选上执行 PDTP 握手。
+
+`reconnect` 当前只向被控端发送 `viewer_gone`，没有完整的配对恢复、媒体密钥恢复或
+文件状态恢复。它不是“自动重连已完成”的证明。
+
+### 8.3 错误与限制
+
+服务端错误 `reason` 包括：
+
+`bad_token`、`bad_code`、`offline`、`rate_limited`、`unknown_type`。
+
+- 默认每个 IP 在 60 秒内最多 10 次连接尝试。
+- 令牌只保护信令入口；内置信令 TCP 本身不是 TLS。
+- 中继默认按每会话 `relay_mbps × 125000 B/s` 限速，允许 1 秒突发；超限数据报直接丢弃。
+
+### 8.4 STUN
+
+STUN 与中继共用服务端 UDP 端口：
+
+- 使用 Binding Request/Success。
+- Magic Cookie 为 `0x2112A442`。
+- 事务 id 固定 12 字节。
+- 支持 MAPPED-ADDRESS 和 XOR-MAPPED-ADDRESS 的解析/生成。
+- 反射地址只用于候选和打洞，不替代端到端加密。
+
+### 8.5 RLY1 中继封装
+
+中继数据报为：
+
+```text
+RLY1 (4 bytes) + tag u32 BE + PDTP packet
+```
+
+服务端为每个会话随机生成 tag 并保证唯一。中继只检查 tag 和目标，不尝试解密 PDTP。
+中继超限会丢包，因此弱网/高码率场景必须依靠视频自适应和重试策略。
+
+## 9. 安全边界
+
+- 9 位连接码就是会话的预共享秘密；知道码且网络可达的人可以尝试配对。
+- 服务端保存连接码摘要，不使用明文连接码注册；但能看到连接元数据、候选地址、
+  流量大小和时序，也能丢包或阻断会话。
+- 中继只转发密文，不能解密媒体，但它不是匿名网络，也不能隐藏流量特征。
+- `--token` 只保护信令入口，不能替代传输加密，也不能阻止已获得连接码的人发起请求。
+- 公网部署应把明文 TCP 信令放在 TLS 终结代理或可信内网之后，并限制 UDP 入口暴露。
+- 被控端应只在可信网络中开放键鼠、剪贴板和文件接收权限。
+
+## 10. 兼容性与维护规则
+
+- `version` 变化时，旧客户端必须拒绝或进入明确迁移路径。
+- 新字段应保持 JSON 向后兼容；关键安全字段缺失时拒绝握手。
+- 包头布局、nonce 构造、HKDF info、FEC 分片头和 ACK 语义属于协议兼容性边界，
+  修改必须同时更新测试和本文档。
+- 视频、音频和可靠流的具体参数可以在版本内演进，但不能让接收端把缺片、伪 ACK
+  或超时帧误判为完整数据。
+- 真实跨机验收覆盖 NAT、弱网和长会话之前，本文档不提供性能承诺。

@@ -1,174 +1,226 @@
 # PeerDesk · 对端桌面
 
-**自研 P2P 协议的远程桌面：9 位连接码、直连优先、中继兜底、无账号、无会员、无时长计费。**
+**自托管的 Windows 远程桌面：原生 Qt 6 客户端、C++20 后端、9 位连接码、UDP 直连优先、自建中继兜底。**
 
-纯 Python 3.11+ 实现（Windows），传输层是自己写的 PDTP/1 —— UDP + X25519/HKDF/ChaCha20-Poly1305 +
-候选打洞 + XOR FEC + NACK，**不用 WebRTC、不用浏览器引擎、不用 npm**。UI 是三个静态文件，
-本地 HTTP + 手写 WebSocket 桥给浏览器渲染。
+PeerDesk 以逆向分析得到的 UU远程 交互为参照，持续补齐连接、会话和桌面操作体验。
+它不是 UU远程 的等价替代品，也不包含对方的代码、资源或凭据。
 
 [![CI](https://github.com/Bad0RANG3/peerdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/Bad0RANG3/peerdesk/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.11%2B-3d7bfd)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-3d7bfd)
+![C%2B%2B](https://img.shields.io/badge/C%2B%2B-20-00599c)
+![Qt](https://img.shields.io/badge/Qt-6.8-41cd52)
 ![License](https://img.shields.io/badge/license-Apache--2.0-35d07f)
 
-![viewer 会话页](docs/screenshot-viewer.png)
+![PeerDesk 原生会话页](docs/screenshot-native-viewer.png)
 
-> 上面是本机回环自测（server + agent + viewer 三进程都在这一台机器上），画面来自
-> `agent --capture test` 的**合成信号源**，不读取真实屏幕——所以仓库里的截图不会泄露任何
-> 桌面内容。HUD 实时读数 `P2P / 1600×900 @ 1280×800 / 16.8 fps / 6.66 Mbps / 0.5 ms`。
->
-> 也可以直接用链接连：`http://127.0.0.1:7702/?code=604173829&server=127.0.0.1:7900&auto=1`
-> （带 `code` 就自动连，`auto=0` 只填不连，`hud=1` 顺便打开 HUD）。
+> 上图由 `--page viewer --viewer-demo` 生成。画面来自合成信号源，不读取真实桌面；
+> HUD 中的 `1600×900 / 59.8 fps / 22.6 Mbps / 6.4 ms` 是固定演示值，**不是实测性能**。
 
----
+## 当前状态
 
-## 为什么写这个
+版本 **0.7.0**，处于原生迁移与产品化之间。服务端、传输、会话、Windows 平台层和
+Qt 应用壳均已切换到同一套 C++ 实现，主连接路径可用；真实跨机、弱网和长时间会话
+仍需单独验收。断线恢复、安装器、自动更新和开机自启尚未完成。
 
-网易UU远程做得很完整（libwebrtc ICE + DTLS-SRTP + QUIC/KCP 双栈 + 自研 FEC + 虚拟显示器/声卡/HID 驱动），
-但它的**"安全中继"是会员权益**：P2P 打不通就引导你付费。本项目把这条链路从头实现一遍，
-**打洞优先、中继永远免费兜底**，并且服务端可以自己一条命令跑起来。
+## 体验目标
 
-逆向分析（组件、传输栈、132 条 REST 接口、计费模型）见 [docs/01-reverse-engineering.md](docs/01-reverse-engineering.md)。
+- 像 UU远程 一样用 9 位码快速连接，不要求账号，不把中继能力做成会员项。
+- 原生窗口承载连接页、被控端页和会话页，避免多开终端或跳转外部界面。
+- 连接后直接进入桌面画面；悬浮工具栏、HUD、画质、显示器、声音、文件与全屏操作都在会话内完成。
+- 打洞成功时走直连，网络不允许时自动升级到自托管 UDP 中继。
 
-## 特性
+## 已实现
 
-- **9 位连接码**，3-3-3 分组；服务端只保存 `SHA256` 后的 `code_id`，不落明文码
-- **每包 AEAD**：X25519 临时密钥 + HKDF（连接码当 PSK）+ ChaCha20-Poly1305，20 字节头做 AAD
-- **打洞 + 中继回退**：候选交换后 100 ms 一发 PUNCH，6 秒直连失败自动升级 UDP 中继（画质不变）
-- **视频**：JPEG 质量自适应（32–92）+ XOR FEC（8+1）+ NACK 重传 + 关键帧请求 + 450 ms 帧超时丢弃
-- **声音**：WASAPI loopback 采集本机播放的音频 → 16 kHz 单声道 G.711 µ-law（20 ms/帧，128 kbit/s）
-  → 帧内带上一帧冗余、静音自动抑制 → 浏览器 WebAudio 抖动缓冲播放
-- **控制**：独立可靠流（累积 ACK + 64 位位图 + RTO 退避），键鼠/文本/剪贴板/文件/画质/显示器切换
-- **双向文件传输**：控制端拖拽即上传（浏览器→被控端），被控端面板填路径即可推给控制端（经 `/dl` 下载）
-- **多显示器**、静帧跳过、绝对坐标注入、Unicode 文本输入、`Ctrl+Alt+Del`
-- **DXGI Desktop Duplication 抓屏**：Windows 8+ 默认优先 DXGI，子进程探测通过后启用；
-  运行期 access lost 自动回退 GDI/mss，显式 `--capture dxgi` 失败则直接报错；
-  `PEERDESK_DXGI_PROBE=0` 可禁用探测
-- **浏览器 UI**：深色玻璃拟态、悬浮会话工具栏、实时 HUD，无框架无构建步骤；
-  支持 URL 直达 `?code=…&auto=1`（发一条链接就能连）
-- **可演示的合成信号源**：`agent --capture test` 画一张测试卡（渐变 + 网格 + 时钟 + 移动方块），
-  不读真实屏幕，文档截图与 CI 都用它
-- **自托管服务端**：TCP 信令 + UDP 中继 + STUN 复用同一个 UDP 端口
+- **原生客户端**：Qt 6 Widgets 连接页、被控端面板、Viewer、设置对话框、系统托盘和窗口状态记忆。
+- **连接与信令**：9 位连接码、3-3-3 显示、直连优先、6 秒升级中继、服务器令牌、连接频次限制。
+- **加密传输**：X25519 临时密钥、HKDF-SHA256、每数据包 AEAD、重放窗口和中继密文转发。
+- **视频**：GDI 抓屏、多显示器、JPEG 质量自适应、静帧跳过、XOR FEC、缺片 NACK、关键帧请求。
+- **声音**：WASAPI loopback、16 kHz 单声道、20 ms G.711 µ-law 帧、上一帧冗余和静音抑制。
+- **桌面控制**：绝对坐标键鼠、滚轮、文本/IME、剪贴板文本、`Ctrl+Alt+Del`、相对移动接口和按键释放。
+- **文件**：双向传输、24 KiB 分块、进度/错误提示、单文件 512 MiB 上限和落盘前路径校验。
+- **会话交互**：五档画质、显示器切换、声音开关、全屏、自动隐藏悬浮工具栏、实时 HUD、拖放上传。
+- **自托管服务端**：TCP 信令、UDP 中继和 STUN 共用一套服务；每会话中继限速，超限丢包。
 
-## 快速开始
-
-```bash
-git clone https://github.com/Bad0RANG3/peerdesk.git
-cd peerdesk
-python -m pip install -e .
-python -m peerdesk doctor          # 环境自检：依赖 / 显示器 / 输入 / 加密 / UDP / STUN
-```
-
-三端各开一个终端：
-
-```bash
-# 1) 服务端（一台有公网 IP 的机器；内网直连也可以用它）
-python -m peerdesk server --port 7900 --udp-port 7901
-
-# 2) 被控端：给出 9 位连接码，并开一个本地面板
-python -m peerdesk agent --server 1.2.3.4:7900 --code 604173829 --web-port 7701
-
-# 3) 控制端：打开 http://127.0.0.1:7702/ 输入连接码
-python -m peerdesk viewer --server 1.2.3.4:7900 --web-port 7702
-```
-
-不写 `--code` 时 agent 会随机生成一个并显示在面板上（面板里可以复制或更换）。
-`viewer` 也可以不带 `--code` 启动，直接在页面里填。
-
-```bash
-python -m peerdesk agent --help
-python -m peerdesk viewer --help
-```
-
-### 不用装 Python：单文件 exe
-
-```bash
-python -m pip install pyinstaller
-python packaging/build.py            # → dist/peerdesk.exe（约 33 MB，无控制台窗口可选）
-dist/peerdesk.exe doctor             # 自检
-dist/peerdesk.exe agent --server 1.2.3.4:7900 --code 604173829
-```
-
-`dist/peerdesk.exe` 一个文件包含 agent / viewer / server / doctor 四端与全部前端资源，
-目标机器上**不需要 Python**。CI 每次推 main 都会构建并把 exe 作为 artifact 上传。
-
-### 常用参数
-
-| 参数 | 角色 | 说明 |
-| --- | --- | --- |
-| `--server HOST:PORT` | agent/viewer | 信令服务器，默认 `127.0.0.1:7900` |
-| `--code 604173829` | agent/viewer | 9 位连接码（首位非 0） |
-| `--web-port` | agent/viewer | 本地面板端口（`0` = 随机） |
-| `--fps / --width / --quality` | agent | 帧率上限 / 最大宽度 / JPEG 质量（32–92） |
-| `--monitor N` | agent | 初始显示器序号（0 起） |
-| `--no-input` / `--no-clipboard` / `--no-skip-static` | agent | 禁止键鼠 / 禁止剪贴板 / 关闭静帧跳过 |
-| `--no-audio` / `--audio-test` | agent | 不传声音 / 用 440 Hz 合成音代替声卡（无声卡联调） |
-| `--relay-only` | agent/viewer | 强制中继（排障、对称 NAT 场景） |
-| `--token` | 全部 | 服务端/客户端共享令牌（服务端设了就必须带） |
-| `--capture auto\|dxgi\|gdi\|mss\|test` | agent | 抓屏后端，默认 `auto`（DXGI → GDI → mss）；显式 `dxgi` 不可用时直接报错；`test` 是合成画面，不读真实屏幕，用于演示/CI |
-| `--scale-mode fast\|halftone\|pil` | agent | 缩放交给谁：GDI 驱动（快）/ 平滑 / Pillow（最慢最锐） |
-| `-v` / `--log FILE` | 全部 | 详细日志 / 写日志文件 |
+五档画质分别为：`流畅`、`均衡`、`高清`、`超清`、`原画`。
 
 ## 架构
 
-```
-agent ──TCP JSON Lines──▶ server ◀──TCP JSON Lines── viewer
-   └──────── PDTP/1 over UDP（打洞直连，失败走中继）────────┘
-viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
+```text
+被控端 peerdesk-client ──TCP 信令──▶ peerdesk-server ◀──TCP 信令── 控制端 peerdesk-client
+                         └──── PDTP/1 over UDP：直连或 RLY1 中继 ────┘
+STUN 与中继共用服务端 UDP 端口
 ```
 
-| 层 | 文件 | 说明 |
-| --- | --- | --- |
-| 报文/分片/FEC | `peerdesk/wire.py` | 20 字节头、VIDEO_FRAG/PARITY/ACK/NACK、`FragmentAssembler` |
-| 加密 | `peerdesk/crypto.py` | X25519 → HKDF → AEAD，nonce=`(direction, seq)`，重放窗口 2048 |
-| 传输 | `peerdesk/transport.py` | `PeerLink` 状态机、`ReliableStream`、`VideoSender/Receiver`、中继封装 |
-| 抓屏调度/编码 | `peerdesk/capture.py` | `auto` 按 DXGI → GDI → mss 选择后端，运行期回退；Pillow JPEG + `FramePacer` 按帧大小调质量 |
-| DXGI 抓屏 | `peerdesk/dxgi.py` | Desktop Duplication + staging texture + `RowPitch` 行宽整理，子进程探测与 last-frame 缓存 |
-| 声音 | `peerdesk/audio.py` | WASAPI loopback（纯 ctypes）→ 重采样 → G.711 µ-law，`AudioPump` 定拍送帧 |
-| 输入 | `peerdesk/wininput.py` | `SendInput`，虚拟桌面归一化，剪贴板读写与监视 |
-| 会话 | `peerdesk/session.py` | `HostSession` / `ViewerSession`，控制消息分发 |
-| 服务端 | `peerdesk/server.py` | 信令 + 中继（`RLY1` 头 + 配对 tag）+ STUN |
-| 面板 | `peerdesk/webui.py` + `peerdesk/web/` | HTTP/WS 桥、Hub 背压丢帧、sticky 状态重放 |
+| 路径 | 职责 |
+| --- | --- |
+| `src/core/` | 报文、分片、FEC、可靠流、STUN、X25519/HKDF/AEAD、重放窗口 |
+| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计 |
+| `src/server/` | TCP 信令、连接码注册、UDP 中继、STUN、令牌与限速 |
+| `src/client/` | TCP JSON Lines 信令客户端 |
+| `src/session/` | 被控端/控制端会话、音视频、输入、剪贴板、文件 |
+| `src/app/` | 控制器、偏好、画质预设、声音播放 |
+| `src/ui/` | 原生窗口、连接页、被控端面板、Viewer、设置和主题 |
+| `src/platform/` | GDI 抓屏、WASAPI、Win32 输入和剪贴板 |
 
-细节见 [docs/02-architecture.md](docs/02-architecture.md) 与协议规范 [docs/03-protocol-pdtp1.md](docs/03-protocol-pdtp1.md)。
+协议细节见 [PDTP/1 协议规范](docs/03-protocol-pdtp1.md)，模块与数据流见
+[架构说明](docs/02-architecture.md)。
+
+## 构建
+
+要求：
+
+- Windows 10/11 x64
+- CMake 3.24+
+- Ninja
+- Qt 6.8.3 `mingw_64`
+- MinGW 13.1（Qt 安装器自带）
+
+```powershell
+git clone https://github.com/Bad0RANG3/peerdesk.git
+cd peerdesk
+$env:PATH = "C:\Qt\6.8.3\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;$env:PATH"
+cmake --preset windows-mingw
+cmake --build --preset windows-mingw
+```
+
+产物位于 `build/cpp/`：
+
+- `peerdesk-server.exe`
+- `peerdesk-client.exe`
+- `peerdesk-link-harness.exe`
 
 ## 测试
 
-```bash
-python -m unittest discover -s tests -p "test_*.py"   # 150 个单元测试
-python tests/e2e_local.py                            # 进程内端到端（直连，含声音约 320 帧/6 s）
-python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
-python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 声音 + 上传/下载
-python tests/e2e_local.py --token s3cret             # 验证令牌鉴权链路
-python tests/e2e_local.py --token s3cret --bad-token # 负路径：错误令牌必须被拒
-python tests/e2e_local.py --relay --relay-mbps 1.5   # 中继限速 + 被控端带宽自适应
-python tests/e2e_exe.py                              # 黑盒：dist/peerdesk.exe 三进程互连
+```powershell
+ctest --preset windows-mingw --output-on-failure
 ```
 
-本机实测（2560×1440 桌面、1600×900 编码、JPEG q60、fps 上限 20）：
-**DXGI 单帧抓屏+缩放+JPEG 约 10–12 ms，GDI 约 18–23 ms（mss 约 36 ms），DXGI 约为 GDI 的一半**。
-声音另占 128 kbit/s（静音时自动掉到 2.5 kbit/s），中继模式功能等价。
-瓶颈仍是整帧抓屏拷贝 + JPEG；DXGI 脏矩形与 GPU 编码尚未实现。
+当前有 11 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
+`peerdesk-stun`、`peerdesk-server`、`peerdesk-peer-link`、`peerdesk-session`、
+`peerdesk-signaling-client`、`peerdesk-app-controller`、`peerdesk-ui`、`peerdesk-platform`。
+CI 在 Windows 上配置、编译并执行全部套件。
+
+## 运行
+
+### 1. 启动服务端
+
+```powershell
+.\build\cpp\peerdesk-server.exe --port 7900 --udp-port 7901
+```
+
+跨机部署时需要放行 TCP `7900` 和 UDP `7901`。建议为公开服务器设置令牌与中继带宽：
+
+```powershell
+.\build\cpp\peerdesk-server.exe --port 7900 --udp-port 7901 `
+  --token "<shared-token>" --relay-mbps 50 --connect-max 10 --connect-window 60
+```
+
+### 2. 启动被控端
+
+```powershell
+.\build\cpp\peerdesk-client.exe --page host `
+  --server 127.0.0.1:7900 --code 604173829 --token "<shared-token>"
+```
+
+在被控端面板确认连接码、服务器、令牌、键鼠/剪贴板权限和接收目录，然后开始被控。
+
+### 3. 启动控制端
+
+```powershell
+.\build\cpp\peerdesk-client.exe --server 127.0.0.1:7900 --token "<shared-token>"
+```
+
+在连接页输入相同的 9 位码。连接成功后自动进入会话页。
+
+### 安全预览会话页
+
+```powershell
+.\build\cpp\peerdesk-client.exe --page viewer --viewer-demo
+```
+
+该模式只渲染合成画面，不读取屏幕、不注入输入、不联网传输。
+
+## 服务端参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--host` | `0.0.0.0` | TCP/UDP 监听地址 |
+| `--port` | `7900` | TCP 信令端口，`0` 为随机 |
+| `--udp-port` | `7901` | UDP 中继与 STUN 端口，`0` 为随机 |
+| `--token` | 空 | 客户端共享令牌；设置后两端必须一致 |
+| `--relay-mbps` | `0` | 每会话中继上限，`0` 表示不限 |
+| `--connect-max` | `10` | 每个 IP 在窗口内的连接尝试上限 |
+| `--connect-window` | `60` | 连接尝试计数窗口，单位秒 |
+| `-v`, `--verbose` | 关闭 | 输出调试日志 |
+| `--version` | — | 输出版本后退出 |
+
+环境中可设置 `PEERDESK_BIND`、`PEERDESK_PORT`、`PEERDESK_UDP_PORT`、
+`PEERDESK_TOKEN` 和 `PEERDESK_RELAY_MBPS` 作为对应默认值。
+
+## 客户端参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `--server HOST:PORT` | 信令服务器，默认取已保存偏好或 `127.0.0.1:7900` |
+| `--token TOKEN` | 服务器令牌 |
+| `--code CODE` | 本机被控连接码或预填连接码 |
+| `--page remote\|host\|viewer\|settings` | 启动页面，默认 `remote` |
+| `--viewer-demo` | 合成 Viewer，仅能配合 `--page viewer` |
+| `--capture native\|test` | 使用真实 GDI 抓屏或合成信号源 |
+| `--audio-test` | 使用 440 Hz 合成音源 |
+| `--screenshot PATH` | 保存窗口截图后退出 |
+| `--exit-after MS` | 指定毫秒后自动退出 |
+
+`--capture test`、`--audio-test`、`--viewer-demo` 或截图模式会使用临时偏好，
+不会覆盖日常配置。
+
+## 安全边界
+
+- 9 位连接码是会话预共享密钥的一部分。知道连接码且网络可达的人可以发起配对。
+- 服务端保存连接码摘要，不保存用于派生的明文码；中继只转发加密后的 PDTP 数据报。
+- 服务端仍能看到连接元数据、候选地址、流量大小和时序，也能丢包或阻断会话。
+- `--token` 只保护信令入口，不能替代传输加密。内置信令是明文 TCP，公网部署应放在
+  TLS 终结代理或可信内网之后。
+- 中继限速默认按单会话令牌桶执行；超过 `--relay-mbps` 的数据报会被丢弃。
+- 被控端必须在可信网络中运行，并谨慎开放键鼠、剪贴板和文件接收权限。
+
+## 已知限制
+
+- **断线恢复尚未完成**：信令重连和服务恢复仍在实现中，当前不能宣称自动恢复已经可用。
+- **可靠性补洞尚未完成**：控制流累积 ACK 与 RTO 正常；64 位选择性 ACK 位图存在已知语义缺陷，
+  乱序补洞不能视为可靠工作。
+- 真实跨机、NAT 组合、丢包、抖动和长时间会话尚未形成正式验收报告。
+- 视频仍是整帧 JPEG，未使用帧间编码或硬件编码，弱网下码率明显高于 H.264 方案。
+- 抓屏仅有 GDI 路径，每帧完整抓取/缩放/编码；没有脏矩形、GPU 纹理或增量编码。
+- 声音仍是 G.711 µ-law，适合语音，不适合音乐；还没有 Opus 双栈。
+- 输入使用 Win32 `SendInput`；没有虚拟 HID，个别游戏或受保护界面无法注入。
+- 分辨率受真实桌面限制；没有虚拟显示器驱动。
+- 剪贴板只同步文本，图片和文件列表尚未纳入剪贴板通道。
+- 没有安装器、自动更新、开机自启和代码签名。
+- 与 UU远程 的交互仍有差距：相对鼠标/游戏模式、传输取消、更细的动画和弱网策略尚待补齐。
+
+## 路线图
+
+1. 完成信令重连、会话恢复、恢复期输入隔离和界面保帧。
+2. 修复选择性 ACK 位图语义，补充乱序/重复/伪 ACK 测试。
+3. 两台真实 Windows 主机完成直连、中继、弱网、多屏、文件与长会话验收。
+4. 补齐安装器、可关闭的开机自启、日志归档和更新机制。
+5. 引入 H.264 与 Opus，并在不可用时回退到 JPEG / G.711。
+6. 评估虚拟显示器、虚拟 HID、相对鼠标和游戏模式。
+7. 迁移验收完成后清理仓库中的遗留文件和旧打包路径。
+
+更细的优先级见 [路线图](docs/05-roadmap.md)。
 
 ## 文档
 
-- [逆向分析报告：网易UU远程](docs/01-reverse-engineering.md) — 组件、驱动、传输栈证据、REST 面、计费模型
-- [架构](docs/02-architecture.md) — 进程模型、数据流、状态机、性能数字、已知限制
-- [PDTP/1 协议规范](docs/03-protocol-pdtp1.md) — 报文格式、握手、密钥派生、FEC/NACK、中继
-- [UI 复刻对照](docs/04-ui-parity.md) — 界面清单、视觉规范、交互细节
-- [路线图](docs/05-roadmap.md) — DXGI 脏矩形、H.264、虚拟显示器、远程 Shell
-- **[交接手册](docs/06-handover.md)** — 十分钟跑起来、代码地图、协议速查、23 个已踩的坑、排查表、发布流程
-
-## 安全说明
-
-- 连接码即 PSK：知道 9 位码即可握手（与同类产品同一模型）。服务端不存明文码。
-- 服务器只看到元数据（谁连谁、候选地址、流量大小），看不到媒体内容。
-- 面板默认只监听 `127.0.0.1`，跨机访问请用 SSH 隧道或反代，别直接暴露到公网。
-- 自托管建议开 `--token`（两端和浏览器面板都填同一个令牌，`hmac.compare_digest` 比较），
-  并按需设 `--relay-mbps` 控制中继出口带宽、`--connect-max` 限制单 IP 的连接尝试频率。
-  三者都是"最小可用"，正式公网仍建议前置反代/WAF。
+- [逆向分析：网易UU远程](docs/01-reverse-engineering.md)
+- [架构与数据流](docs/02-architecture.md)
+- [PDTP/1 协议规范](docs/03-protocol-pdtp1.md)
+- [UI 与交互对齐](docs/04-ui-parity.md)
+- [路线图](docs/05-roadmap.md)
+- [交接手册](docs/06-handover.md)
 
 ## 许可
 
-Apache-2.0。本项目只做**自有设备之间**的远程桌面与自己的协议研究；
-不含任何官方客户端的代码、资源或凭据，商标与产品名归各自所有者。
+Apache-2.0。仅用于自有设备之间的远程访问与协议研究。网易UU远程及其他产品名称、
+商标和资源归各自所有者。
