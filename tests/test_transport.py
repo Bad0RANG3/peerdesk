@@ -4,6 +4,7 @@
 用一个可控的"信道"把两端连起来，按需丢包/乱序。
 """
 
+import asyncio
 import unittest
 
 from peerdesk import transport, wire
@@ -27,6 +28,22 @@ class FakeChannel:
 
     def deliverable(self):
         return [p for p in self.sent if p[0] not in self.drop]
+
+
+class RecordingTransport:
+    def __init__(self):
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+
+    def sendto(self, data: bytes, addr: tuple[str, int]) -> None:
+        self.sent.append((data, addr))
+
+    def get_extra_info(self, name: str):
+        if name == "sockname":
+            return ("127.0.0.1", 5556)
+        return None
+
+    def close(self) -> None:
+        pass
 
 
 class ReliableStreamTest(unittest.TestCase):
@@ -94,6 +111,34 @@ class ReliableStreamTest(unittest.TestCase):
         self.assertFalse(receiver.needs_ack())
         receiver.on_data(0, b"a")
         self.assertTrue(receiver.needs_ack())
+
+
+class RelayHandshakeTest(unittest.TestCase):
+    def test_host_probes_with_encrypted_ping_after_deriving_keys(self):
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            host = transport.PeerLink(is_host=True, force_relay=True)
+            client = transport.PeerLink(is_host=False, force_relay=True)
+            fake = RecordingTransport()
+            host.connection_made(fake)
+            host.offer_relay("127.0.0.1", 7901)
+            host.using_relay = True
+            host.relay_out_tag = 0xAABBCCDD
+
+            hello = client._hello_body()
+            host._handle_hello(hello, ("127.0.0.1", 5555))
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+        packet_types = [
+            hdr.type
+            for raw, _addr in fake.sent
+            if (hdr := wire.parse_header(raw[transport.RELAY_HDR.size :]))
+        ]
+        self.assertIn(wire.TYPE_HELLO_ACK, packet_types)
+        self.assertIn(wire.TYPE_PING, packet_types)
 
 
 class VideoPathTest(unittest.TestCase):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 WIN = sys.platform == "win32"
 
@@ -31,7 +32,9 @@ class GdiCaptureTest(unittest.TestCase):
     def setUp(self):
         from peerdesk.capture import GdiCapture
 
-        os.environ.setdefault("PEERDESK_SCALE", "fast")
+        env = mock.patch.dict(os.environ, {"PEERDESK_SCALE": "fast"})
+        env.start()
+        self.addCleanup(env.stop)
         self.cap = GdiCapture()
 
     def tearDown(self):
@@ -77,39 +80,39 @@ class ScreenCaptureBackendTest(unittest.TestCase):
     def test_backend_selection_and_jpeg(self):
         from peerdesk.capture import ScreenCapture
 
-        os.environ["PEERDESK_CAPTURE"] = "gdi"
-        cap = ScreenCapture()
-        try:
-            self.assertEqual(cap.backend, "gdi")
-            self.assertIn(cap.scale, ("fast", "halftone", "pil"))
-            frame = cap.grab(0, 640, 60)
-            self.assertIsNotNone(frame)
-            payload, width, height, unchanged = frame
-            self.assertTrue(payload.startswith(b"\xff\xd8"))  # JPEG SOI
-            self.assertEqual(width, 640)
-            self.assertFalse(unchanged)
-        finally:
-            cap.close()
+        with mock.patch.dict(os.environ, {"PEERDESK_CAPTURE": "gdi"}):
+            cap = ScreenCapture()
+            try:
+                self.assertEqual(cap.backend, "gdi")
+                self.assertIn(cap.scale, ("fast", "halftone", "pil"))
+                frame = cap.grab(0, 640, 60)
+                self.assertIsNotNone(frame)
+                payload, width, height, unchanged = frame
+                self.assertTrue(payload.startswith(b"\xff\xd8"))  # JPEG SOI
+                self.assertEqual(width, 640)
+                self.assertFalse(unchanged)
+            finally:
+                cap.close()
 
     def test_mss_fallback_still_works(self):
         from peerdesk.capture import ScreenCapture
 
-        os.environ["PEERDESK_CAPTURE"] = "mss"
-        cap = ScreenCapture()
-        try:
-            self.assertEqual(cap.backend, "mss")
-            frame = cap.grab(0, 480, 50)
-            self.assertIsNotNone(frame)
-            self.assertEqual(frame[1], 480)
-        finally:
-            cap.close()
+        with mock.patch.dict(os.environ, {"PEERDESK_CAPTURE": "mss"}):
+            cap = ScreenCapture()
+            try:
+                self.assertEqual(cap.backend, "mss")
+                frame = cap.grab(0, 480, 50)
+                self.assertIsNotNone(frame)
+                self.assertEqual(frame[1], 480)
+            finally:
+                cap.close()
 
     def test_probe_display_reports_backend(self):
         from peerdesk.capture import probe_display
 
         info = probe_display()
         self.assertIn("backend", info)
-        self.assertIn(info["backend"], ("gdi", "mss"))
+        self.assertIn(info["backend"], ("dxgi", "gdi", "mss"))
         self.assertTrue(info["monitors"])
 
     def test_static_key_is_stable_for_same_pixels(self):
@@ -132,18 +135,18 @@ class ScreenCaptureBackendTest(unittest.TestCase):
     def test_skip_static_sets_fingerprint(self):
         from peerdesk.capture import ScreenCapture
 
-        os.environ["PEERDESK_CAPTURE"] = "gdi"
-        cap = ScreenCapture()
-        try:
-            cap.grab(0, 320, 50, skip_static=True)
-            self.assertIsNotNone(cap._last_print)  # 抓到第一帧后记下指纹
-            first = cap._last_print
-            cap.grab(0, 320, 50, skip_static=True)
-            # 桌面可能在两次之间变了；要么跳过（指纹不变），要么更新指纹
-            self.assertIsNotNone(cap._last_print)
-            self.assertEqual(cap._last_print[1], first[1])  # 同一块显示器
-        finally:
-            cap.close()
+        with mock.patch.dict(os.environ, {"PEERDESK_CAPTURE": "gdi"}):
+            cap = ScreenCapture()
+            try:
+                cap.grab(0, 320, 50, skip_static=True)
+                self.assertIsNotNone(cap._last_print)  # 抓到第一帧后记下指纹
+                first = cap._last_print
+                cap.grab(0, 320, 50, skip_static=True)
+                # 桌面可能在两次之间变了；要么跳过（指纹不变），要么更新指纹
+                self.assertIsNotNone(cap._last_print)
+                self.assertEqual(cap._last_print[1], first[1])  # 同一块显示器
+            finally:
+                cap.close()
 
 
 if __name__ == "__main__":

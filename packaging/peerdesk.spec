@@ -34,6 +34,7 @@ hiddenimports = [
     "peerdesk.viewer",
     "peerdesk.server",
     "peerdesk.doctor",
+    "peerdesk.dxgi",
 ] + collect_submodules("PIL")
 
 a = Analysis(

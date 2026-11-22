@@ -31,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     cmd, rest = argv[0], argv[1:]
+    if cmd == "_dxgi_probe":
+        from .dxgi import probe_main
+
+        return probe_main()
     if cmd == "agent":
         from .agent import main as run
 

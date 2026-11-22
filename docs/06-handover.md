@@ -2,7 +2,7 @@
 
 > 给下一个接手的人（或者三个月后的自己）。目标：**10 分钟内跑起来，1 小时内敢改代码，半天内知道哪些坑已经踩过。**
 
-最后更新：2026-11-22 · 版本 0.5.1 · 提交见 `git log -1`
+最后更新：2026-11-22 · 版本 0.6.0 · 基线 9180688（本轮 DXGI/中继修复未提交）
 
 ---
 
@@ -16,11 +16,11 @@
 | --- | --- |
 | 仓库 | https://github.com/Bad0RANG3/peerdesk （PUBLIC，默认分支 `main`，Apache-2.0） |
 | 本地路径 | `D:\UU\peerdesk` |
-| 版本 | `peerdesk/__init__.py` → `__version__ = "0.5.1"`（文件传输 0.2，声音 0.3，鉴权/限速 0.4，打包/GDI 0.5，截图与合成源 0.5.1） |
-| 代码量 | 约 7100 行（`peerdesk/` 5575 + `web/` 1517，加 `tests/` 与文档） |
+| 版本 | `peerdesk/__init__.py` → `__version__ = "0.6.0"`（文件传输 0.2，声音 0.3，鉴权/限速 0.4，打包/GDI 0.5，截图与合成源 0.5.1，DXGI 抓屏 0.6） |
+| 代码量 | 约 7900 行（`peerdesk/*.py` 6407 + `peerdesk/web/` 1516，加 `tests/` 与文档） |
 | 依赖 | Pillow / numpy / cryptography / mss；**没有** npm / Electron / Qt / ffmpeg / WebRTC 库 |
 | 平台 | Windows 10/11 被控端与控制端（控制端只需浏览器） |
-| 测试 | 133 个单测 + 4 个端到端（直连/中继/浏览器桥/真 exe）+ 3 条负路径（`--token`/`--bad-token`/`--relay-mbps`） |
+| 测试 | 150 个单测（含 `test_dxgi.py` 16 个）+ 4 个端到端（直连/中继/浏览器桥/真 exe）+ 3 条负路径（`--token`/`--bad-token`/`--relay-mbps`） |
 
 三端模型：
 
@@ -53,8 +53,8 @@ python -m peerdesk viewer --server 127.0.0.1:7900 --web-port 7702
 自测命令（**改完代码必跑**）：
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 133 tests，约 0.8s
-python tests/e2e_local.py                            # 直连：约 90 帧 + 267 个声音包/5s
+python -m unittest discover -s tests -p "test_*.py"   # 150 tests，约 1.3s
+python tests/e2e_local.py                            # 直连：约 85–100 帧 + 约 300–320 个声音包/6s
 python tests/e2e_local.py --relay                    # 强制中继（声音同样要过）
 python tests/e2e_web.py                              # 页面+WS+JPEG+声音+"A" 二进制+上传+下载+/dl
 python -m ruff check peerdesk tests                   # CI 会跑（advisory）
@@ -74,7 +74,7 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 
 | 文件 | 行数 | 什么时候要看它 |
 | --- | --- | --- |
-| `peerdesk/transport.py` | 875 | **90% 的 bug 在这里**：握手、打洞、中继、可靠流、FEC、统计 |
+| `peerdesk/transport.py` | 876 | **90% 的 bug 在这里**：握手、打洞、中继、可靠流、FEC、统计 |
 | `peerdesk/session.py` | 642 | 抓屏循环、输入分发、剪贴板、双向文件传输、声音起停、带宽自适应 |
 | `peerdesk/audio.py` | 640 | WASAPI loopback（ctypes COM）、重采样、µ-law、`AudioPump` 定拍 |
 | `peerdesk/web/viewer.js` | 578 | 控制端交互：绘制、鼠标键盘、画质菜单、拖拽上传、WebAudio 播放 |
@@ -83,11 +83,12 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 | `peerdesk/wininput.py` | 353 | `SendInput` 注入、虚拟桌面坐标、剪贴板监视 |
 | `peerdesk/server.py` | 446 | 信令 + UDP 中继（`RLY1` 头 + 配对 tag）+ STUN + 令牌/频次/限速 |
 | `peerdesk/wire.py` | 268 | 20 字节头、分片、parity、ACK/NACK 载荷、`AUDIO_HDR` |
-| `peerdesk/agent.py` / `viewer.py` | 260 / 206 | 角色编排、信令交互、CLI |
+| `peerdesk/agent.py` / `viewer.py` | 277 / 206 | 角色编排、信令交互、CLI |
 | `peerdesk/crypto.py` | 214 | X25519 → HKDF → AEAD、重放窗口 |
-| `peerdesk/capture.py` | 516 | **抓屏双后端**（GDI 持久 DIB+StretchBlt 默认 / mss 回退）、JPEG、自适应质量 |
+| `peerdesk/dxgi.py` | 736 | **DXGI Desktop Duplication**：D3D11 设备/输出、staging texture、`RowPitch` 整理、子进程探测、access-lost 重试 |
+| `peerdesk/capture.py` | 606 | **抓屏调度**（auto：DXGI → GDI → mss）、GDI 持久 DIB+StretchBlt、`TestPattern`、JPEG、自适应质量 |
 | `peerdesk/websocket.py` | 166 | 手写 RFC6455 服务端（无扩展、8MB 上限） |
-| `peerdesk/stun.py` / `util.py` / `doctor.py` / `signal.py` | 143 / 137 / 139 / 94 | STUN 子集、连接码与路径、自检（含声音）、信令客户端 |
+| `peerdesk/stun.py` / `util.py` / `doctor.py` / `signal.py` | 143 / 137 / 140 / 94 | STUN 子集、连接码与路径、自检（含声音）、信令客户端 |
 
 ### 关键数据结构与入口
 
@@ -118,6 +119,8 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
   nonce = `<IQ>`(direction, seq)，direction host=0 / viewer=1；AAD = 20 字节头。
 - 握手 transcript 绑定双方 hello **原始字节** → hello 报文必须缓存复用（重发不能重新构造，见 §5 坑 1）。
 - 打洞：候选交换后每 100ms 发 PUNCH；`RELAY_ESCALATE_AFTER=6s` 未通即升级；中继帧 = `RLY1` + `>4sI`(magic, tag)。
+- 强制中继：host 回 HELLO_ACK 后立即发加密 PING；双方未 `established` 时每 1s 重发，
+  避免首个探测包被 server 丢弃后永久停在 `punching`。
 - 信令（TCP JSON Lines）：`register{code,name,cands}` → `registered{code,relay,server_time}`；
   `connect{code}` → 对端收 `viewer{}` / `peer{}`；之后 `cands` / `relay_hello` / `bye` / `ping` 互转。
 
@@ -143,8 +146,13 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
     内部有 `asyncio.Lock`，安全）。
 13. **µ-law 表要按"取反位"写**：`u = ~i & 0xFF` 之后再拆符号/指数/尾数，0 必须映射成 `0xFF`
     （否则静音判断和 `audioop` 对不上）。
-14. **DXGI `DuplicateOutput` 本机会崩整个进程**（`0xC0000005`，读 `0xFFFF...FF`）。
-    想上 DXGI 必须先 fork 子进程探测，见 §9。
+14. **DXGI 结构体 ABI 必须完全匹配**：`DXGI_MODE_DESC` 末尾有 `Scaling`，漏掉会让
+    28 字节变 24 字节；`DXGI_OUTDUPL_DESC` 随之从 36 变 32 字节，`GetDesc` 实际写 36 字节，
+    越界 4 字节破坏相邻 COM 对象。症状不是立刻报错，而是**首轮抓屏正常、第二轮 `close()`
+    access violation**（`0xC0000005`）。`DXGI_RATIONAL` 是两个 `UINT`。必须保留
+    `DuplicateOutput=22`、`GetDesc=7`、`AcquireNextFrame=8`、`ReleaseFrame=14`。
+    staging texture 的 `RowPitch` 可能大于 `width×4`，要用 `_pack_rows` 去 padding；
+    `tests/test_dxgi.py` 已固定这些大小/offset 与 vtable 序号。
 15. **`TokenBucket.last` 初值必须是 `0.0`**，不能用 `time.monotonic()`：单测会注入 `now=0.0`
     来模拟时钟，真实时钟的初值会让"补充令牌"那段永远不执行，测试里一路 `False`。
 16. **`attempts` 只清过期项挡不住海量新 IP**（每个 IP 一条、都还没过期），必须再加 8192 条硬顶，
@@ -166,6 +174,14 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
     和 `_poll_clipboard()` 以前裸奔在 `_capture_loop` 里，任何异常都会把整个 task 带走，
     而 `create_task` 的异常只打一行 `Task exception was never retrieved`，界面上就是"连上了但没画面"。
     现在失败一次就置 `_input_failed` 并继续推画面。
+22. **DXGI 必须先在子进程里探测**：即使结构体修对，坏驱动仍可能让 `DuplicateOutput`
+    直接杀进程。`probe_dxgi()` 用隐藏命令 `_dxgi_probe` 在子进程跑完整
+    创建/输出枚举/抓一帧/关闭流程，10 秒超时并缓存结果；`PEERDESK_DXGI_PROBE=0`
+    可禁用。`auto` 探测失败回退 GDI，显式 `--capture dxgi` 则报错，不能静默降级。
+23. **强制中继时 host 不能等 viewer 先发探针**：viewer 的 HELLO 可能比 agent HELLO
+    更早到 server，server 尚无 agent UDP 地址，会丢掉 HELLO 与首个加密 PING。
+    host 派生密钥并回 ACK 后必须立即 `_send_ping()`；双方在 `established` 前每
+    `HANDSHAKE_PING_INTERVAL=1.0s` 重发加密 PING，否则单包丢失就让双方永久停在 `punching`。
 
 ---
 
@@ -173,14 +189,19 @@ python -m peerdesk viewer --web-port 7702 --server 127.0.0.1:7930
 
 | 限制 | 说明 | 出路 |
 | --- | --- | --- |
-| 抓屏 22–24 ms/帧 | GDI `BitBlt` 是瓶颈，不是网络（已用持久 DIB + `StretchBlt` 从 37 ms 优化到 23 ms） | 0.5 试 DXGI（本机会崩，需子进程探测） |
-| MJPEG 码率高 | 1600×900 约 6.6 Mbps | 0.5 上 H.264 |
-| 声音是 G.711 µ-law | 人声清楚、音乐发毛，128 kbit/s | 0.5 评估 Opus 双栈 |
-| 无虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦 `SendInput` | 0.3 / 0.4（需驱动签名） |
-| 中继限速是开环的 | 令牌桶 + 被控端"质量→帧率"节流，没有 RTT/丢包反馈 | 0.5 考虑 GCC/BBR 式拥塞控制 |
+| 抓屏 10–12 ms/帧（DXGI）/ 18–23 ms（GDI） | 瓶颈是整帧抓屏拷贝 + JPEG，不是网络；DXGI 已约为 GDI 一半，但尚未做脏矩形/GPU 共享纹理 | 0.7 脏矩形 + 共享纹理；H.264 |
+| DXGI 显示器拓扑只在启动时枚举 | 运行中修改分辨率、热插拔或扩展坞切换后，`monitors()` 仍返回旧快照，可能选不到新显示器或帧尺寸不一致 | 重启 agent；0.7 在拓扑变化后重建输出列表，且不破坏当前 duplication |
+| DXGI 仅枚举默认 D3D11 适配器 | 多 GPU 机器上挂在其他适配器上的显示器可能缺失，DXGI 列表少于 GDI | 0.7 跨适配器枚举，或在数量不一致时降级/合并 |
+| MJPEG 码率高 | 1600×900 约 6.6 Mbps | 0.7 上 H.264 |
+| 声音是 G.711 µ-law | 人声清楚、音乐发毛，128 kbit/s | 0.8 评估 Opus 双栈 |
+| 无虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦 `SendInput` | 0.8 / 0.9（需驱动签名） |
+| 中继限速是开环的 | 令牌桶 + 被控端"质量→帧率"节流，没有 RTT/丢包反馈 | 0.8+ 考虑 GCC/BBR 式拥塞控制 |
 | 令牌走明文 TCP | 信令没有 TLS，令牌可被同链路嗅探（媒体本身仍是 AEAD） | 反代/WSS 或加 Noise 握手 |
 | 面板只监听 127.0.0.1 | 跨机访问要 SSH 隧道/反代 | 设计如此，别改默认 |
 | 连接码即 PSK | 知道 9 位码即可连（同类产品同一模型） | 服务端只存 `code_id`；要更强就加确认弹窗 |
+
+> 低风险防御项：`Map` 成功但 `pData == NULL` 时当前直接抛错，未调用 `Unmap`；
+> 正常驱动不会触发，后续修复资源清理时一并补上。
 
 ---
 
@@ -209,27 +230,41 @@ cd D:\UU\peerdesk
 python -m ruff check peerdesk tests
 python -m unittest discover -s tests -p "test_*.py"
 python tests/e2e_local.py && python tests/e2e_local.py --relay && python tests/e2e_web.py
-python packaging/build.py && python tests/e2e_exe.py   # 打包 + 真 exe 三进程互连
+python packaging/build.py --clean                       # 打包
+dist\peerdesk.exe _dxgi_probe                           # frozen exe 的 DXGI 探测
+python tests/e2e_exe.py                                 # 真 exe 三进程互连
 git add -A && git commit -m "feat: ..." && git push origin main
 gh run watch     # 或 gh run list --limit 3
 ```
 
 版本号到处要改的地方：`peerdesk/__init__.py` 的 `__version__`、`pyproject.toml` 的 `version`、`README` 徽章描述（如涉及）。
 
+### 本次交接验证（2026-11-22）
+
+- `python -m unittest discover -s tests -p "test_*.py"`：150 项通过（约 1.3s）；
+  `python -m ruff check peerdesk tests` 通过。
+- 源码 e2e：`e2e_local.py` 直连 87 帧 / 316 声音帧，`--relay` 90 帧 / 317 声音帧；
+  `e2e_web.py` 的页面、WS、JPEG、声音、上传/下载全部 PASS。
+- 冻结包：`packaging/build.py --clean` 成功（约 33 MB）；`peerdesk.exe doctor` 全项通过，
+  `_dxgi_probe` 返回 `{"ok": true, "width": 2560, "height": 1440, "elapsed_ms": 129.2}`。
+- `e2e_exe.py --seconds 9` 连续 3 次 PASS（relay）：视频 195 / 190 / 174 帧，
+  声音 437 / 435 / 435 帧，结束后无残留进程。
+
 ---
 
 ## 9. 下一步优先级（与 `docs/05-roadmap.md` 一致）
 
 1. **真跨机验证**（回环测不出 NAT/丢包；需要一个公网 server + 两台机器）
-2. **DXGI 抓屏**（收益最大：22 ms → 3–5 ms）——但本机 `DuplicateOutput` 会崩，
-   先写 `scratch/dxgi_probe.py` 那种子进程探针，探针通过才在主进程启用；退路是持久 DIB（-35%）
+2. **DXGI 增量优化**：读脏矩形元数据只编码变化区域；评估 GPU 共享纹理，避免整帧
+   `CopyResource`/`Map` 的 CPU 往返
 3. **H.264 / Opus**（码率与音质；都要外部动态库，做成"加载得到就用"的插件层）
 4. 独立文件流（当前文件走控制通道，会跟键鼠抢带宽）、远程 Shell、Wake-on-LAN
 5. 基于 RTT/丢包的拥塞控制（现在只有"上限→质量→帧率"的开环节流）
 
-已完成（0.4）：中继 `--token` 鉴权、`--connect-max` 连接频次、`--relay-mbps` 令牌桶限速、
-被控端按上限自适应（先降质量再降帧率）、GDI 抓屏后端（37 ms → 23 ms 单帧）、
-PyInstaller 单文件 exe + `tests/e2e_exe.py` 黑盒验证。
+已完成：DXGI Desktop Duplication（10–12 ms/帧）、子进程探测与 access-lost 回退、
+GDI 抓屏后端（37 ms → 22 ms 单帧）、中继 `--token` 鉴权、`--connect-max` 连接频次、
+`--relay-mbps` 令牌桶限速、被控端带宽自适应、PyInstaller 单文件 exe +
+`tests/e2e_exe.py` 黑盒验证。
 
 明确不做：账号体系、会员、时长计费、把中继当付费权益。
 
@@ -239,13 +274,14 @@ PyInstaller 单文件 exe + `tests/e2e_exe.py` 黑盒验证。
 
 - [x] 仓库公开、README/文档/许可证齐全、CI 通过
 - [x] 三端可跑、直连与中继都验证过、双向文件传输可用
-- [x] 单测 128 个、端到端 3 套（均验证声音）、`doctor` 自检
+- [x] 单测 150 个、端到端 4 套（直连/中继/浏览器桥/真 exe，均验证声音）、`doctor` 自检
 - [x] 服务端 `--token` / `--connect-max` / `--relay-mbps` 与负路径 e2e（错误令牌必须被拒）
 - [x] 声音通道：WASAPI loopback → G.711 µ-law → WebAudio，直连/中继/浏览器桥全部实测
 - [x] 逆向报告留存（`docs/01`），证据来自本机安装目录 strings + 运行期抓包，不含官方代码/资源
 - [ ] 真跨机（非回环）验证：需要两台机器 + 一个有公网 IP 或端口映射的 server
+- [x] DXGI 后端：子进程探测、DXGI/GDI/mss 回退、显式 `dxgi` 失败报错、连续多轮创建/关闭
 - [x] 打包成 exe：`packaging/*.spec|build.py` → `dist/peerdesk.exe`（33 MB，四端合一），
-      `tests/e2e_exe.py` 用真 exe 跑通 relay + 256 帧视频 + 594 帧声音
+      `tests/e2e_exe.py` 用真 exe 跑通 relay + 实时视频/声音
 - [x] 截图更新（0.5.1 重截：合成信号源 + HUD + 连接码门页 + 被控端面板）
 
 ### 重截文档截图（不会泄露桌面）
@@ -266,7 +302,8 @@ python scratch/shot_docs.py     # 起 server/agent(--capture test)/viewer + 两�
 ```bash
 python -m pip install pyinstaller
 python packaging/build.py --clean      # → dist/peerdesk.exe
-dist/peerdesk.exe doctor               # 自检（GDI 后端/声音 probe 都会跑到）
+dist/peerdesk.exe doctor               # 自检（抓屏/声音 probe 都会跑到）
+dist/peerdesk.exe _dxgi_probe          # 隐藏命令：验证 frozen exe 能加载 peerdesk.dxgi
 python tests/e2e_exe.py                # 黑盒：server+agent+viewer 三个 exe 互连
 ```
 

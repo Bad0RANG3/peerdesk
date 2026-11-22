@@ -1,17 +1,21 @@
 """Screen capture and JPEG encoding.
 
-两套抓屏后端，都用 ctypes + Pillow，不引入需要编译的依赖：
+抓屏后端都用 ctypes + Pillow，不引入需要编译的依赖：
 
-- ``gdi``（默认）：持久 DIB section + ``BitBlt``，每帧只拷像素，2560×1440 约 12 ms；
-- ``mss``：``mss`` 每次抓屏新建上下文，同样分辨率约 19 ms。
+- ``dxgi``：Desktop Duplication，GPU 友好；先用子进程探测，避免驱动异常拖垮主进程；
+- ``gdi``：持久 DIB section + ``BitBlt``/``StretchBlt``；
+- ``mss``：``mss`` 每次抓屏新建上下文，作为最后的兼容回退；
+- ``test``：合成画面，不碰真实屏幕（CI、文档截图、演示用）。
 
-选择顺序：环境变量 ``PEERDESK_CAPTURE=gdi|mss|test`` 强制指定，否则先试 gdi，失败回退 mss。
-``test`` 是合成画面（不碰真实屏幕）：CI 没有交互桌面、或者做演示截图/性能对比时用。
+环境变量 ``PEERDESK_CAPTURE=dxgi|gdi|mss|test`` 可强制指定；``auto`` 的
+尝试顺序是 DXGI → GDI → mss。DXGI 在运行期出现 access lost 等错误时，``auto``
+会自动切回 GDI；显式指定 ``dxgi`` 则直接报错，方便排障。
 """
 
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes as wt
 import io
 import logging
 import time
@@ -113,7 +117,7 @@ class GdiCapture:
         found: list[tuple[int, int, int, int, bool]] = []
 
         proto = ctypes.WINFUNCTYPE(
-            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(_RECT), ctypes.c_double
+            wt.BOOL, wt.HMONITOR, wt.HDC, ctypes.POINTER(_RECT), wt.LPARAM
         )
 
         def cb(hmon, hdc, lprc, data):
@@ -316,41 +320,103 @@ class TestPattern:
 class ScreenCapture:
     """抓屏器，线程不安全，每个线程一个实例。
 
-    后端选择：``PEERDESK_CAPTURE`` 环境变量可强制 ``gdi`` / ``mss``，默认先 gdi 再回退 mss。
+    ``PEERDESK_CAPTURE`` 可强制 ``dxgi`` / ``gdi`` / ``mss`` / ``test``；
+    ``auto``（默认）按 DXGI → GDI → mss 尝试。
     """
 
     def __init__(self) -> None:
         _dpi_aware()
         import os
 
-        want = (os.environ.get("PEERDESK_CAPTURE") or "").strip().lower()
+        want = (os.environ.get("PEERDESK_CAPTURE") or "auto").strip().lower()
+        if want in ("", "pattern"):
+            want = "test" if want == "pattern" else "auto"
+        if want not in ("auto", "dxgi", "gdi", "mss", "test"):
+            log.warning("未知抓屏后端 %r，按 auto 处理", want)
+            want = "auto"
         scale = (os.environ.get("PEERDESK_SCALE") or "fast").strip().lower()
         self.scale = scale if scale in SCALE_MODES else "fast"
+        self._want = want
+        self._dxgi = None
         self._gdi: GdiCapture | None = None
         self._sct = None
-        self._test: TestPattern | None = TestPattern() if want in ("test", "pattern") else None
-        if self._test is not None:
-            pass
-        elif want in ("", "gdi"):
-            try:
-                self._gdi = GdiCapture(SCALE_MODES[self.scale])
-            except Exception as exc:  # 没有桌面会话 / 权限不足时退回 mss
-                if want == "gdi":
-                    raise
-                log.info("gdi 后端不可用（%s），回退 mss", exc)
-        if self._gdi is None and self._test is None:
-            import mss  # 延迟导入，headless CI 上也能 import 本模块
-
-            factory = getattr(mss, "MSS", None) or mss.mss
-            self._sct = factory()
-        self.backend = "test" if self._test is not None else ("gdi" if self._gdi is not None else "mss")
+        self._test: TestPattern | None = TestPattern() if want == "test" else None
+        self.backend = "test"
+        if self._test is None:
+            self.backend = ""
+            if want in ("auto", "dxgi"):
+                self._try_dxgi(explicit=want == "dxgi")
+            if self._dxgi is None and want in ("auto", "gdi"):
+                self._try_gdi(explicit=want == "gdi")
+            if self._dxgi is None and self._gdi is None:
+                self._open_mss()
+            self.backend = "dxgi" if self._dxgi is not None else (
+                "gdi" if self._gdi is not None else "mss"
+            )
         self._last_print: tuple[bytes, tuple[int, int, int, int]] | None = None
         self._cursor_visible = True
+
+    def _try_dxgi(self, *, explicit: bool) -> None:
+        from .dxgi import DxgiCapture, probe_dxgi
+
+        probe = probe_dxgi()
+        if not probe.get("ok"):
+            message = probe.get("error") or "unknown probe failure"
+            if explicit:
+                raise RuntimeError(f"DXGI 不可用：{message}")
+            log.info("DXGI 不可用（%s），继续尝试 GDI", message)
+            return
+        try:
+            self._dxgi = DxgiCapture()
+        except Exception as exc:
+            if explicit:
+                raise RuntimeError(f"DXGI 初始化失败：{exc}") from exc
+            log.info("DXGI 初始化失败（%s），继续尝试 GDI", exc)
+            return
+        log.info("抓屏后端：dxgi（探测 %.1f ms）", float(probe.get("elapsed_ms") or 0))
+
+    def _try_gdi(self, *, explicit: bool) -> None:
+        try:
+            self._gdi = GdiCapture(SCALE_MODES[self.scale])
+        except Exception as exc:  # 没有桌面会话 / 权限不足
+            if explicit:
+                raise
+            log.info("GDI 后端不可用（%s），回退 mss", exc)
+
+    def _open_mss(self) -> None:
+        import mss  # 延迟导入，headless CI 上也能 import 本模块
+
+        factory = getattr(mss, "MSS", None) or mss.mss
+        self._sct = factory()
+        log.info("抓屏后端：mss")
+
+    def _fallback_from_dxgi(self, exc: Exception) -> None:
+        log.warning("DXGI 抓屏失败（%s），切回 GDI", exc)
+        if self._dxgi is not None:
+            try:
+                self._dxgi.close()
+            except Exception:
+                pass
+            self._dxgi = None
+        self._try_gdi(explicit=False)
+        if self._gdi is None:
+            self._open_mss()
+        self.backend = "gdi" if self._gdi is not None else "mss"
+
+    def _capture_error_should_fallback(self) -> bool:
+        return self._want == "auto"
 
     # ------------------------------------------------------------------ layout
     def monitors(self) -> list[Monitor]:
         if self._test is not None:
             return self._test.monitors()
+        if self._dxgi is not None:
+            try:
+                return self._dxgi.monitors()
+            except Exception as exc:
+                if not self._capture_error_should_fallback():
+                    raise
+                self._fallback_from_dxgi(exc)
         if self._gdi is not None:
             return self._gdi.monitors()
         out: list[Monitor] = []
@@ -425,6 +491,24 @@ class ScreenCapture:
     def _grab_image(self, mon: Monitor, out_width: int = 0) -> Image.Image:
         if self._test is not None:
             return self._test.render(out_width)
+        if self._dxgi is not None:
+            try:
+                data, width, height = self._dxgi.grab_rgb(mon)
+            except Exception as exc:
+                if not self._capture_error_should_fallback():
+                    raise
+                self._fallback_from_dxgi(exc)
+            else:
+                img = Image.frombytes("RGB", (width, height), data, "raw", "BGRX")
+                if self.scale != "pil" and out_width and width > out_width:
+                    target_h = max(2, round(height * out_width / width))
+                    resample = (
+                        Image.Resampling.NEAREST
+                        if self.scale == "fast"
+                        else Image.Resampling.BILINEAR
+                    )
+                    img = img.resize((int(out_width), target_h), resample)
+                return img
         if self._gdi is not None:
             # scale=pil 时把缩放交给 Pillow（质量最好、最慢）
             data, width, height = self._gdi.grab_rgb(mon, 0 if self.scale == "pil" else out_width)
@@ -445,6 +529,12 @@ class ScreenCapture:
             return (0, 0)
 
     def close(self) -> None:
+        if self._dxgi is not None:
+            try:
+                self._dxgi.close()
+            except Exception:
+                pass
+            self._dxgi = None
         if self._gdi is not None:
             try:
                 self._gdi.close()

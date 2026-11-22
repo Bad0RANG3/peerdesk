@@ -167,6 +167,9 @@ DATA payload = struct "<I"(msg_seq) || body
   服务端按 tag 找到配对的另一端转发（tag 由服务端在 `connect` 时生成，奇数为 agent、偶数为 viewer）。
 - 中继模式下 RTT/带宽由服务端承担，客户端 UI 显示"中继"。
 - `--relay-only` 强制走中继（自测/对称 NAT 排障用）。
+- 强制中继的引导：server 只有在收到 agent HELLO 后才知道其 UDP 地址，viewer 过早的
+  HELLO 可能被丢弃。host 派生密钥并回 HELLO_ACK 后立即发一包加密 PING；双方在
+  `established` 前每 1 s 重发加密 PING，直到任意包解密成功并锁定中继路径。
 
 ## 7. STUN（自实现子集）
 

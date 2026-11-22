@@ -41,6 +41,9 @@
 - **控制**：独立可靠流（累积 ACK + 64 位位图 + RTO 退避），键鼠/文本/剪贴板/文件/画质/显示器切换
 - **双向文件传输**：控制端拖拽即上传（浏览器→被控端），被控端面板填路径即可推给控制端（经 `/dl` 下载）
 - **多显示器**、静帧跳过、绝对坐标注入、Unicode 文本输入、`Ctrl+Alt+Del`
+- **DXGI Desktop Duplication 抓屏**：Windows 8+ 默认优先 DXGI，子进程探测通过后启用；
+  运行期 access lost 自动回退 GDI/mss，显式 `--capture dxgi` 失败则直接报错；
+  `PEERDESK_DXGI_PROBE=0` 可禁用探测
 - **浏览器 UI**：深色玻璃拟态、悬浮会话工具栏、实时 HUD，无框架无构建步骤；
   支持 URL 直达 `?code=…&auto=1`（发一条链接就能连）
 - **可演示的合成信号源**：`agent --capture test` 画一张测试卡（渐变 + 网格 + 时钟 + 移动方块），
@@ -102,7 +105,7 @@ dist/peerdesk.exe agent --server 1.2.3.4:7900 --code 604173829
 | `--no-audio` / `--audio-test` | agent | 不传声音 / 用 440 Hz 合成音代替声卡（无声卡联调） |
 | `--relay-only` | agent/viewer | 强制中继（排障、对称 NAT 场景） |
 | `--token` | 全部 | 服务端/客户端共享令牌（服务端设了就必须带） |
-| `--capture auto\|gdi\|mss\|test` | agent | 抓屏后端，默认 `auto`（GDI 优先，失败回退 mss）；`test` 是合成画面，不读真实屏幕，用于演示/CI |
+| `--capture auto\|dxgi\|gdi\|mss\|test` | agent | 抓屏后端，默认 `auto`（DXGI → GDI → mss）；显式 `dxgi` 不可用时直接报错；`test` 是合成画面，不读真实屏幕，用于演示/CI |
 | `--scale-mode fast\|halftone\|pil` | agent | 缩放交给谁：GDI 驱动（快）/ 平滑 / Pillow（最慢最锐） |
 | `-v` / `--log FILE` | 全部 | 详细日志 / 写日志文件 |
 
@@ -119,20 +122,21 @@ viewer ──本地 HTTP + WebSocket──▶ 浏览器 canvas
 | 报文/分片/FEC | `peerdesk/wire.py` | 20 字节头、VIDEO_FRAG/PARITY/ACK/NACK、`FragmentAssembler` |
 | 加密 | `peerdesk/crypto.py` | X25519 → HKDF → AEAD，nonce=`(direction, seq)`，重放窗口 2048 |
 | 传输 | `peerdesk/transport.py` | `PeerLink` 状态机、`ReliableStream`、`VideoSender/Receiver`、中继封装 |
-| 抓屏/编码 | `peerdesk/capture.py` | GDI 持久 DIB + `BitBlt`/`StretchBlt`（回退 mss）+ Pillow JPEG，`FramePacer` 按帧大小调质量 |
+| 抓屏调度/编码 | `peerdesk/capture.py` | `auto` 按 DXGI → GDI → mss 选择后端，运行期回退；Pillow JPEG + `FramePacer` 按帧大小调质量 |
+| DXGI 抓屏 | `peerdesk/dxgi.py` | Desktop Duplication + staging texture + `RowPitch` 行宽整理，子进程探测与 last-frame 缓存 |
 | 声音 | `peerdesk/audio.py` | WASAPI loopback（纯 ctypes）→ 重采样 → G.711 µ-law，`AudioPump` 定拍送帧 |
 | 输入 | `peerdesk/wininput.py` | `SendInput`，虚拟桌面归一化，剪贴板读写与监视 |
 | 会话 | `peerdesk/session.py` | `HostSession` / `ViewerSession`，控制消息分发 |
 | 服务端 | `peerdesk/server.py` | 信令 + 中继（`RLY1` 头 + 配对 tag）+ STUN |
-| 面板 | `peerdesk/webui.py` + `web/` | HTTP/WS 桥、Hub 背压丢帧、sticky 状态重放 |
+| 面板 | `peerdesk/webui.py` + `peerdesk/web/` | HTTP/WS 桥、Hub 背压丢帧、sticky 状态重放 |
 
 细节见 [docs/02-architecture.md](docs/02-architecture.md) 与协议规范 [docs/03-protocol-pdtp1.md](docs/03-protocol-pdtp1.md)。
 
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 133 个单元测试
-python tests/e2e_local.py                            # 进程内端到端（直连，含声音 267 帧/5 s）
+python -m unittest discover -s tests -p "test_*.py"   # 150 个单元测试
+python tests/e2e_local.py                            # 进程内端到端（直连，含声音约 320 帧/6 s）
 python tests/e2e_local.py --relay                    # 进程内端到端（强制中继）
 python tests/e2e_web.py                              # 浏览器桥：页面 + WS + JPEG + 声音 + 上传/下载
 python tests/e2e_local.py --token s3cret             # 验证令牌鉴权链路
@@ -141,10 +145,10 @@ python tests/e2e_local.py --relay --relay-mbps 1.5   # 中继限速 + 被控端�
 python tests/e2e_exe.py                              # 黑盒：dist/peerdesk.exe 三进程互连
 ```
 
-本机实测（2560×1440 桌面、1600×900 编码、fps 上限 20）：**13–16 fps / 6.5 Mbps / RTT 0.4–2.6 ms，
-单帧抓屏+缩放+编码 23 ms（GDI 后端；mss 后端 37 ms）**，
+本机实测（2560×1440 桌面、1600×900 编码、JPEG q60、fps 上限 20）：
+**DXGI 单帧抓屏+缩放+JPEG 约 10–12 ms，GDI 约 18–23 ms（mss 约 36 ms），DXGI 约为 GDI 的一半**。
 声音另占 128 kbit/s（静音时自动掉到 2.5 kbit/s），中继模式功能等价。
-瓶颈是抓屏+JPEG（22–24 ms/帧），不是网络。
+瓶颈仍是整帧抓屏拷贝 + JPEG；DXGI 脏矩形与 GPU 编码尚未实现。
 
 ## 文档
 
@@ -152,8 +156,8 @@ python tests/e2e_exe.py                              # 黑盒：dist/peerdesk.ex
 - [架构](docs/02-architecture.md) — 进程模型、数据流、状态机、性能数字、已知限制
 - [PDTP/1 协议规范](docs/03-protocol-pdtp1.md) — 报文格式、握手、密钥派生、FEC/NACK、中继
 - [UI 复刻对照](docs/04-ui-parity.md) — 界面清单、视觉规范、交互细节
-- [路线图](docs/05-roadmap.md) — DXGI 抓屏、H.264、虚拟显示器、远程 Shell
-- **[交接手册](docs/06-handover.md)** — 十分钟跑起来、代码地图、协议速查、10 个已踩的坑、排查表、发布流程
+- [路线图](docs/05-roadmap.md) — DXGI 脏矩形、H.264、虚拟显示器、远程 Shell
+- **[交接手册](docs/06-handover.md)** — 十分钟跑起来、代码地图、协议速查、23 个已踩的坑、排查表、发布流程
 
 ## 安全说明
 

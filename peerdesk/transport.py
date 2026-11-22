@@ -37,6 +37,7 @@ HELLO_INTERVAL = 0.25
 HELLO_TIMEOUT = 15.0
 PUNCH_INTERVAL = 0.10
 KEEPALIVE = 4.0
+HANDSHAKE_PING_INTERVAL = 1.0
 RELAY_ESCALATE_AFTER = 6.0
 RX_TIMEOUT = 25.0
 
@@ -712,6 +713,7 @@ class PeerLink(asyncio.DatagramProtocol):
             self._log(f"hello from {addr}; keys derived, sending ack")
             self._hello_sent_at = time.monotonic()
             self._send_packet(wire.TYPE_HELLO_ACK, 0, 0, ack, addr, plain=True)
+            self._send_ping()
         self._set_state("punching")
 
     def _handle_hello_ack(self, body: bytes, addr) -> None:
@@ -733,10 +735,7 @@ class PeerLink(asyncio.DatagramProtocol):
             keys = SessionKeys.derive(self._kp, pub, body, self._hello_client_bytes, self.psk)
             self._crypto = CryptoContext(keys, is_host=False)
             self._log(f"hello_ack from {addr}; keys derived")
-            self._ping_seq = 1
-            self._ping_out[1] = time.monotonic()
-            self._last_ping = time.monotonic()
-            self._send_packet(wire.TYPE_PING, 0, 0, wire.json_payload({"n": 1}))
+            self._send_ping()
 
     _remote_id = ""
 
@@ -799,6 +798,8 @@ class PeerLink(asyncio.DatagramProtocol):
                     self._send_hello()
                     for c in self.candidates:
                         self._send_packet(wire.TYPE_PUNCH, 0, 0, b"", c.key(), plain=True)
+                    if time.monotonic() - self._last_ping >= HANDSHAKE_PING_INTERVAL:
+                        self._send_ping()
                     if (
                         self.relay_addr
                         and not self.using_relay

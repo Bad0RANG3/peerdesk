@@ -103,39 +103,67 @@ async def main():
     base = 7300 + (os.getpid() % 200) * 5  # 避免和上一次残留进程抢端口
     sig_port, udp_port, agent_web, viewer_web = base, base + 1, base + 2, base + 3
 
-    procs = []
+    logs = []
+    children = []
 
-    def spawn(name, argv):
+    async def spawn(name, argv):
         out = open(OUT / f"exe_{name}.log", "wb")
-        p = asyncio.create_subprocess_exec(
+        p = await asyncio.create_subprocess_exec(
             str(exe), *argv, stdout=out, stderr=asyncio.subprocess.STDOUT, cwd=str(ROOT)
         )
-        procs.append(out)
+        logs.append(out)
+        children.append(p)
         return p
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    server = await spawn("server", ["server", "--port", str(sig_port), "--udp-port", str(udp_port)])
-    if not await wait_port("127.0.0.1", sig_port):
-        print("FAIL: 信令服务没起来")
-        return 1
-    agent = await spawn(
-        "agent",
-        [
-            "agent", "--server", f"127.0.0.1:{sig_port}", "--code", code,
-            "--web-port", str(agent_web), "--udp-port", "0", "--audio-test", "--relay-only",
-            "--fps", "20", "--width", "1280", "--quality", "55",
-        ],
-    )
-    viewer = await spawn(
-        "viewer",
-        [
-            "viewer", "--server", f"127.0.0.1:{sig_port}", "--code", code,
-            "--web-port", str(viewer_web), "--udp-port", "0", "--relay-only",
-        ],
-    )
+    async def stop_process_tree(p):
+        if p.returncode is None:
+            if os.name == "nt":
+                taskkill = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(p.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await taskkill.wait()
+            else:
+                p.terminate()
+        try:
+            await asyncio.wait_for(p.wait(), timeout=5)
+        except TimeoutError:
+            p.kill()
+            await p.wait()
 
+    async def shutdown():
+        for p in reversed(children):
+            await stop_process_tree(p)
+        for out in logs:
+            out.close()
+
+    OUT.mkdir(parents=True, exist_ok=True)
     ok = True
     try:
+        await spawn("server", ["server", "--port", str(sig_port), "--udp-port", str(udp_port)])
+        if not await wait_port("127.0.0.1", sig_port):
+            print("FAIL: 信令服务没起来")
+            return 1
+        await spawn(
+            "agent",
+            [
+                "agent", "--server", f"127.0.0.1:{sig_port}", "--code", code,
+                "--web-port", str(agent_web), "--udp-port", "0", "--audio-test", "--relay-only",
+                "--fps", "20", "--width", "1280", "--quality", "55",
+            ],
+        )
+        await spawn(
+            "viewer",
+            [
+                "viewer", "--server", f"127.0.0.1:{sig_port}",
+                "--web-port", str(viewer_web), "--udp-port", "0", "--relay-only",
+            ],
+        )
         if not await wait_port("127.0.0.1", viewer_web, timeout=30):
             print("FAIL: viewer 的 web 端口没起来")
             return 1
@@ -171,19 +199,7 @@ async def main():
         print(f"[{'OK  ' if audio >= 10 else 'FAIL'}] 音频帧 {audio}")
         ok &= audio >= 10
     finally:
-        for p in (viewer, agent, server):
-            try:
-                p.terminate()
-            except ProcessLookupError:
-                pass
-        for p in (viewer, agent, server):
-            try:
-                await asyncio.wait_for(p.wait(), timeout=10)
-            except TimeoutError:
-                p.kill()  # 卡住的 exe 会一直占着 UDP 端口，必须清掉
-                await p.wait()
-        for out in procs:
-            out.close()
+        await shutdown()
 
     for name in ("server", "agent", "viewer"):
         tail = (OUT / f"exe_{name}.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()

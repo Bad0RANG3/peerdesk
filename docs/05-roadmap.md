@@ -2,7 +2,28 @@
 
 按"对使用者价值 / 实现成本"排序。✅ 已实现，🔜 下一版，🧭 中期，🌱 远期。
 
-## 0.5.1（当前）
+## 0.6（当前）
+
+- ✅ **DXGI Desktop Duplication 抓屏**：新增 `peerdesk/dxgi.py`，用纯 ctypes 走
+  `D3D11CreateDevice` → `IDXGIAdapter::EnumOutputs` → `IDXGIOutput1::DuplicateOutput` →
+  `AcquireNextFrame` → staging texture → `Map`，并整理 `RowPitch` 行尾 padding。
+  `--capture auto` 现在按 **DXGI → GDI → mss** 选择；运行期 access lost 自动回退，
+  显式 `--capture dxgi` 失败则报错，方便排障。
+- ✅ **DXGI 崩溃隔离**：探测在隐藏子进程 `python -m peerdesk _dxgi_probe` 中跑完整
+  创建/抓帧/关闭流程，10 秒超时，结果进程内缓存；`PEERDESK_DXGI_PROBE=0` 可禁用。
+  frozen exe 同样支持 `peerdesk.exe _dxgi_probe`，打包 spec 已加入 hidden import。
+- ✅ **修掉 DXGI 生命周期 ABI bug**：`DXGI_MODE_DESC` 漏了末尾 `Scaling`，导致
+  28 字节变 24 字节、`DXGI_OUTDUPL_DESC` 变 32 而非 36 字节，`GetDesc` 越界 4 字节
+  破坏相邻 COM 对象，表现为首轮正常、第二轮 `close()` access violation。
+  `tests/test_dxgi.py` 固定结构体大小/offset、vtable 序号、`RowPitch` 整理、探测与回退。
+- ✅ **本机性能**：2560×1440 → 1600×900、JPEG q60 的完整链路 p50 从 GDI 22.0 ms
+  降到 DXGI 10.1 ms（p95 12.3 vs 28.1）；`ScreenCapture.grab` 1600 宽为
+  10.9 vs 18.3 ms。直连 e2e 的 `enc_ms` 从 22.2 降到 11.9，约一半。
+- ⚠️ 当前 DXGI 仍每帧整帧 `CopyResource`/`Map`，没有脏矩形或共享纹理；
+  JPEG 也仍是 CPU 编码。下一阶段见 0.7。
+- ✅ 150 个单元测试（新增 `tests/test_dxgi.py` 16 个）。
+
+## 0.5.1（已完成）
 
 - ✅ **合成信号源** `--capture test`：`TestPattern` 画渐变底 + 网格 + 时钟 + 移动方块，
   **完全不读真实屏幕**。文档截图、演示、CI 都用它——之前的 README 截图是真桌面，
@@ -70,20 +91,21 @@
 - ✅ 自托管 server（信令 + 中继 + STUN 同端口）
 - ✅ `doctor` 自检
 
-## 0.6 🔜
+## 0.7 🔜
 
-- 🔜 **DXGI Desktop Duplication 抓屏**：绕开 GDI `BitBlt`，把抓屏 22 ms 降到 3–5 ms，
-  同时能拿到脏矩形（省掉整帧编码）。Windows 8+ 可用，`ctypes` 直接调 `d3d11.dll` + `dxgi.dll`。
-  ⚠️ 本机（RTX 4070 Ti SUPER + 官方驱动）实测 `IDXGIOutput1::DuplicateOutput` 恒定
-  access violation（`0xC0000005`，读 `0xFFFF...FF`），已排除设备创建路径 / COM 单元 / GUID 布局 /
-  DPI 感知；该功能必须先做**子进程探测**再启用，否则会连带杀掉主进程。
+- 🔜 **DXGI 脏矩形 + GPU 共享纹理**：当前 DXGI 已能抓屏，但每帧仍把整帧拷到 staging
+  texture 再 `Map` 到 CPU。下一步读 `DXGI_OUTDUPL_FRAME_INFO` 的移动/脏矩形元数据，
+  只编码变化区域；并评估 D3D11 共享纹理直接交给编码器，避免 CPU 往返。
+- 🔜 **DXGI 输出拓扑刷新与多适配器枚举**：当前只在初始化时枚举默认 D3D11 适配器上的输出；
+  运行中改分辨率或热插拔需重启 agent，多 GPU 还可能漏显示器。后续在拓扑变化后重建输出列表，
+  或发现 DXGI 数量少于 GDI 时降级/合并。
+- 🔜 **H.264 编码**：优先 `openh264` 的 Python 绑定或 `libx264` 动态库；
+  拿不到就退回 MJPEG。收益：同画质码率降到 1/5，弱网质变。
 - 🔜 剪贴板图片/文件（`CF_DIB` → PNG 走文件流）。
 - 🔜 真跨机（非回环）验证：两台机器 + 一个公网 server，覆盖对称 NAT 与 5% 丢包。
 
-## 0.7 🧭
+## 0.8 🧭
 
-- 🧭 **H.264 编码**：优先 `openh264` 的 Python 绑定或 `libx264` 动态库；
-  拿不到就退回 MJPEG。收益：同画质码率降到 1/5，弱网质变。
 - 🧭 **Opus 音频**：把 µ-law 换成 Opus（16 kHz 语音模式，约 24 kbit/s 起），
   需要 `libopus` 动态库；先做"能加载就用、加载失败退回 G.711"的双栈。
 - 🧭 **虚拟显示器**：IddCx 驱动（需要签名/测试签名），对应 UU 的 `GameViewerIddDriver`。
@@ -92,7 +114,7 @@
 - 🧭 远程 Shell（对应 UU 的 `uuyc-cli term`）：ConPTY + 浏览器 xterm 风格面板。
 - 🧭 Wake-on-LAN（对应 `/api/v1/device/wake_on_lan`）。
 
-## 0.8 🌱
+## 0.9 🌱
 
 - 🌱 虚拟 HID 驱动（游戏兼容，对应 `uuycinput`）。
 - 🌱 硬件编码（NVENC/QSV/AMF）——需要与 `ffmpeg` 动态库协作，破坏"零重依赖"，单独插件化。
@@ -110,8 +132,8 @@
 
 | 差距 | 影响 | 计划 |
 | --- | --- | --- |
-| 没有虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦截 `SendInput` | 0.7 / 0.8 |
-| 声音是 8 bit µ-law | 人声清楚，音乐发毛 | 0.7 起评估 Opus |
+| 没有虚拟显示器/虚拟 HID | 分辨率受真实桌面限制；个别游戏拦截 `SendInput` | 0.8 / 0.9 |
+| 声音是 8 bit µ-law | 人声清楚，音乐发毛 | 0.8 起评估 Opus |
 | MJPEG 码率高 | 弱网/流量敏感场景体验差 | 0.7 |
 | 无账号/设备列表 | 每次要输码，设备多时不便 | 不打算做账号；后续做"本地收藏 + 二维码" |
-| 无远程终端 | 运维场景弱 | 0.7 |
+| 无远程终端 | 运维场景弱 | 0.8 |
