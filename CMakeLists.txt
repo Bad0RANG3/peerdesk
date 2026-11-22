@@ -29,6 +29,8 @@ add_library(peerdesk_core STATIC
     src/core/protocol.h
     src/core/reliable.cpp
     src/core/reliable.h
+    src/core/stun.cpp
+    src/core/stun.h
     src/core/util.cpp
     src/core/util.h
     src/core/video.cpp
@@ -68,10 +70,20 @@ add_executable(peerdesk-transport-tests
 )
 target_link_libraries(peerdesk-transport-tests PRIVATE peerdesk_core Qt6::Test)
 
+add_executable(peerdesk-stun-tests
+    tests/stun_test.cpp
+)
+target_link_libraries(peerdesk-stun-tests PRIVATE peerdesk_core Qt6::Test)
+
 enable_testing()
 add_test(NAME peerdesk-core COMMAND peerdesk-tests)
 add_test(NAME peerdesk-crypto COMMAND peerdesk-crypto-tests)
 add_test(NAME peerdesk-transport COMMAND peerdesk-transport-tests)
+add_test(NAME peerdesk-stun COMMAND peerdesk-stun-tests)
 
-install(TARGETS peerdesk-tests peerdesk-crypto-tests peerdesk-transport-tests
+install(TARGETS
+    peerdesk-tests
+    peerdesk-crypto-tests
+    peerdesk-transport-tests
+    peerdesk-stun-tests
     RUNTIME DESTINATION bin)
