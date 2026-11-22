@@ -2,7 +2,26 @@
 
 > 给下一个接手的人（或者三个月后的自己）。目标：**10 分钟内跑起来，1 小时内敢改代码，半天内知道哪些坑已经踩过。**
 
-最后更新：2026-11-22 · 版本 0.6.0 · 基线 9180688（本轮 DXGI/中继修复未提交）
+最后更新：2026-11-22 · 版本 0.7.0 · 迁移目标：C++20 + Qt 6
+
+> **迁移状态：后端已是 C++，前端正在用 Qt 重建。**
+> 当前 `peerdesk-client` 有连接页与被控端页，Viewer 视频页尚未接入；下面的 Python
+> 快速开始、代码地图和排障内容在删除 Python 之前仍可作为行为参考，但不再是新功能入口。
+>
+> 原生构建（PowerShell）：
+>
+> ```powershell
+> $env:PATH = "C:\Qt\6.8.3\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;$env:PATH"
+> cmake --preset windows-mingw
+> cmake --build --preset windows-mingw
+> ctest --preset windows-mingw --output-on-failure
+> .\build\cpp\peerdesk-client.exe --capture test --page remote
+> ```
+>
+> 原生代码地图：`src/core/`（协议/加密/FEC/STUN）、`src/server/`（信令与中继）、
+> `src/transport/`（PDTP 链路）、`src/session/`（会话与文件）、`src/platform/`
+> （Windows 抓屏/输入/剪贴板/WASAPI）、`src/app/`（控制器/偏好/音频输出）、
+> `src/ui/`（Qt 页面与控件）、`apps/`（可执行入口）、`tests/`（CTest）。
 
 ---
 

@@ -102,6 +102,25 @@ target_link_libraries(peerdesk_app
         Qt6::Core Qt6::Gui Qt6::Multimedia
 )
 
+add_library(peerdesk_ui STATIC
+    src/ui/app_window.cpp
+    src/ui/app_window.h
+    src/ui/code_input.cpp
+    src/ui/code_input.h
+    src/ui/connection_page.cpp
+    src/ui/connection_page.h
+    src/ui/host_panel.cpp
+    src/ui/host_panel.h
+    src/ui/ui_theme.cpp
+    src/ui/ui_theme.h
+    src/ui/ui_widgets.cpp
+    src/ui/ui_widgets.h
+)
+target_link_libraries(peerdesk_ui
+    PUBLIC peerdesk_app Qt6::Core Qt6::Gui Qt6::Widgets
+)
+set_target_properties(peerdesk_ui PROPERTIES AUTOUIC OFF)
+
 if(WIN32)
     add_library(peerdesk_platform STATIC
         src/platform/pcm_resampler.cpp
@@ -117,7 +136,7 @@ if(WIN32)
     )
     target_link_libraries(peerdesk_platform
         PUBLIC peerdesk_session Qt6::Core Qt6::Gui
-        PRIVATE ole32 uuid
+        PRIVATE ole32 uuid ksguid
     )
 
     target_compile_definitions(peerdesk_core PUBLIC
@@ -135,6 +154,7 @@ if(MSVC)
     target_compile_options(peerdesk_client PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_session PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_app PRIVATE /W4 /permissive-)
+    target_compile_options(peerdesk_ui PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_platform PRIVATE /W4 /permissive-)
 else()
     target_compile_options(peerdesk_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -143,6 +163,7 @@ else()
     target_compile_options(peerdesk_client PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_session PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_app PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(peerdesk_ui PRIVATE -Wall -Wextra -Wpedantic)
     if(TARGET peerdesk_platform)
         target_compile_options(peerdesk_platform PRIVATE -Wall -Wextra -Wpedantic)
     endif()
@@ -155,6 +176,27 @@ target_compile_definitions(peerdesk-server PRIVATE
     PEERDESK_VERSION="${PROJECT_VERSION}"
 )
 target_link_libraries(peerdesk-server PRIVATE peerdesk_server)
+
+if(WIN32)
+    add_executable(peerdesk-client WIN32
+        apps/peerdesk-client/main.cpp
+    )
+else()
+    add_executable(peerdesk-client
+        apps/peerdesk-client/main.cpp
+    )
+endif()
+target_compile_definitions(peerdesk-client PRIVATE
+    PEERDESK_VERSION="${PROJECT_VERSION}"
+)
+set_target_properties(peerdesk-client PROPERTIES AUTOUIC OFF)
+target_link_libraries(peerdesk-client PRIVATE
+    peerdesk_ui
+    Qt6::Widgets
+)
+if(WIN32)
+    target_link_libraries(peerdesk-client PRIVATE peerdesk_platform)
+endif()
 
 add_executable(peerdesk-link-harness
     tools/link-harness/main.cpp
@@ -216,6 +258,14 @@ target_link_libraries(peerdesk-app-controller-tests
     PRIVATE peerdesk_app peerdesk_server Qt6::Test
 )
 
+add_executable(peerdesk-ui-tests
+    tests/ui_test.cpp
+)
+set_target_properties(peerdesk-ui-tests PROPERTIES AUTOUIC OFF)
+target_link_libraries(peerdesk-ui-tests
+    PRIVATE peerdesk_ui Qt6::Test
+)
+
 if(WIN32)
     add_executable(peerdesk-platform-tests
         tests/platform_test.cpp
@@ -235,11 +285,15 @@ add_test(NAME peerdesk-peer-link COMMAND peerdesk-peer-link-tests)
 add_test(NAME peerdesk-session COMMAND peerdesk-session-tests)
 add_test(NAME peerdesk-signaling-client COMMAND peerdesk-signaling-client-tests)
 add_test(NAME peerdesk-app-controller COMMAND peerdesk-app-controller-tests)
+add_test(NAME peerdesk-ui COMMAND peerdesk-ui-tests)
+set_tests_properties(peerdesk-ui PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(WIN32)
     add_test(NAME peerdesk-platform COMMAND peerdesk-platform-tests)
 endif()
 
 install(TARGETS
+    peerdesk-client
     peerdesk-server
     peerdesk-tests
     peerdesk-crypto-tests
@@ -250,6 +304,7 @@ install(TARGETS
     peerdesk-session-tests
     peerdesk-signaling-client-tests
     peerdesk-app-controller-tests
+    peerdesk-ui-tests
     RUNTIME DESTINATION bin)
 
 if(WIN32)

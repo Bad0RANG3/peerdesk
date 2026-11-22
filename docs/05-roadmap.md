@@ -2,7 +2,28 @@
 
 按"对使用者价值 / 实现成本"排序。✅ 已实现，🔜 下一版，🧭 中期，🌱 远期。
 
-## 0.6（当前）
+## 0.7（当前）：C++ / Qt 原生化
+
+- ✅ **后端重写为 C++20 + Qt 6**：协议、可靠流、X25519/HKDF/AEAD、STUN、UDP 打洞/中继、
+  信令服务端、会话、文件传输、Windows 抓屏/输入/剪贴板/WASAPI 均已迁到 `src/`；
+  `peerdesk-server` 与 `peerdesk-client` 不依赖 Python 运行时。
+- ✅ **应用控制器**：`HostController` / `ViewerController` 封装会话生命周期、画质档位、
+  偏好设置、统计、文件、音频与错误状态，Qt UI 只消费稳定接口。
+- ✅ **原生应用壳**：`src/ui/` 已实现统一窗口、连接页、被控端面板、主题、玻璃卡片、
+  开关/状态胶囊/toast；9 位码自动分组，连接状态与断开按钮由控制器驱动。
+- ✅ **构建与测试**：CMake presets、Windows MinGW 构建通过；11 个 CTest 套件全绿，
+  其中 `peerdesk-ui` 覆盖连接码、输入校验、连接派发、页面切换和被控端渲染。
+- 🔜 **Viewer 会话页**：接 `ViewerController::frameDecoded` 的真实画布、自适应缩放、
+  连接中/断线遮罩、HUD 与悬浮工具栏自动隐藏。
+- 🔜 **输入与桌面交互**：键鼠捕获、相对/绝对坐标、滚轮合并、`Ctrl+Alt+Del`、文本输入、
+  剪贴板双向、全屏、拖放上传与下载。
+- 🔜 **产品化收尾**：设置页、托盘、重连、窗口状态持久化、安装包、README/CI 切到 C++/Qt，
+  最后删除全部 Python 代码与打包脚本。
+
+> 本阶段只完成"原生壳 + 连接/被控端页面"。Viewer 视频页尚未接入，远程会话体验仍未达到
+> UU远程 的完整交互水平，后续按上面的顺序继续。
+
+## 0.6（已完成）
 
 - ✅ **DXGI Desktop Duplication 抓屏**：新增 `peerdesk/dxgi.py`，用纯 ctypes 走
   `D3D11CreateDevice` → `IDXGIAdapter::EnumOutputs` → `IDXGIOutput1::DuplicateOutput` →
