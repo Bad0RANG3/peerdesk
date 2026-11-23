@@ -118,6 +118,7 @@ public:
         const QString &peerName,
         const QString &note = {});
     void showStreaming(const QString &peerName);
+    void showReconnecting();
     void showFailed(const QString &reason);
     void showEnded(const QString &reason);
     void resetSession();
@@ -173,6 +174,7 @@ public:
     [[nodiscard]] QLabel *transferLabel() const { return transferLabel_; }
     [[nodiscard]] QLabel *demoBadge() const { return demoBadge_; }
     [[nodiscard]] QWidget *textOverlay() const { return textOverlay_; }
+    [[nodiscard]] QWidget *dropOverlay() const { return dropOverlay_; }
     [[nodiscard]] QString lastPeerName() const { return peerName_; }
 
 public slots:

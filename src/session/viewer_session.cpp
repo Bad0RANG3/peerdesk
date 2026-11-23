@@ -147,6 +147,33 @@ void ViewerSession::stop()
         uploadActive_ = false;
         announceUpload(QStringLiteral("cancelled"));
     }
+    const bool hadInfo = !info_.isEmpty();
+    const bool hadStats = !stats_.isEmpty();
+    const bool hadAudio = !audioState_.isEmpty();
+    info_ = {};
+    stats_ = {};
+    audioState_ = {};
+    videoSequence_ = 0;
+    audioFrames_ = 0;
+    remoteFileErrorId_.clear();
+    remoteFileErrorReason_.clear();
+    uploadActive_ = false;
+    uploadId_.clear();
+    uploadName_.clear();
+    uploadSize_ = 0;
+    uploadSent_ = 0;
+    pendingUploadId_.clear();
+    pendingUploadName_.clear();
+    pendingUploadSize_ = 0;
+    if (hadInfo) {
+        emit infoChanged(info_);
+    }
+    if (hadStats) {
+        emit statsChanged(stats_);
+    }
+    if (hadAudio) {
+        emit audioStateChanged(audioState_);
+    }
 }
 
 void ViewerSession::setReceiveDirectory(const QString &directory)

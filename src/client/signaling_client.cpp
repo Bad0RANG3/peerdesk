@@ -87,6 +87,7 @@ SignalingClient::SignalingClient(QObject *parent)
 {
     socket_->setParent(this);
     reconnectTimer_.setSingleShot(true);
+    pairRetryTimer_.setSingleShot(true);
     timeoutTimer_.setSingleShot(true);
 
     qRegisterMetaType<SignalRelay>();
@@ -98,6 +99,16 @@ SignalingClient::SignalingClient(QObject *parent)
     connect(
         &reconnectTimer_, &QTimer::timeout, this,
         [this] { connectSocket(); });
+    connect(
+        &pairRetryTimer_, &QTimer::timeout, this,
+        [this] {
+            if (role_ != Role::Viewer || !connected()
+                || stopRequested_ || terminalError_) {
+                return;
+            }
+            emitLog(QStringLiteral("重新请求与远端设备配对"));
+            sendHello();
+        });
     connect(
         &timeoutTimer_, &QTimer::timeout, this,
         [this] { onSocketTimeout(); });
@@ -152,6 +163,14 @@ void SignalingClient::setReconnectPolicy(
         std::max(reconnectInitialMs_, maximumDelayMs);
 }
 
+void SignalingClient::setPairRetryPolicy(
+    int initialDelayMs, int maximumDelayMs)
+{
+    pairRetryInitialMs_ = std::max(10, initialDelayMs);
+    pairRetryMaximumMs_ =
+        std::max(pairRetryInitialMs_, maximumDelayMs);
+}
+
 bool SignalingClient::startHost(
     const QString &code,
     const QString &name,
@@ -189,6 +208,7 @@ bool SignalingClient::start(
     }
 
     cancelReconnect();
+    cancelPairRetry();
     timeoutTimer_.stop();
     stopRequested_ = false;
     terminalError_ = false;
@@ -202,6 +222,7 @@ bool SignalingClient::start(
     registration_ = {};
     relay_ = {};
     pingPending_ = false;
+    pairRetryAttempt_ = 0;
     lineBuffer_.clear();
 
     if (socket_->state() == QAbstractSocket::ConnectedState) {
@@ -219,6 +240,7 @@ void SignalingClient::stop()
     const bool wasConnected = connected();
     stopRequested_ = true;
     cancelReconnect();
+    cancelPairRetry();
     timeoutTimer_.stop();
     role_ = Role::None;
     peer_ = {};
@@ -253,6 +275,17 @@ void SignalingClient::reconnectNow()
     socket_->abort();
     reconnectAttempt_ = 0;
     connectSocket();
+}
+
+void SignalingClient::requestPairRetry()
+{
+    if (role_ != Role::Viewer || !connected()
+        || stopRequested_ || terminalError_) {
+        return;
+    }
+    cancelPairRetry();
+    pairRetryAttempt_ = 0;
+    schedulePairRetry();
 }
 
 void SignalingClient::updateCandidates(
@@ -341,9 +374,35 @@ void SignalingClient::scheduleReconnect()
     reconnectTimer_.start(delay);
 }
 
+void SignalingClient::schedulePairRetry()
+{
+    if (role_ != Role::Viewer || !autoReconnect_ || !connected()
+        || stopRequested_ || terminalError_
+        || pairRetryTimer_.isActive()) {
+        return;
+    }
+
+    int delay = pairRetryInitialMs_;
+    for (int attempt = 0;
+         attempt < pairRetryAttempt_
+         && delay < pairRetryMaximumMs_;
+         ++attempt) {
+        delay = std::min(delay * 2, pairRetryMaximumMs_);
+    }
+    ++pairRetryAttempt_;
+    emitLog(
+        QStringLiteral("%1 ms 后重新请求配对").arg(delay));
+    pairRetryTimer_.start(delay);
+}
+
 void SignalingClient::cancelReconnect()
 {
     reconnectTimer_.stop();
+}
+
+void SignalingClient::cancelPairRetry()
+{
+    pairRetryTimer_.stop();
 }
 
 void SignalingClient::resetSession()
@@ -378,6 +437,7 @@ void SignalingClient::setError(
 void SignalingClient::onSocketConnected()
 {
     timeoutTimer_.stop();
+    pairRetryAttempt_ = 0;
     emit serverConnected();
     setState(State::Negotiating);
     sendHello();
@@ -386,6 +446,7 @@ void SignalingClient::onSocketConnected()
 void SignalingClient::onSocketDisconnected()
 {
     timeoutTimer_.stop();
+    cancelPairRetry();
     lineBuffer_.clear();
     emit serverDisconnected();
     resetSession();
@@ -493,6 +554,8 @@ void SignalingClient::handleRegistered(const QJsonObject &message)
 {
     timeoutTimer_.stop();
     reconnectAttempt_ = 0;
+    cancelPairRetry();
+    pairRetryAttempt_ = 0;
     lastError_.clear();
     lastErrorText_.clear();
     registration_.code = normalizeCode(
@@ -519,6 +582,8 @@ void SignalingClient::handlePeer(const QJsonObject &message)
 {
     timeoutTimer_.stop();
     reconnectAttempt_ = 0;
+    cancelPairRetry();
+    pairRetryAttempt_ = 0;
     lastError_.clear();
     lastErrorText_.clear();
     const double mbps =
@@ -534,6 +599,17 @@ void SignalingClient::handlePeer(const QJsonObject &message)
         message.value(QStringLiteral("cands")));
     info.relay = parseRelay(
         message.value(QStringLiteral("relay")), mbps, tag);
+    if (!peer_.sid.isEmpty() && peer_.sid == info.sid) {
+        peer_.name = info.name;
+        peer_.candidates = info.candidates;
+        peer_.relay = info.relay;
+        if (info.relay.valid()) {
+            relay_ = info.relay;
+            emit relayChanged(relay_);
+        }
+        emit peerCandidatesChanged(info.candidates);
+        return;
+    }
     peer_ = info;
     if (info.relay.valid()) {
         relay_ = info.relay;
@@ -569,7 +645,23 @@ void SignalingClient::handleServerError(const QJsonObject &message)
             QStringLiteral("unknown"));
     const QString detail =
         message.value(QStringLiteral("text")).toString();
+    if (reason == QStringLiteral("offline")
+        || reason == QStringLiteral("not_found")) {
+        timeoutTimer_.stop();
+        lastError_ = reason;
+        lastErrorText_ = detail.isEmpty()
+            ? QStringLiteral("远端设备暂时离线")
+            : detail;
+        emitLog(lastErrorText_);
+        emit errorOccurred(lastError_, lastErrorText_);
+        if (state_ != State::Negotiating) {
+            setState(State::Negotiating);
+        }
+        schedulePairRetry();
+        return;
+    }
     terminalError_ = true;
+    cancelPairRetry();
     timeoutTimer_.stop();
     setError(reason, detail);
 }

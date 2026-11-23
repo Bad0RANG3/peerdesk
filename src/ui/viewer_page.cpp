@@ -1128,6 +1128,8 @@ void ViewerPage::connectSignals()
             if (state == ViewerController::State::Streaming) {
                 showStreaming(
                     peerName_.isEmpty() ? controller_->peerName() : peerName_);
+            } else if (state == ViewerController::State::Reconnecting) {
+                showReconnecting();
             } else if (state == ViewerController::State::Connecting
                        && live_) {
                 if (!overlay_->isVisible() || demoMode_) {
@@ -1138,6 +1140,11 @@ void ViewerPage::connectSignals()
                 }
             }
         });
+    connect(
+        controller_,
+        &ViewerController::inputReleaseRequested,
+        canvas_,
+        &ViewerCanvas::releaseInputs);
     connect(
         controller_,
         &ViewerController::peerChanged,
@@ -1174,7 +1181,9 @@ void ViewerPage::connectSignals()
             info_ = info;
             updateMonitors();
             updateResolutionUi();
-            if (live_ && !demoMode_) {
+            if (live_ && !demoMode_
+                && controller_->state()
+                    == ViewerController::State::Streaming) {
                 canvas_->setInputEnabled(
                     info.value(QStringLiteral("input")).toBool(true));
             }
@@ -1579,6 +1588,9 @@ void ViewerPage::updateLinkUi()
     } else if (linkState_ == QStringLiteral("punching")) {
         text = QStringLiteral("正在穿透");
         tone = PillLabel::Tone::Amber;
+    } else if (linkState_ == QStringLiteral("reconnecting")) {
+        text = QStringLiteral("正在恢复");
+        tone = PillLabel::Tone::Amber;
     } else if (linkState_ == QStringLiteral("closed")) {
         text = QStringLiteral("已断开");
         tone = PillLabel::Tone::Red;
@@ -1918,14 +1930,39 @@ void ViewerPage::showStreaming(const QString &peerName)
     wakeToolbar();
 }
 
+void ViewerPage::showReconnecting()
+{
+    live_ = true;
+    demoMode_ = false;
+    demoBadge_->hide();
+    dragActive_ = false;
+    dropOverlay_->hide();
+    textOverlay_->hide();
+    transferLabel_->hide();
+    canvas_->setInputEnabled(false);
+    canvas_->releaseInputs();
+    linkState_ = QStringLiteral("reconnecting");
+    updateLinkUi();
+    updateAudioUi();
+    showOverlay(
+        QStringLiteral("连接中断，正在恢复…"),
+        QStringLiteral(
+            "正在重新配对并恢复加密通道，已保留最后一帧画面。"),
+        false);
+    updateToolbarVisibility();
+}
+
 void ViewerPage::showFailed(const QString &reason)
 {
     live_ = false;
     demoMode_ = false;
     demoBadge_->hide();
     canvas_->setInputEnabled(false);
+    canvas_->releaseInputs();
     dragActive_ = false;
     dropOverlay_->hide();
+    textOverlay_->hide();
+    transferLabel_->hide();
     toolbar_->hide();
     toolbarTimer_->stop();
     updateAudioUi();

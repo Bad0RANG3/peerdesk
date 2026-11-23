@@ -149,6 +149,64 @@ private slots:
         QCOMPARE(host.state(), SignalingClient::State::Ready);
     }
 
+    void viewerWaitsForOfflineHost()
+    {
+        SignalingServer::Options options = loopbackOptions();
+        options.connectMax = 1000;
+        options.connectWindow = 60.0;
+        SignalingServer server(options);
+        QString serverError;
+        QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+        SignalingClient viewer;
+        viewer.setServer(
+            QStringLiteral("127.0.0.1"), server.signalingPort());
+        viewer.setReconnectPolicy(40, 160);
+        viewer.setPairRetryPolicy(40, 160);
+        QSignalSpy viewerErrors(
+            &viewer, &SignalingClient::errorOccurred);
+        QSignalSpy viewerPeer(
+            &viewer, &SignalingClient::peerJoined);
+        QVERIFY(viewer.startViewer(
+            QStringLiteral("918273645"),
+            QStringLiteral("waiting-viewer"),
+            sampleCandidates(50040)));
+
+        QTRY_VERIFY_WITH_TIMEOUT(viewerErrors.count() >= 1, 3000);
+        QCOMPARE(
+            viewer.lastError(), QStringLiteral("offline"));
+        QCOMPARE(viewer.role(), SignalingClient::Role::Viewer);
+        QVERIFY(viewer.state() != SignalingClient::State::Error);
+        pumpEvents(250);
+        QCOMPARE(viewer.role(), SignalingClient::Role::Viewer);
+        QVERIFY(viewer.state() != SignalingClient::State::Error);
+
+        SignalingClient host;
+        host.setServer(
+            QStringLiteral("127.0.0.1"), server.signalingPort());
+        host.setReconnectPolicy(40, 160);
+        QSignalSpy hostPeer(
+            &host, &SignalingClient::peerJoined);
+        QVERIFY(host.startHost(
+            QStringLiteral("918273645"),
+            QStringLiteral("late-host"),
+            sampleCandidates(50060)));
+
+        QTRY_COMPARE_WITH_TIMEOUT(
+            viewer.state(), SignalingClient::State::Paired, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            host.state(), SignalingClient::State::Paired, 5000);
+        QCOMPARE(viewerPeer.count(), 1);
+        QCOMPARE(hostPeer.count(), 1);
+        QCOMPARE(
+            viewer.peer().name, QStringLiteral("late-host"));
+        QCOMPARE(
+            host.peer().name, QStringLiteral("waiting-viewer"));
+
+        viewer.stop();
+        host.stop();
+    }
+
     void tokenAndInvalidCode()
     {
         SignalingServer::Options options = loopbackOptions();

@@ -11,6 +11,8 @@
 
 #include <memory>
 
+class QTimer;
+
 namespace pd {
 
 class IAudioPlayback;
@@ -25,6 +27,7 @@ public:
         Idle,
         Connecting,
         Streaming,
+        Reconnecting,
         Error,
     };
     Q_ENUM(State)
@@ -39,6 +42,7 @@ public:
     }
     void setAudioPlayback(std::shared_ptr<IAudioPlayback> playback);
     void setBindAddress(const QString &address);
+    void setReconnectTimeoutMs(int milliseconds);
     [[nodiscard]] QString bindAddress() const { return bindAddress_; }
 
     bool connectTo(
@@ -106,6 +110,7 @@ public:
 
 signals:
     void stateChanged(pd::ViewerController::State state);
+    void inputReleaseRequested();
     void errorOccurred(const QString &message);
     void peerChanged(const QString &name, bool connected);
     void frameDecoded(const QImage &image, bool keyframe);
@@ -141,6 +146,8 @@ private:
     void setError(const QString &message);
     void failActive(const QString &message);
     void stopSession(bool notify, const QString &reason = {});
+    void beginRecovery();
+    void ensureInitialDeadline();
 
     void onRegistered(const RegistrationInfo &info);
     void onPeerJoined(const PeerInfo &info);
@@ -155,6 +162,7 @@ private:
     PeerLink *link_ = nullptr;
     SignalingClient *signaling_ = nullptr;
     ViewerSession *session_ = nullptr;
+    QTimer *deadlineTimer_ = nullptr;
 
     QString bindAddress_ = QStringLiteral("0.0.0.0");
     QString code_;
@@ -175,6 +183,10 @@ private:
     bool active_ = false;
     bool linkStarted_ = false;
     bool stopping_ = false;
+    bool hadLiveSession_ = false;
+    bool recovering_ = false;
+    bool recoveryHandshakeArmed_ = false;
+    int reconnectTimeoutMs_ = 30000;
     State state_ = State::Idle;
     QJsonObject info_;
     QJsonObject statistics_;

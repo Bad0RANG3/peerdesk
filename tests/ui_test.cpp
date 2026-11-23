@@ -58,6 +58,7 @@ private slots:
     void viewerCanvasIgnoresInputWhenDisabled();
     void viewerDemoRendersNativeSession();
     void viewerEndedClearsFrameAndShowsBack();
+    void viewerReconnectKeepsFrameAndIsolatesInput();
     void appWindowKeepsViewerDuringLiveSession();
     void windowGeometryRoundTrip();
     void windowGeometryFallsBackWhenOffscreen();
@@ -484,6 +485,67 @@ void UiTest::viewerEndedClearsFrameAndShowsBack()
     QVERIFY(page.backButton()->isVisible());
     QVERIFY(page.overlayTitle()->text().contains(QStringLiteral("会话已结束")));
     QCOMPARE(page.overlayNote()->text(), QStringLiteral("对端主动结束会话"));
+}
+
+void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
+{
+    const auto preferences = testPreferences();
+    pd::ViewerController controller;
+    controller.setPreferences(preferences);
+    pd::ui::ViewerPage page(&controller);
+    page.resize(960, 600);
+    page.show();
+    QTest::qWait(20);
+
+    QImage frame(640, 360, QImage::Format_RGB32);
+    frame.fill(QColor(QStringLiteral("#28425f")));
+    page.beginSession(QStringLiteral("DESKTOP"), QStringLiteral("123456789"));
+    page.canvas()->setFrame(frame);
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTest::qWait(10);
+
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->hasFrame());
+    QVERIFY(page.canvas()->inputEnabled());
+    page.canvas()->setFocus(Qt::OtherFocusReason);
+    QTest::keyPress(page.canvas(), Qt::Key_A);
+    QCOMPARE(
+        page.canvas()->pressedKeys(),
+        QStringList{QStringLiteral("KeyA")});
+
+    page.toolbar()->show();
+    page.textOverlay()->show();
+    page.dropOverlay()->show();
+    page.transferLabel()->show();
+    QTest::qWait(10);
+    QVERIFY(page.toolbar()->isVisible());
+    QVERIFY(page.textOverlay()->isVisible());
+    QVERIFY(page.dropOverlay()->isVisible());
+    QVERIFY(page.transferLabel()->isVisible());
+
+    page.showReconnecting();
+    QTest::qWait(10);
+
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->hasFrame());
+    QCOMPARE(page.canvas()->frame().size(), frame.size());
+    QCOMPARE(
+        page.canvas()->frame().pixelColor(QPoint(20, 20)),
+        frame.pixelColor(QPoint(20, 20)));
+    QVERIFY(!page.canvas()->inputEnabled());
+    QVERIFY(page.canvas()->pressedKeys().isEmpty());
+    QVERIFY(page.connectionOverlay()->isVisible());
+    QVERIFY(page.overlayTitle()->text().contains(QStringLiteral("恢复")));
+    QVERIFY(page.backButton()->isHidden());
+    QVERIFY(page.toolbar()->isHidden());
+    QVERIFY(page.textOverlay()->isHidden());
+    QVERIFY(page.dropOverlay()->isHidden());
+    QVERIFY(page.transferLabel()->isHidden());
+
+    page.showEnded(QStringLiteral("恢复超时"));
+    QVERIFY(!page.sessionLive());
+    QVERIFY(!page.canvas()->hasFrame());
+    QVERIFY(page.backButton()->isVisible());
 }
 
 void UiTest::appWindowKeepsViewerDuringLiveSession()

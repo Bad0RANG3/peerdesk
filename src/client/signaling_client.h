@@ -80,6 +80,7 @@ public:
     void setAutoReconnect(bool enabled);
     [[nodiscard]] bool autoReconnect() const { return autoReconnect_; }
     void setReconnectPolicy(int initialDelayMs, int maximumDelayMs);
+    void setPairRetryPolicy(int initialDelayMs, int maximumDelayMs);
 
     bool startHost(
         const QString &code,
@@ -91,6 +92,7 @@ public:
         const QList<Candidate> &candidates = {});
     void stop();
     void reconnectNow();
+    void requestPairRetry();
 
     void updateCandidates(const QList<Candidate> &candidates);
     bool sendMessage(const QJsonObject &message);
@@ -135,6 +137,8 @@ private:
     void connectSocket();
     void scheduleReconnect();
     void cancelReconnect();
+    void schedulePairRetry();
+    void cancelPairRetry();
     void resetSession();
     void setState(State state);
     void setError(const QString &reason, const QString &text);
@@ -167,6 +171,7 @@ private:
 
     std::unique_ptr<QTcpSocket> socket_;
     QTimer reconnectTimer_;
+    QTimer pairRetryTimer_;
     QTimer timeoutTimer_;
     QElapsedTimer pingClock_;
     QByteArray lineBuffer_;
@@ -193,6 +198,9 @@ private:
     int reconnectAttempt_ = 0;
     int reconnectInitialMs_ = 1000;
     int reconnectMaximumMs_ = 15000;
+    int pairRetryAttempt_ = 0;
+    int pairRetryInitialMs_ = 250;
+    int pairRetryMaximumMs_ = 8000;
     int connectTimeoutMs_ = 8000;
 };
 

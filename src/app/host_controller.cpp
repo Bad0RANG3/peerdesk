@@ -589,6 +589,11 @@ void HostController::onLinkState(const QString &state)
         emit monitorsChanged(monitors());
     } else if (state == QStringLiteral("punching")) {
         setState(State::Connecting);
+    } else if (state == QStringLiteral("closed")) {
+        resetPeerState();
+        emit peerChanged({}, false);
+        setState(State::Waiting);
+        emit logMessage(QStringLiteral("观看端链路已关闭，等待重新接入"));
     }
 }
 

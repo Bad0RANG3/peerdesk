@@ -749,6 +749,15 @@ void AppWindow::updateViewerState()
             showViewerPage();
         }
         break;
+    case ViewerController::State::Reconnecting:
+        connectionPage_->setStatus(
+            QStringLiteral("连接中断，正在恢复…"),
+            PillLabel::Tone::Amber);
+        viewerPage_->showReconnecting();
+        if (stack_->currentWidget() == connectionPage_) {
+            showViewerPage();
+        }
+        break;
     case ViewerController::State::Error:
         connectionPage_->setError(
             viewer_->lastError().isEmpty()
