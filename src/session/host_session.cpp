@@ -908,6 +908,13 @@ void HostSession::handleMouse(const QJsonObject &message)
                 message.value(QStringLiteral("dx")).toDouble()),
             static_cast<int>(
                 message.value(QStringLiteral("dy")).toDouble()));
+        return;
+    }
+    if (action == QStringLiteral("reldown")
+        || action == QStringLiteral("relup")) {
+        inputSink_->mouseButton(
+            jsonString(message, "btn", QStringLiteral("left")),
+            action == QStringLiteral("reldown"));
     }
 }
 

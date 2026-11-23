@@ -302,6 +302,21 @@ void ViewerSession::sendMouseRelative(int dx, int dy)
     });
 }
 
+void ViewerSession::sendMouseRelativeButton(
+    const QString &action,
+    const QString &button)
+{
+    if (action != QStringLiteral("reldown")
+        && action != QStringLiteral("relup")) {
+        return;
+    }
+    sendControlNoReply(QJsonObject{
+        {QStringLiteral("t"), QStringLiteral("mouse")},
+        {QStringLiteral("act"), action},
+        {QStringLiteral("btn"), button},
+    });
+}
+
 bool ViewerSession::sendKey(const QString &code, bool down)
 {
     if (code.isEmpty()) {

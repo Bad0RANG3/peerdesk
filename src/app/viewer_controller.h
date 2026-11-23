@@ -90,6 +90,9 @@ public:
         const QString &button = QStringLiteral("left"));
     void sendMouseWheel(int delta, bool horizontal = false);
     void sendMouseRelative(int dx, int dy);
+    void sendMouseRelativeButton(
+        const QString &action,
+        const QString &button = QStringLiteral("left"));
     [[nodiscard]] bool sendKey(const QString &code, bool down);
     void sendText(const QString &text);
     [[nodiscard]] bool sendClipboard(const QString &text);

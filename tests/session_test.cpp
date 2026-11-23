@@ -1189,6 +1189,38 @@ private slots:
             [&]() { return !input->relativeMoves.isEmpty(); },
             3000));
         QCOMPARE(input->relativeMoves.constLast(), QPoint(7, -4));
+        const qsizetype absoluteBeforeRelativeButtons =
+            input->absoluteMoves.size();
+        const qsizetype clicksBeforeRelativeButtons = input->clicks.size();
+        const qsizetype buttonsBeforeRelativeButtons = input->buttons.size();
+        viewer.sendMouseRelativeButton(QStringLiteral("reldown"));
+        viewer.sendMouseRelativeButton(
+            QStringLiteral("reldown"),
+            QStringLiteral("right"));
+        viewer.sendMouseRelativeButton(
+            QStringLiteral("relup"),
+            QStringLiteral("right"));
+        viewer.sendMouseRelativeButton(QStringLiteral("relup"));
+        QVERIFY(waitUntil(
+            [&]() {
+                return input->buttons.size()
+                    >= buttonsBeforeRelativeButtons + 4;
+            },
+            3000));
+        QCOMPARE(
+            input->buttons.at(buttonsBeforeRelativeButtons),
+            qMakePair(QStringLiteral("left"), true));
+        QCOMPARE(
+            input->buttons.at(buttonsBeforeRelativeButtons + 1),
+            qMakePair(QStringLiteral("right"), true));
+        QCOMPARE(
+            input->buttons.at(buttonsBeforeRelativeButtons + 2),
+            qMakePair(QStringLiteral("right"), false));
+        QCOMPARE(
+            input->buttons.at(buttonsBeforeRelativeButtons + 3),
+            qMakePair(QStringLiteral("left"), false));
+        QCOMPARE(input->absoluteMoves.size(), absoluteBeforeRelativeButtons);
+        QCOMPARE(input->clicks.size(), clicksBeforeRelativeButtons);
         viewer.sendCtrlAltDelete();
         QVERIFY(waitUntil(
             [&]() { return input->cadCount == 1; },

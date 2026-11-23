@@ -8,6 +8,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
+#include <QCursor>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
@@ -32,6 +33,7 @@
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QShowEvent>
 #include <QStyle>
 #include <QTimer>
@@ -168,6 +170,7 @@ QFrame *makeOverlayCard(QWidget *parent, const QString &objectName)
 ViewerCanvas::ViewerCanvas(QWidget *parent)
     : QWidget(parent)
     , moveTimer_(new QTimer(this))
+    , relativeTimer_(new QTimer(this))
     , wheelTimer_(new QTimer(this))
 {
     setObjectName(QStringLiteral("viewerCanvas"));
@@ -181,6 +184,14 @@ ViewerCanvas::ViewerCanvas(QWidget *parent)
     moveTimer_->setSingleShot(true);
     moveTimer_->setInterval(kMouseMoveIntervalMs);
     connect(moveTimer_, &QTimer::timeout, this, &ViewerCanvas::flushMove);
+
+    relativeTimer_->setSingleShot(true);
+    relativeTimer_->setInterval(kMouseMoveIntervalMs);
+    connect(
+        relativeTimer_,
+        &QTimer::timeout,
+        this,
+        &ViewerCanvas::flushRelativeMove);
 
     wheelTimer_->setSingleShot(true);
     wheelTimer_->setInterval(0);
@@ -236,17 +247,45 @@ QPointF ViewerCanvas::normalizePoint(const QPointF &position) const
 
 void ViewerCanvas::setInputEnabled(bool enabled)
 {
+    if (!enabled) {
+        setRelativeMouseMode(false);
+        releaseInputs();
+    }
     if (inputEnabled_ == enabled) {
         return;
     }
-    if (!enabled) {
-        releaseInputs();
-    }
     inputEnabled_ = enabled;
-    setCursor(enabled ? Qt::ArrowCursor : Qt::ArrowCursor);
+    setCursor(
+        relativeMouseMode_ ? Qt::BlankCursor : Qt::ArrowCursor);
     if (enabled) {
         setFocus(Qt::OtherFocusReason);
     }
+}
+
+void ViewerCanvas::setRelativeMouseMode(bool enabled)
+{
+    if (enabled && !inputEnabled_) {
+        return;
+    }
+    if (relativeMouseMode_ == enabled) {
+        return;
+    }
+    releaseInputs();
+    relativeMouseMode_ = enabled;
+    relativeTracking_ = false;
+    ignoreCenterMove_ = false;
+    pendingRelative_ = {};
+    relativeTimer_->stop();
+    if (enabled) {
+        if (inputEnabled_) {
+            setCursor(Qt::BlankCursor);
+            setFocus(Qt::OtherFocusReason);
+        }
+        relativeCenter_ = mapToGlobal(rect().center());
+    } else {
+        setCursor(Qt::ArrowCursor);
+    }
+    emit relativeMouseModeChanged(enabled);
 }
 
 QStringList ViewerCanvas::pressedKeys() const
@@ -262,14 +301,22 @@ void ViewerCanvas::releaseInputs()
     }
     pressedKeys_.clear();
 
-    const QStringList buttons(pressedButtons_.begin(), pressedButtons_.end());
+    const QStringList buttons(
+        pressedButtons_.begin(),
+        pressedButtons_.end());
     const QPointF point = normalizePoint(lastPoint_);
     for (const QString &button : buttons) {
-        emit mouseButtonRequested(
-            QStringLiteral("up"),
-            point.x(),
-            point.y(),
-            button);
+        if (relativeMouseMode_) {
+            emit mouseRelativeButtonRequested(
+                QStringLiteral("relup"),
+                button);
+        } else {
+            emit mouseButtonRequested(
+                QStringLiteral("up"),
+                point.x(),
+                point.y(),
+                button);
+        }
     }
     pressedButtons_.clear();
 
@@ -277,6 +324,10 @@ void ViewerCanvas::releaseInputs()
         moveTimer_->stop();
     }
     moveScheduled_ = false;
+    if (relativeTimer_) {
+        relativeTimer_->stop();
+    }
+    pendingRelative_ = {};
     if (wheelTimer_) {
         wheelTimer_->stop();
     }
@@ -304,6 +355,41 @@ void ViewerCanvas::mouseMoveEvent(QMouseEvent *event)
         event->ignore();
         return;
     }
+    if (relativeMouseMode_) {
+        lastPoint_ = event->position();
+        const QPoint global = event->globalPosition().toPoint();
+        if (!relativeTracking_) {
+            relativeReference_ = global;
+            relativeTracking_ = true;
+            event->accept();
+            return;
+        }
+        if (ignoreCenterMove_
+            && (global - relativeCenter_).manhattanLength() <= 2) {
+            ignoreCenterMove_ = false;
+            relativeReference_ = relativeCenter_;
+            event->accept();
+            return;
+        }
+        ignoreCenterMove_ = false;
+        const QPoint delta = global - relativeReference_;
+        relativeReference_ = global;
+        if (!delta.isNull()) {
+            pendingRelative_ += delta;
+            scheduleRelativeMove();
+        }
+        const QPoint local = event->position().toPoint();
+        constexpr int edge = 24;
+        if (window() && window()->isActiveWindow()
+            && (local.x() <= edge
+                || local.y() <= edge
+                || local.x() >= width() - edge
+                || local.y() >= height() - edge)) {
+            recenterRelativeCursor();
+        }
+        event->accept();
+        return;
+    }
     pendingMove_ = normalizePoint(event->position());
     lastPoint_ = event->position();
     if (!moveScheduled_) {
@@ -321,15 +407,21 @@ void ViewerCanvas::mousePressEvent(QMouseEvent *event)
     }
     setFocus(Qt::MouseFocusReason);
     lastPoint_ = event->position();
-    const QPointF point = normalizePoint(event->position());
     const QString button = buttonName(event->button());
     if (!button.isEmpty()) {
         pressedButtons_.insert(button);
-        emit mouseButtonRequested(
-            QStringLiteral("down"),
-            point.x(),
-            point.y(),
-            button);
+        if (relativeMouseMode_) {
+            emit mouseRelativeButtonRequested(
+                QStringLiteral("reldown"),
+                button);
+        } else {
+            const QPointF point = normalizePoint(event->position());
+            emit mouseButtonRequested(
+                QStringLiteral("down"),
+                point.x(),
+                point.y(),
+                button);
+        }
     }
     event->accept();
 }
@@ -344,12 +436,18 @@ void ViewerCanvas::mouseReleaseEvent(QMouseEvent *event)
     const QString button = buttonName(event->button());
     if (!button.isEmpty()) {
         pressedButtons_.remove(button);
-        const QPointF point = normalizePoint(event->position());
-        emit mouseButtonRequested(
-            QStringLiteral("up"),
-            point.x(),
-            point.y(),
-            button);
+        if (relativeMouseMode_) {
+            emit mouseRelativeButtonRequested(
+                QStringLiteral("relup"),
+                button);
+        } else {
+            const QPointF point = normalizePoint(event->position());
+            emit mouseButtonRequested(
+                QStringLiteral("up"),
+                point.x(),
+                point.y(),
+                button);
+        }
     }
     event->accept();
 }
@@ -429,6 +527,7 @@ void ViewerCanvas::keyReleaseEvent(QKeyEvent *event)
 
 void ViewerCanvas::focusOutEvent(QFocusEvent *event)
 {
+    setRelativeMouseMode(false);
     releaseInputs();
     QWidget::focusOutEvent(event);
 }
@@ -461,6 +560,7 @@ bool ViewerCanvas::event(QEvent *event)
         return true;
     }
     if (event->type() == QEvent::WindowDeactivate) {
+        setRelativeMouseMode(false);
         releaseInputs();
     }
     if (event->type() == QEvent::MouseButtonDblClick && inputEnabled_) {
@@ -485,6 +585,41 @@ void ViewerCanvas::flushMove()
         return;
     }
     emit mouseMoveRequested(pendingMove_.x(), pendingMove_.y());
+}
+
+void ViewerCanvas::scheduleRelativeMove()
+{
+    if (!relativeTracking_ || relativeTimer_->isActive()) {
+        return;
+    }
+    relativeTimer_->start();
+}
+
+void ViewerCanvas::flushRelativeMove()
+{
+    if (!inputEnabled_ || !relativeMouseMode_) {
+        pendingRelative_ = {};
+        return;
+    }
+    const QPoint delta = pendingRelative_;
+    pendingRelative_ = {};
+    if (!delta.isNull()) {
+        emit mouseRelativeRequested(delta.x(), delta.y());
+    }
+}
+
+void ViewerCanvas::recenterRelativeCursor()
+{
+    if (!relativeMouseMode_ || !isVisible()) {
+        return;
+    }
+#ifdef Q_OS_WIN
+    relativeCenter_ = mapToGlobal(rect().center());
+    QCursor::setPos(relativeCenter_);
+    relativeReference_ = relativeCenter_;
+    relativeTracking_ = true;
+    ignoreCenterMove_ = true;
+#endif
 }
 
 void ViewerCanvas::scheduleWheel()
@@ -886,6 +1021,15 @@ QMenu::indicator:checked {
     monitorButton_->setPopupMode(QToolButton::InstantPopup);
     toolbarLayout->addWidget(monitorButton_);
 
+    gameMouseButton_ = makeToolButton(
+        QStringLiteral("游戏鼠标"),
+        QStringLiteral("gameMouseButton"),
+        toolbar_);
+    gameMouseButton_->setCheckable(true);
+    gameMouseButton_->setToolTip(
+        QStringLiteral("捕获相对鼠标移动，按 Esc 退出"));
+    toolbarLayout->addWidget(gameMouseButton_);
+
     clipboardButton_ = makeToolButton(
         QStringLiteral("剪贴板"),
         QStringLiteral("clipboardButton"),
@@ -1117,6 +1261,16 @@ void ViewerPage::connectSignals()
         &ViewerController::sendMouseButton);
     connect(
         canvas_,
+        &ViewerCanvas::mouseRelativeRequested,
+        controller_,
+        &ViewerController::sendMouseRelative);
+    connect(
+        canvas_,
+        &ViewerCanvas::mouseRelativeButtonRequested,
+        controller_,
+        &ViewerController::sendMouseRelativeButton);
+    connect(
+        canvas_,
         &ViewerCanvas::wheelRequested,
         controller_,
         &ViewerController::sendMouseWheel);
@@ -1158,7 +1312,25 @@ void ViewerPage::connectSignals()
         &ViewerCanvas::mouseMoveRequested,
         this,
         [this](double, double) {
-            wakeToolbar();
+            if (!canvas_->relativeMouseMode()) {
+                wakeToolbar();
+            }
+        });
+    connect(
+        canvas_,
+        &ViewerCanvas::relativeMouseModeChanged,
+        this,
+        [this](bool enabled) {
+            {
+                const QSignalBlocker blocker(gameMouseButton_);
+                gameMouseButton_->setChecked(enabled);
+            }
+            if (enabled) {
+                hideToolbarImmediately();
+                toolbarTimer_->stop();
+            } else {
+                wakeToolbar();
+            }
         });
 
     connect(
@@ -1511,6 +1683,22 @@ void ViewerPage::connectSignals()
             sendLocalFiles(paths);
         });
     connect(
+        gameMouseButton_,
+        &QToolButton::toggled,
+        this,
+        [this](bool enabled) {
+            if (enabled && !gameMouseButton_->isEnabled()) {
+                const QSignalBlocker blocker(gameMouseButton_);
+                gameMouseButton_->setChecked(false);
+                return;
+            }
+            canvas_->setRelativeMouseMode(enabled);
+            if (enabled) {
+                showToast(
+                    QStringLiteral("游戏鼠标已开启，按 Esc 退出"));
+            }
+        });
+    connect(
         cadButton_,
         &QToolButton::clicked,
         this,
@@ -1819,6 +2007,7 @@ void ViewerPage::updateResolutionUi()
 
 void ViewerPage::updateToolbarVisibility()
 {
+    updateGameMouseAvailability();
     const bool available = live_;
     toolbar_->setEnabled(available);
     if (!available
@@ -1830,6 +2019,24 @@ void ViewerPage::updateToolbarVisibility()
     }
     if (toolbar_->isVisible()) {
         scheduleToolbarHide();
+    }
+}
+
+void ViewerPage::updateGameMouseAvailability()
+{
+    if (!gameMouseButton_ || !canvas_) {
+        return;
+    }
+    const bool available =
+        live_ && !demoMode_ && overlay_ && overlay_->isHidden();
+    gameMouseButton_->setEnabled(available);
+    if (!available) {
+        canvas_->setRelativeMouseMode(false);
+    }
+    if (gameMouseButton_->isChecked()
+        != canvas_->relativeMouseMode()) {
+        const QSignalBlocker blocker(gameMouseButton_);
+        gameMouseButton_->setChecked(canvas_->relativeMouseMode());
     }
 }
 
@@ -2101,6 +2308,7 @@ void ViewerPage::showReconnecting()
     currentFileName_.clear();
     lastFilePercent_ = -1;
     transferLabel_->hide();
+    canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
     canvas_->releaseInputs();
     linkState_ = QStringLiteral("reconnecting");
@@ -2119,6 +2327,7 @@ void ViewerPage::showFailed(const QString &reason)
     live_ = false;
     demoMode_ = false;
     demoBadge_->hide();
+    canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
     canvas_->releaseInputs();
     dragActive_ = false;
@@ -2149,6 +2358,7 @@ void ViewerPage::showEnded(const QString &reason)
     setFileBusy(false);
     currentFileName_.clear();
     lastFilePercent_ = -1;
+    canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
     canvas_->releaseInputs();
     canvas_->clearFrame();
@@ -2189,6 +2399,7 @@ void ViewerPage::resetSession()
     audioState_ = {};
 
     canvas_->clearFrame();
+    canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
     overlay_->hide();
     hideToolbarImmediately();
@@ -2363,6 +2574,7 @@ void ViewerPage::openTextInput()
         showToast(QStringLiteral("演示画面不会发送真实输入"));
         return;
     }
+    canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
     toolbarTimer_->stop();
     textOverlay_->setGeometry(rect());
@@ -2469,7 +2681,9 @@ bool ViewerPage::eventFilter(QObject *watched, QEvent *event)
     if ((watched == this || watched == canvas_ || watched == toolbar_)
         && (event->type() == QEvent::MouseMove
             || event->type() == QEvent::Enter)) {
-        wakeToolbar();
+        if (!canvas_->relativeMouseMode()) {
+            wakeToolbar();
+        }
     }
 
     if (watched == canvas_
@@ -2478,6 +2692,10 @@ bool ViewerPage::eventFilter(QObject *watched, QEvent *event)
         const bool escape =
             keyEvent->key() == Qt::Key_Escape
             && !keyEvent->modifiers().testFlag(Qt::ShiftModifier);
+        if (escape && canvas_->relativeMouseMode()) {
+            canvas_->setRelativeMouseMode(false);
+            return true;
+        }
         if (escape && window() && window()->isFullScreen()) {
             emit exitFullScreenRequested();
             fullScreenButton_->setText(QStringLiteral("全屏"));

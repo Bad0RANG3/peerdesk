@@ -284,7 +284,7 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
 | `hello` | 加密链路建立后的角色确认 |
 | `settings` | 画质、帧率、显示器、声音、剪贴板等会话设置 |
 | `keyframe_req` | 请求新的完整视频关键帧 |
-| `mouse` | 归一化画面坐标、按钮、滚轮 |
+| `mouse` | 绝对坐标、相对位移、按钮与滚轮 |
 | `key` | 键码、按下/释放、文本输入 |
 | `clip` | 文本剪贴板同步 |
 | `audio` | 音频采集开关与状态；Host 回报 `on`、`enabled`、编码参数、音源和错误 |
@@ -297,7 +297,20 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
 控制消息是 JSON；一次控制流发送的载荷由 u32 可靠序号包裹，超过 1200 字节再走
 `0xF1` 分片头。
 
-### 7.2 文件
+### 7.2 鼠标控制
+
+`mouse` 消息通过 `act` 区分动作：
+
+- `move`：携带归一化画面坐标 `x`、`y`。
+- `down` / `up` / `click`：携带 `x`、`y` 和 `btn`，默认按钮为 `left`。
+- `wheel`：携带 `dy` 与可选布尔字段 `h`；`h=true` 表示水平滚轮。
+- `rel`：只携带相对位移整数 `dx`、`dy`，被控端调用相对移动接口，不更新绝对坐标。
+- `reldown` / `relup`：只携带 `btn`，默认 `left`；只改变按键状态，不移动绝对坐标。
+
+Viewer 将相对移动每 16 ms 合并一次。退出游戏鼠标、输入失焦、链路恢复、最终失败和
+会话结束时，控制端会对已按下的相对按钮发送 `relup`。
+
+### 7.3 文件
 
 - 文件使用 `file_begin`、`file_data`、`file_end` 控制消息。
 - 内容字段 `d` 使用 Base64，每块 24 KiB。
@@ -319,7 +332,7 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
   `file_cancel`。因此“用户取消”和“网络中断”不会在协议层混为一谈。
 - 取消与错误处理是幂等的；重复点击、重复取消或迟到的回执不会再次触发终态事件。
 
-### 7.3 剪贴板与重启
+### 7.4 剪贴板与重启
 
 - 剪贴板只同步文本，双向，单次上限 256 KiB。
 - 剪贴板变化检测在会话运行期启用；关闭“剪贴板同步”后不会把新内容写入链路。

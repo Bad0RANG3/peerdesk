@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPoint>
 #include <QPointF>
 #include <QRectF>
 #include <QSet>
@@ -55,6 +56,11 @@ public:
     [[nodiscard]] QPointF normalizePoint(const QPointF &position) const;
     void setInputEnabled(bool enabled);
     [[nodiscard]] bool inputEnabled() const { return inputEnabled_; }
+    void setRelativeMouseMode(bool enabled);
+    [[nodiscard]] bool relativeMouseMode() const
+    {
+        return relativeMouseMode_;
+    }
     [[nodiscard]] QStringList pressedKeys() const;
     void releaseInputs();
 
@@ -65,6 +71,11 @@ signals:
         double x,
         double y,
         const QString &button);
+    void mouseRelativeRequested(int dx, int dy);
+    void mouseRelativeButtonRequested(
+        const QString &action,
+        const QString &button);
+    void relativeMouseModeChanged(bool enabled);
     void wheelRequested(int delta, bool horizontal);
     void keyRequested(const QString &code, bool down);
     void textRequested(const QString &text);
@@ -86,6 +97,9 @@ protected:
 private:
     void scheduleMove();
     void flushMove();
+    void scheduleRelativeMove();
+    void flushRelativeMove();
+    void recenterRelativeCursor();
     void scheduleWheel();
     void flushWheel();
     void sendKeyDown(const QString &code);
@@ -104,7 +118,14 @@ private:
     QSet<QString> pressedButtons_;
     QPointF lastPoint_;
     QTimer *moveTimer_ = nullptr;
+    QTimer *relativeTimer_ = nullptr;
     QTimer *wheelTimer_ = nullptr;
+    QPoint pendingRelative_;
+    QPoint relativeReference_;
+    QPoint relativeCenter_;
+    bool relativeMouseMode_ = false;
+    bool relativeTracking_ = false;
+    bool ignoreCenterMove_ = false;
 };
 
 class ViewerPage final : public QWidget {
@@ -149,6 +170,10 @@ public:
     }
     [[nodiscard]] QToolButton *textButton() const { return textButton_; }
     [[nodiscard]] QToolButton *fileButton() const { return fileButton_; }
+    [[nodiscard]] QToolButton *gameMouseButton() const
+    {
+        return gameMouseButton_;
+    }
     [[nodiscard]] QToolButton *cadButton() const { return cadButton_; }
     [[nodiscard]] QToolButton *audioButton() const { return audioButton_; }
     [[nodiscard]] QToolButton *fullScreenButton() const
@@ -223,6 +248,7 @@ private:
     void updateAudioUi();
     void updateResolutionUi();
     void updateToolbarVisibility();
+    void updateGameMouseAvailability();
     void showOverlay(
         const QString &title,
         const QString &note,
@@ -253,6 +279,7 @@ private:
     QToolButton *clipboardButton_ = nullptr;
     QToolButton *textButton_ = nullptr;
     QToolButton *fileButton_ = nullptr;
+    QToolButton *gameMouseButton_ = nullptr;
     QToolButton *cadButton_ = nullptr;
     QToolButton *audioButton_ = nullptr;
     QToolButton *fullScreenButton_ = nullptr;

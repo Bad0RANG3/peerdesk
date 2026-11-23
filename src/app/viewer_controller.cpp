@@ -843,6 +843,15 @@ void ViewerController::sendMouseRelative(int dx, int dy)
     }
 }
 
+void ViewerController::sendMouseRelativeButton(
+    const QString &action,
+    const QString &button)
+{
+    if (active_) {
+        session_->sendMouseRelativeButton(action, button);
+    }
+}
+
 bool ViewerController::sendKey(const QString &code, bool down)
 {
     return active_ && session_->sendKey(code, down);

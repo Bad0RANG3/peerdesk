@@ -55,12 +55,14 @@ private slots:
     void hostPanelRendersWithSyntheticSource();
     void viewerCanvasScalesAndNormalizesCoordinates();
     void viewerCanvasBatchesPointerInput();
+    void viewerCanvasGameMouseRelativeInput();
     void viewerCanvasCapturesAndReleasesKeyboard();
     void viewerCanvasIgnoresInputWhenDisabled();
     void viewerDemoRendersNativeSession();
     void viewerEndedClearsFrameAndShowsBack();
     void viewerToolbarFadesAndRevealsOnActivity();
     void viewerReconnectKeepsFrameAndIsolatesInput();
+    void viewerPageGameMouseLifecycle();
     void viewerFileTransferCancelState();
     void hostFileTransferCancelState();
     void appWindowKeepsViewerDuringLiveSession();
@@ -303,6 +305,128 @@ void UiTest::viewerCanvasBatchesPointerInput()
         QCOMPARE(delta.at(0).toInt(), -120);
         QCOMPARE(delta.at(1).toBool(), true);
     }
+}
+
+void UiTest::viewerCanvasGameMouseRelativeInput()
+{
+    pd::ui::ViewerCanvas canvas;
+    canvas.resize(1000, 600);
+    QImage frame(800, 400, QImage::Format_RGB32);
+    frame.fill(Qt::black);
+    canvas.setFrame(frame);
+    canvas.show();
+    canvas.setInputEnabled(true);
+
+    QSignalSpy absoluteMoves(
+        &canvas,
+        &pd::ui::ViewerCanvas::mouseMoveRequested);
+    QSignalSpy absoluteButtons(
+        &canvas,
+        &pd::ui::ViewerCanvas::mouseButtonRequested);
+    QSignalSpy relativeMoves(
+        &canvas,
+        &pd::ui::ViewerCanvas::mouseRelativeRequested);
+    QSignalSpy relativeButtons(
+        &canvas,
+        &pd::ui::ViewerCanvas::mouseRelativeButtonRequested);
+    QSignalSpy modeChanges(
+        &canvas,
+        &pd::ui::ViewerCanvas::relativeMouseModeChanged);
+
+    canvas.setRelativeMouseMode(true);
+    QVERIFY(canvas.relativeMouseMode());
+    QCOMPARE(canvas.cursor().shape(), Qt::BlankCursor);
+    QCOMPARE(modeChanges.count(), 1);
+    QCOMPARE(modeChanges.constFirst().constFirst().toBool(), true);
+
+    const QPoint localCenter = canvas.rect().center();
+    const QPoint globalCenter = canvas.mapToGlobal(localCenter);
+    QMouseEvent baseline(
+        QEvent::MouseMove,
+        QPointF(localCenter),
+        QPointF(globalCenter),
+        Qt::NoButton,
+        Qt::NoButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &baseline);
+
+    QMouseEvent firstMove(
+        QEvent::MouseMove,
+        QPointF(localCenter + QPoint(7, -4)),
+        QPointF(globalCenter + QPoint(7, -4)),
+        Qt::NoButton,
+        Qt::NoButton,
+        Qt::NoModifier);
+    QMouseEvent secondMove(
+        QEvent::MouseMove,
+        QPointF(localCenter + QPoint(10, -2)),
+        QPointF(globalCenter + QPoint(10, -2)),
+        Qt::NoButton,
+        Qt::NoButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &firstMove);
+    QApplication::sendEvent(&canvas, &secondMove);
+    QTRY_COMPARE_WITH_TIMEOUT(relativeMoves.count(), 1, 1000);
+    QCOMPARE(relativeMoves.constFirst().at(0).toInt(), 10);
+    QCOMPARE(relativeMoves.constFirst().at(1).toInt(), -2);
+    QCOMPARE(absoluteMoves.count(), 0);
+
+    QMouseEvent leftPress(
+        QEvent::MouseButtonPress,
+        QPointF(localCenter),
+        QPointF(globalCenter),
+        Qt::LeftButton,
+        Qt::LeftButton,
+        Qt::NoModifier);
+    QMouseEvent leftRelease(
+        QEvent::MouseButtonRelease,
+        QPointF(localCenter),
+        QPointF(globalCenter),
+        Qt::LeftButton,
+        Qt::NoButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &leftPress);
+    QApplication::sendEvent(&canvas, &leftRelease);
+    QCOMPARE(relativeButtons.count(), 2);
+    QCOMPARE(
+        relativeButtons.at(0).at(0).toString(),
+        QStringLiteral("reldown"));
+    QCOMPARE(
+        relativeButtons.at(0).at(1).toString(),
+        QStringLiteral("left"));
+    QCOMPARE(
+        relativeButtons.at(1).at(0).toString(),
+        QStringLiteral("relup"));
+    QCOMPARE(
+        relativeButtons.at(1).at(1).toString(),
+        QStringLiteral("left"));
+    QCOMPARE(absoluteButtons.count(), 0);
+
+    QMouseEvent rightPress(
+        QEvent::MouseButtonPress,
+        QPointF(localCenter),
+        QPointF(globalCenter),
+        Qt::RightButton,
+        Qt::RightButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &rightPress);
+    QCOMPARE(relativeButtons.count(), 3);
+
+    canvas.setInputEnabled(false);
+    QVERIFY(!canvas.relativeMouseMode());
+    QVERIFY(!canvas.inputEnabled());
+    QCOMPARE(canvas.cursor().shape(), Qt::ArrowCursor);
+    QCOMPARE(relativeButtons.count(), 4);
+    QCOMPARE(
+        relativeButtons.constLast().at(0).toString(),
+        QStringLiteral("relup"));
+    QCOMPARE(
+        relativeButtons.constLast().at(1).toString(),
+        QStringLiteral("right"));
+    QCOMPARE(absoluteButtons.count(), 0);
+    QCOMPARE(absoluteMoves.count(), 0);
+    QCOMPARE(modeChanges.count(), 2);
+    QCOMPARE(modeChanges.constLast().constFirst().toBool(), false);
 }
 
 void UiTest::viewerCanvasCapturesAndReleasesKeyboard()
@@ -598,6 +722,116 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QVERIFY(!page.sessionLive());
     QVERIFY(!page.canvas()->hasFrame());
     QVERIFY(page.backButton()->isVisible());
+}
+
+void UiTest::viewerPageGameMouseLifecycle()
+{
+    const auto preferences = testPreferences();
+    pd::ViewerController controller;
+    controller.setPreferences(preferences);
+    pd::ui::ViewerPage page(&controller);
+    page.resize(960, 600);
+    page.show();
+    QTest::qWait(20);
+
+    QImage frame(640, 360, QImage::Format_RGB32);
+    frame.fill(QColor(QStringLiteral("#31506f")));
+    page.beginSession(QStringLiteral("DESKTOP"), QStringLiteral("123456789"));
+    page.canvas()->setFrame(frame);
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTest::qWait(10);
+    QVERIFY(page.gameMouseButton()->isEnabled());
+
+    QSignalSpy exitFullScreen(
+        &page,
+        &pd::ui::ViewerPage::exitFullScreenRequested);
+    QSignalSpy relativeButtons(
+        page.canvas(),
+        &pd::ui::ViewerCanvas::mouseRelativeButtonRequested);
+    page.gameMouseButton()->click();
+    QVERIFY(page.canvas()->relativeMouseMode());
+    QVERIFY(page.gameMouseButton()->isChecked());
+    QVERIFY(page.toolbar()->isHidden());
+    QCOMPARE(page.canvas()->cursor().shape(), Qt::BlankCursor);
+
+    QTest::keyPress(page.canvas(), Qt::Key_Escape);
+    QVERIFY(!page.canvas()->relativeMouseMode());
+    QVERIFY(!page.gameMouseButton()->isChecked());
+    QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
+    QCOMPARE(exitFullScreen.count(), 0);
+
+    page.gameMouseButton()->click();
+    QVERIFY(page.canvas()->relativeMouseMode());
+    const QPoint localCenter = page.canvas()->rect().center();
+    const QPoint globalCenter = page.canvas()->mapToGlobal(localCenter);
+    QMouseEvent leftPress(
+        QEvent::MouseButtonPress,
+        QPointF(localCenter),
+        QPointF(globalCenter),
+        Qt::LeftButton,
+        Qt::LeftButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(page.canvas(), &leftPress);
+    QCOMPARE(relativeButtons.count(), 1);
+
+    page.showReconnecting();
+    QTest::qWait(10);
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->hasFrame());
+    QCOMPARE(
+        page.canvas()->frame().pixelColor(QPoint(20, 20)),
+        frame.pixelColor(QPoint(20, 20)));
+    QVERIFY(!page.canvas()->relativeMouseMode());
+    QVERIFY(!page.canvas()->inputEnabled());
+    QVERIFY(!page.gameMouseButton()->isChecked());
+    QVERIFY(!page.gameMouseButton()->isEnabled());
+    QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
+    QCOMPARE(relativeButtons.count(), 2);
+    QCOMPARE(
+        relativeButtons.constLast().at(0).toString(),
+        QStringLiteral("relup"));
+    QCOMPARE(
+        relativeButtons.constLast().at(1).toString(),
+        QStringLiteral("left"));
+    QVERIFY(page.connectionOverlay()->isVisible());
+
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTRY_VERIFY_WITH_TIMEOUT(page.gameMouseButton()->isEnabled(), 500);
+    page.gameMouseButton()->click();
+    QVERIFY(page.canvas()->relativeMouseMode());
+    QMouseEvent rightPress(
+        QEvent::MouseButtonPress,
+        QPointF(localCenter),
+        QPointF(globalCenter),
+        Qt::RightButton,
+        Qt::RightButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(page.canvas(), &rightPress);
+    QCOMPARE(relativeButtons.count(), 3);
+
+    page.showFailed(QStringLiteral("测试失败"));
+    QVERIFY(!page.sessionLive());
+    QVERIFY(!page.canvas()->relativeMouseMode());
+    QVERIFY(!page.canvas()->inputEnabled());
+    QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
+    QCOMPARE(relativeButtons.count(), 4);
+    QCOMPARE(
+        relativeButtons.constLast().at(0).toString(),
+        QStringLiteral("relup"));
+    QCOMPARE(
+        relativeButtons.constLast().at(1).toString(),
+        QStringLiteral("right"));
+
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTRY_VERIFY_WITH_TIMEOUT(page.gameMouseButton()->isEnabled(), 500);
+    page.gameMouseButton()->click();
+    QVERIFY(page.canvas()->relativeMouseMode());
+    page.showEnded(QStringLiteral("测试结束"));
+    QVERIFY(!page.sessionLive());
+    QVERIFY(!page.canvas()->hasFrame());
+    QVERIFY(!page.canvas()->relativeMouseMode());
+    QVERIFY(!page.gameMouseButton()->isChecked());
+    QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
 }
 
 void UiTest::viewerFileTransferCancelState()
