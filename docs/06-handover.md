@@ -3,7 +3,7 @@
 > 面向第一次接手仓库的人：先用 10 分钟完成构建和测试，再用 1 小时看清代码边界，
 > 最后按优先级继续开发。本文只描述当前仓库真实具备的能力，不把规划项写成已完成。
 
-最后更新：2026-11-23 · 版本 `0.8.0` · 技术栈：C++20、Qt 6.8 Widgets、CMake、Ninja
+最后更新：2026-11-23 · 版本 `0.9.0` · 技术栈：C++20、Qt 6.8 Widgets、CMake、Ninja
 
 ## 1. 当前状态
 
@@ -25,6 +25,8 @@ Qt 6.8、CMake 和 Ninja。
   WASAPI loopback、16 kHz 单声道 PCM16 与 G.711 µ-law。
 - Windows 安装器：Inno Setup 每用户安装，部署客户端、服务端、Qt/MinGW 运行库和文档；
   提供中文关键向导文案、开始菜单快捷方式、可选桌面快捷方式和可验证的卸载清理。
+- 日志与诊断：客户端和服务端写入滚动文件日志；客户端设置页可打开日志目录、导出脱敏 ZIP
+  诊断包，并在发现上次异常退出标记时提示。诊断包不会自动上传，不包含 minidump。
 
 当前媒体管线是整帧 JPEG。抓屏、编码、发包、音频播放、文件传输和大部分 UI 都在主线程；
 唯一额外采集线程是 WASAPI loopback。尚未接入 GPU 抓屏、脏矩形、硬件编码、H.264 或 Opus。
@@ -111,7 +113,7 @@ CMake 预设中的 Qt 路径若与你的安装位置不同，请在本机预设�
 
 ### 2.2 CTest
 
-测试共 12 个套件：
+测试共 13 个套件：
 
 ```text
 peerdesk-core
@@ -125,6 +127,7 @@ peerdesk-signaling-client
 peerdesk-app-controller
 peerdesk-single-instance
 peerdesk-ui
+peerdesk-logging
 peerdesk-platform
 ```
 
@@ -166,7 +169,7 @@ cmake --build --preset windows-mingw-release `
 
 ```powershell
 .\packaging\windows\test-installer.ps1 `
-  -InstallerPath .\dist\PeerDesk-0.8.0-setup.exe
+  -InstallerPath .\dist\PeerDesk-0.9.0-setup.exe
 ```
 
 该脚本会静默安装到 `dist/installer-test/app`，验证客户端、服务端、卸载器、Qt 平台
@@ -198,6 +201,7 @@ cmake --build --preset windows-mingw-release `
 | `--relay-mbps <n>` | 限制单个会话的中继带宽 |
 | `--connect-max 10` | 限制时间窗口内的连接尝试次数 |
 | `--connect-window 60` | 设置连接频次窗口的秒数 |
+| `--log-dir <path>` | 覆盖日志目录；也可设置 `PEERDESK_LOG_DIR` |
 | `-v` | 输出更详细的连接、候选和中继日志 |
 
 跨机使用时必须放行 TCP `7900` 与 UDP `7901`，或显式使用其他可达端口。
@@ -231,6 +235,7 @@ cmake --build --preset windows-mingw-release `
 | `--audio-test` | 使用合成测试音源 |
 | `--screenshot <path>` | 渲染页面后保存截图 |
 | `--exit-after <ms>` | 按指定延时退出，便于自动化检查 |
+| `--log-dir <path>` | 覆盖日志目录；隔离模式默认写入临时目录 |
 
 调试 UI 时建议使用 `--capture test --audio-test`。此时被控端不会自动开始共享，
 需要在界面中点击“开始被控”；`--viewer-demo` 只显示合成画面，不会操作真实桌面。
@@ -254,8 +259,29 @@ gh run watch <run-id> --exit-status
 
 ## 5. 日志与诊断
 
-服务端和客户端当前都把日志写到启动它们的控制台，没有独立日志目录，也没有滚动日志文件。
-排查问题时先保留完整控制台输出；CI 仅在测试失败时上传 CTest 日志。
+客户端和服务端默认把日志写入 `%APPDATA%\PeerDesk\logs`，文件名分别以
+`peerdesk-client` 和 `peerdesk-server` 开头。每行包含 UTC 时间、级别、PID 和线程 ID；
+单文件达到 4 MiB 后轮转，默认保留 5 个日志文件。控制台仍同步输出。服务端可用
+`--log-dir` 或 `PEERDESK_LOG_DIR` 覆盖目录，客户端可用 `--log-dir`；截图、合成采集、
+合成音源和 demo 使用隔离临时目录，且不跟踪异常退出标记。
+
+设置页“日志与诊断”提供“打开日志目录”和“导出诊断包…”：
+
+- 客户端诊断包只读取 `peerdesk-client*.log`，不会混入同目录的服务端日志。
+- ZIP 是无压缩归档，包含 `manifest.json`、`settings-summary.json` 和日志副本。
+- 默认上限 20 MiB；超出时跳过部分日志并在清单中标记 `truncated`。
+- 设置摘要只记录布尔值和数值，如服务器/令牌/连接码是否配置、画质、帧率、权限开关，
+  不写入地址、令牌、连接码、接收目录或路径。
+- 日志在写入和导出时都会按模式脱敏，包括令牌、Bearer、password/secret/psk、连接码、
+  URL、IPv4/IPv6、`host:port`、Windows 路径和常见文件名。
+- 诊断包只保存在用户选择的位置，不会自动上传；模式化脱敏不能替代人工检查，分享前仍应
+  打开归档抽查。当前没有 minidump、集中日志或远程诊断。
+
+客户端会在日志目录创建 `<应用>.running` 标记，正常退出时删除。启动时若发现陈旧标记，
+会在主窗口显示 toast，并在设置页显示“上次运行未正常退出”提示。该提示只代表上次未正常
+收尾，不代表已经完成崩溃归因。
+
+CI 仅在测试失败时上传 CTest 日志；不会运行或上传用户诊断包。
 
 Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 HUD 数字是固定演示值，
 不能当作性能测试结果。需要真实指标时，应使用两台主机、真实采集和固定网络条件测试。
@@ -289,13 +315,14 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `src/client/` | TCP JSON Lines 信令客户端 |
 | `src/session/` | 被控会话、Viewer 会话、音视频处理和文件传输 |
 | `src/app/` | 页面控制器、偏好、最近连接、单实例守卫、画质决策、音频播放和错误状态 |
+| `src/diagnostics/` | 文件日志、轮转、脱敏、运行标记、诊断服务和无压缩 ZIP 打包 |
 | `src/ui/` | 连接页、被控端页、Viewer、设置对话框、托盘与窗口壳 |
 | `src/platform/` | GDI 抓屏、WASAPI、Win32 输入、剪贴板和当前用户启动项 |
 | `apps/peerdesk-server/` | 服务端进程入口 |
 | `apps/peerdesk-client/` | Qt 客户端入口、启动参数、demo 和截图流程 |
 | `apps/peerdesk-link-harness/` | 双端 UDP 链路诊断工具 |
 | `packaging/windows/` | Windows 版本资源、Inno Setup 模板、打包脚本、安装冒烟和用户说明 |
-| `tests/` | 12 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
+| `tests/` | 13 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
 
 修改链路问题时，先从 `src/transport/peer_link.*` 和 `src/core/protocol.*` 开始；
 修改界面与会话状态时，从 `src/app/viewer_controller.*`、`src/session/viewer_session.*`
@@ -320,6 +347,9 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | 断线后文件没有续传 | 确认接收端临时文件在 10 分钟保留期内、源文件名称和大小未变，并检查 `file_resume` 确认是否在 8 秒内到达 |
 | 最近连接为空 | 只有成功进入实况后才会记录；检查偏好是否可写，并可尝试完成一次同服务器连接 |
 | 最近连接没有显示预期服务器 | 记录按连接码和规范化后的服务器去重；确认端口及服务器输入是否一致 |
+| 找不到日志 | 默认在 `%APPDATA%\PeerDesk\logs`；检查是否用 `--log-dir` 或 `PEERDESK_LOG_DIR` 覆盖，设置页可直接打开 |
+| 诊断包缺少服务端日志 | 这是客户端诊断包的预期隔离；服务端日志需从同一日志目录单独收集 |
+| 启动提示上次未正常退出 | 这是陈旧 `.running` 标记触发的提示；先导出诊断包并检查日志，再正常退出以清理标记 |
 | 第二次启动直接退出 | 这是单实例预期行为；已有窗口应被置顶。若未出现，检查同一用户会话、桌面环境和实例锁 |
 | 提示已有实例正在运行但看不到窗口 | 从托盘恢复，或结束残留的 `peerdesk-client.exe` 后重试；不要删除其他用户的实例锁 |
 | 设置页无法启用登录启动 | 查看对话框错误文本，并检查当前用户是否有权限写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`；组策略可能限制启动项 |
@@ -354,7 +384,8 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 1. 用两台真实 Windows 主机验收直连、中继、弱网、断线恢复、多屏、文件传输和长会话。
 2. 建立真实网络故障注入矩阵，记录恢复期限、输入隔离、重复断线和可靠流补洞行为。
 3. 建立可复现的抓屏、编码、端到端延迟与带宽基线，再决定优化顺序。
-4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证和崩溃诊断。
+4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证，以及在现有
+   诊断包之上评估 minidump 与远程诊断。
 5. 媒体升级：H.264 与 Opus 动态接入，失败时保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID、真实游戏兼容性与拥塞控制。
 7. 交互低摩擦入口：在本地历史之上评估收藏、二维码和账号云同步，明确隐私边界后再实现。
@@ -371,6 +402,7 @@ git status --short
 ```
 
 只暂存本次改动涉及的文件，确认暂存区后再提交并推送。版本号位于 `CMakeLists.txt`
-的 `project(... VERSION 0.8.0)`；登录启动、双向文件队列与文件断点续传已完成回环测试，
-Windows 安装/卸载已通过本机静默安装冒烟。真实登录/重启、跨机续传、同名同大小文件
-消歧、安装包签名、自动更新、失败回滚和跨版本升级尚未完成，发布说明不得提前宣称。
+的 `project(... VERSION 0.9.0)`；登录启动、双向文件队列、文件断点续传与日志诊断已完成
+回环测试，Windows 安装/卸载已通过本机静默安装冒烟。真实登录/重启、跨机续传、同名同
+大小文件消歧、安装包签名、自动更新、失败回滚和跨版本升级尚未完成，发布说明不得提前
+宣称。

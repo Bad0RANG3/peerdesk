@@ -2,7 +2,7 @@
 ; The build script rewrites this file with a UTF-8 BOM before invoking ISCC.
 
 #ifndef AppVersion
-  #define AppVersion "0.8.0"
+  #define AppVersion "0.9.0"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "..\..\dist\stage"

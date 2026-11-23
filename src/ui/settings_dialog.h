@@ -51,6 +51,26 @@ public:
         return startupToggle_;
     }
     [[nodiscard]] QLabel *startupNote() const { return startupNote_; }
+    [[nodiscard]] QLabel *logDirectoryLabel() const
+    {
+        return logDirectoryLabel_;
+    }
+    [[nodiscard]] QPushButton *openLogsButton() const
+    {
+        return openLogsButton_;
+    }
+    [[nodiscard]] QPushButton *exportDiagnosticsButton() const
+    {
+        return exportDiagnosticsButton_;
+    }
+    [[nodiscard]] QLabel *diagnosticsCrashNote() const
+    {
+        return diagnosticsCrashNote_;
+    }
+    [[nodiscard]] QLabel *diagnosticsStatusLabel() const
+    {
+        return diagnosticsStatusLabel_;
+    }
     [[nodiscard]] QLabel *errorLabel() const { return errorLabel_; }
     [[nodiscard]] QPushButton *saveButton() const { return saveButton_; }
 
@@ -68,6 +88,9 @@ private:
     void buildUi();
     void applyPreferences();
     void showError(const QString &message);
+    void refreshDiagnosticsInfo();
+    void openLogDirectory();
+    void exportDiagnostics();
 
     HostController *host_ = nullptr;
     ViewerController *viewer_ = nullptr;
@@ -84,6 +107,11 @@ private:
     ToggleSwitch *closeToTrayToggle_ = nullptr;
     ToggleSwitch *startupToggle_ = nullptr;
     QLabel *startupNote_ = nullptr;
+    QLabel *logDirectoryLabel_ = nullptr;
+    QPushButton *openLogsButton_ = nullptr;
+    QPushButton *exportDiagnosticsButton_ = nullptr;
+    QLabel *diagnosticsCrashNote_ = nullptr;
+    QLabel *diagnosticsStatusLabel_ = nullptr;
     QLabel *errorLabel_ = nullptr;
     QPushButton *saveButton_ = nullptr;
 };

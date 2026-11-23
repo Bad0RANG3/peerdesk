@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(PeerDesk
-    VERSION 0.8.0
+    VERSION 0.9.0
     DESCRIPTION "PeerDesk remote desktop"
     LANGUAGES C CXX
 )
@@ -43,6 +43,15 @@ add_library(peerdesk_core STATIC
 
 target_include_directories(peerdesk_core PUBLIC src)
 target_link_libraries(peerdesk_core PUBLIC Qt6::Core Qt6::Network PRIVATE monocypher)
+
+add_library(peerdesk_diagnostics STATIC
+    src/diagnostics/diagnostic_bundle.cpp
+    src/diagnostics/diagnostic_bundle.h
+    src/diagnostics/logging.cpp
+    src/diagnostics/logging.h
+)
+target_include_directories(peerdesk_diagnostics PUBLIC src)
+target_link_libraries(peerdesk_diagnostics PUBLIC Qt6::Core)
 
 add_library(peerdesk_server STATIC
     src/server/server.cpp
@@ -98,6 +107,8 @@ add_library(peerdesk_app STATIC
     src/app/single_instance.h
     src/app/audio_output.cpp
     src/app/audio_output.h
+    src/app/diagnostic_service.cpp
+    src/app/diagnostic_service.h
     src/app/host_controller.cpp
     src/app/host_controller.h
     src/app/viewer_controller.cpp
@@ -105,6 +116,7 @@ add_library(peerdesk_app STATIC
 )
 target_link_libraries(peerdesk_app
     PUBLIC peerdesk_client peerdesk_session
+        peerdesk_diagnostics
         Qt6::Core Qt6::Gui Qt6::Multimedia
 )
 
@@ -164,6 +176,7 @@ endif()
 
 if(MSVC)
     target_compile_options(peerdesk_core PRIVATE /W4 /permissive-)
+    target_compile_options(peerdesk_diagnostics PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_server PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_transport PRIVATE /W4 /permissive-)
     target_compile_options(peerdesk_client PRIVATE /W4 /permissive-)
@@ -173,6 +186,7 @@ if(MSVC)
     target_compile_options(peerdesk_platform PRIVATE /W4 /permissive-)
 else()
     target_compile_options(peerdesk_core PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(peerdesk_diagnostics PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_server PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_transport PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_client PRIVATE -Wall -Wextra -Wpedantic)
@@ -215,7 +229,10 @@ add_executable(peerdesk-server
 target_compile_definitions(peerdesk-server PRIVATE
     PEERDESK_VERSION="${PROJECT_VERSION}"
 )
-target_link_libraries(peerdesk-server PRIVATE peerdesk_server)
+target_link_libraries(peerdesk-server PRIVATE
+    peerdesk_server
+    peerdesk_diagnostics
+)
 
 if(WIN32)
     add_executable(peerdesk-client WIN32
@@ -233,6 +250,7 @@ target_compile_definitions(peerdesk-client PRIVATE
 set_target_properties(peerdesk-client PROPERTIES AUTOUIC OFF)
 target_link_libraries(peerdesk-client PRIVATE
     peerdesk_ui
+    peerdesk_diagnostics
     Qt6::Widgets
 )
 if(WIN32)
@@ -321,6 +339,13 @@ target_link_libraries(peerdesk-ui-tests
     PRIVATE peerdesk_ui Qt6::Test
 )
 
+add_executable(peerdesk-logging-tests
+    tests/logging_test.cpp
+)
+target_link_libraries(peerdesk-logging-tests
+    PRIVATE peerdesk_app peerdesk_diagnostics Qt6::Test
+)
+
 if(WIN32)
     add_executable(peerdesk-platform-tests
         tests/platform_test.cpp
@@ -342,6 +367,7 @@ add_test(NAME peerdesk-signaling-client COMMAND peerdesk-signaling-client-tests)
 add_test(NAME peerdesk-app-controller COMMAND peerdesk-app-controller-tests)
 add_test(NAME peerdesk-single-instance COMMAND peerdesk-single-instance-tests)
 add_test(NAME peerdesk-ui COMMAND peerdesk-ui-tests)
+add_test(NAME peerdesk-logging COMMAND peerdesk-logging-tests)
 set_tests_properties(peerdesk-single-instance PROPERTIES
     ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1")
 set_tests_properties(peerdesk-ui PROPERTIES

@@ -18,14 +18,16 @@ PeerDesk 以逆向分析得到的 UU远程 交互为参照，持续补齐连接�
 
 ## 当前状态
 
-版本 **0.8.0**，处于原生迁移与产品化之间。服务端、传输、会话、Windows 平台层和
+版本 **0.9.0**，处于原生迁移与产品化之间。服务端、传输、会话、Windows 平台层和
 Qt 应用壳均已切换到同一套 C++ 实现，主连接路径可用；真实跨机、弱网和长时间会话
 仍需单独验收。Viewer 在同一连接码下的断线恢复已经接入并通过回环测试，中断的文件可在
 重新握手后按接收端确认的偏移继续传输；Viewer 与被控端都支持可重试的多文件发送队列；
 连接页会保留最近 4 个成功连接的本地记录，支持一键回填连接码与服务器；
 普通模式采用单实例运行，再次启动会唤醒现有窗口。设置页可维护当前 Windows 用户的登录
 启动项，`--background` 会在托盘可用时静默驻留并自动开始本机被控；真实注销/重启验收
-仍未完成。Windows 每用户安装包已接入 Qt/MinGW 运行库部署、开始菜单快捷方式、
+仍未完成。客户端和服务端会把滚动日志写入 `%APPDATA%\PeerDesk\logs`；设置页可打开
+日志目录并导出脱敏诊断包，上次异常退出会在下次启动时提示。Windows 每用户安装包已接入
+Qt/MinGW 运行库部署、开始菜单快捷方式、
 中文关键向导文案和静默安装/卸载冒烟；安装包尚未签名，自动更新和跨版本升级路径仍未完成。
 旧 Python 实现、Web 前端、PyInstaller 打包和 pytest 资产已经从仓库移除，构建、测试与
 CI 只依赖原生工具链。
@@ -57,6 +59,10 @@ CI 只依赖原生工具链。
   登录启动项，保留 `%APPDATA%\PeerDesk` 与用户接收目录中的文件。
 - **纯原生仓库**：服务端、客户端、测试和发布入口统一由 CMake/C++20/Qt 构建，不依赖
   Python、Node.js 或旧 Web 服务。
+- **日志与诊断**：客户端和服务端写入带时间、级别、PID 和线程 ID 的滚动文件日志，默认
+  位于 `%APPDATA%\PeerDesk\logs`，单文件 4 MiB、最多保留 5 个；设置页可打开日志目录或
+  导出脱敏 ZIP 诊断包。诊断包包含清单、设置摘要和当前客户端日志，不自动上传，也不含
+  minidump；上次运行异常退出时会在下次启动给出提示。
 - **连接与信令**：9 位连接码、3-3-3 显示、直连优先、6 秒升级中继、服务器令牌、连接频次限制。
 - **加密传输**：X25519 临时密钥、HKDF-SHA256、每数据包 AEAD、重放窗口和中继密文转发。
 - **视频**：GDI 抓屏、多显示器、JPEG 质量自适应、静帧跳过、XOR FEC、缺片 NACK、关键帧请求。
@@ -95,6 +101,7 @@ STUN 与中继共用服务端 UDP 端口
 | `src/client/` | TCP JSON Lines 信令客户端 |
 | `src/session/` | 被控端/控制端会话、音视频、输入、剪贴板、文件 |
 | `src/app/` | 控制器、偏好、画质预设、声音播放 |
+| `src/diagnostics/` | 滚动文件日志、脱敏、运行标记和无压缩 ZIP 诊断包 |
 | `src/ui/` | 原生窗口、连接页、被控端面板、Viewer、设置和主题 |
 | `src/platform/` | GDI 抓屏、WASAPI、Win32 输入和剪贴板 |
 
@@ -140,14 +147,14 @@ cmake --build --preset windows-mingw-release `
 `build-installer.ps1` 会执行 `cmake --install`、`windeployqt`，校验 Qt 插件与运行库，
 然后生成：
 
-- `dist/PeerDesk-0.8.0-setup.exe`
+- `dist/PeerDesk-0.9.0-setup.exe`
 - `dist/SHA256SUMS.txt`
 
 可在本机验证静默安装、安装版启动截图和静默卸载：
 
 ```powershell
 .\packaging\windows\test-installer.ps1 `
-  -InstallerPath .\dist\PeerDesk-0.8.0-setup.exe
+  -InstallerPath .\dist\PeerDesk-0.9.0-setup.exe
 ```
 
 该测试会临时安装到 `dist/installer-test/app`，检查快捷方式、卸载器、服务端版本、
@@ -160,11 +167,12 @@ PeerDesk，并会恢复测试前的同名启动项。
 ctest --preset windows-mingw --output-on-failure
 ```
 
-当前有 12 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
+当前有 13 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
 `peerdesk-stun`、`peerdesk-server`、`peerdesk-peer-link`、`peerdesk-session`、
 `peerdesk-signaling-client`、`peerdesk-app-controller`、`peerdesk-single-instance`、
-`peerdesk-ui`、`peerdesk-platform`。Windows CI 会配置、编译并执行全部套件，并在独立
-打包任务中生成 Release 安装包，执行静默安装、离屏启动截图和静默卸载冒烟。
+`peerdesk-ui`、`peerdesk-logging`、`peerdesk-platform`。Windows CI 会配置、编译并执行
+全部套件，并在独立打包任务中生成 Release 安装包，执行静默安装、离屏启动截图和静默卸载
+冒烟。
 
 ## 运行
 
@@ -217,11 +225,12 @@ ctest --preset windows-mingw --output-on-failure
 | `--relay-mbps` | `0` | 每会话中继上限，`0` 表示不限 |
 | `--connect-max` | `10` | 每个 IP 在窗口内的连接尝试上限 |
 | `--connect-window` | `60` | 连接尝试计数窗口，单位秒 |
+| `--log-dir PATH` | `%APPDATA%\PeerDesk\logs` | 覆盖文件日志目录 |
 | `-v`, `--verbose` | 关闭 | 输出调试日志 |
 | `--version` | — | 输出版本后退出 |
 
 环境中可设置 `PEERDESK_BIND`、`PEERDESK_PORT`、`PEERDESK_UDP_PORT`、
-`PEERDESK_TOKEN` 和 `PEERDESK_RELAY_MBPS` 作为对应默认值。
+`PEERDESK_TOKEN`、`PEERDESK_RELAY_MBPS` 和 `PEERDESK_LOG_DIR` 作为对应默认值。
 
 ## 客户端参数
 
@@ -237,6 +246,7 @@ ctest --preset windows-mingw --output-on-failure
 | `--audio-test` | 使用 440 Hz 合成音源 |
 | `--screenshot PATH` | 保存窗口截图后退出 |
 | `--exit-after MS` | 指定毫秒后自动退出 |
+| `--log-dir PATH` | 覆盖文件日志目录；隔离模式下默认使用临时目录 |
 
 `--capture test`、`--audio-test`、`--viewer-demo` 或截图模式会使用临时偏好，
 不会覆盖日常配置。
@@ -250,6 +260,9 @@ ctest --preset windows-mingw --output-on-failure
   TLS 终结代理或可信内网之后。
 - 中继限速默认按单会话令牌桶执行；超过 `--relay-mbps` 的数据报会被丢弃。
 - 被控端必须在可信网络中运行，并谨慎开放键鼠、剪贴板和文件接收权限。
+- 日志和诊断包只保存在本机，诊断包不会自动上传。导出时会按模式替换令牌、连接码、
+  服务器地址、网络端点、Windows 路径和常见文件名，但模式化脱敏不能替代人工检查；
+  分享前仍应确认内容。当前不包含 minidump 或远程诊断。
 
 ## 已知限制
 
@@ -272,12 +285,14 @@ ctest --preset windows-mingw --output-on-failure
   Windows SmartScreen 可能提示未知发布者，自动更新、失败回滚和跨版本升级路径仍未完成。
 - 当前用户登录启动项和后台托盘启动已实现并通过回环测试，但尚未完成真实 Windows
   注销/重启验收。
+- 日志仅在本地滚动保留，没有日志上传、集中采集或远程诊断；异常退出提示依赖 `.running`
+  运行标记，不等于崩溃转储或完整崩溃分析。
 - 与 UU远程 的交互仍有差距：弱网策略、媒体断点续传和更完整的游戏输入兼容性尚待补齐。
 
 ## 路线图
 
 1. 两台真实 Windows 主机完成直连、中继、弱网、多屏、文件、长会话与断线恢复验收。
-2. 完成真实注销/重启下的登录启动验收，并补齐安装包签名、日志归档、升级验证和更新机制。
+2. 完成真实注销/重启下的登录启动验收，并补齐安装包签名、升级验证和更新机制。
 3. 引入 H.264 与 Opus，并在不可用时回退到 JPEG / G.711。
 4. 评估虚拟显示器、虚拟 HID，并完成真实游戏输入兼容性验收。
 5. 继续扩展真实跨机验收、媒体质量、队列诊断和输入兼容性；旧技术栈清理已经完成。

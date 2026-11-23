@@ -1,10 +1,12 @@
 #include "ui/settings_dialog.h"
 
+#include "app/diagnostic_service.h"
 #include "app/host_controller.h"
 #include "app/preferences.h"
 #include "app/quality_presets.h"
 #include "app/viewer_controller.h"
 #include "core/util.h"
+#include "diagnostics/logging.h"
 #include "platform/startup_registration.h"
 #include "session/session_types.h"
 #include "ui/connection_page.h"
@@ -12,7 +14,10 @@
 #include "ui/ui_widgets.h"
 
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -20,6 +25,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -227,6 +234,60 @@ void SettingsDialog::buildUi()
     startupNote_->setObjectName(
         QStringLiteral("settingsStartupNote"));
     layout->addWidget(startupNote_);
+
+    layout->addSpacing(2);
+    layout->addWidget(makeSectionTitle(
+        QStringLiteral("日志与诊断"),
+        content));
+    logDirectoryLabel_ = makeNote(QString(), content);
+    logDirectoryLabel_->setObjectName(
+        QStringLiteral("settingsLogDirectoryLabel"));
+    logDirectoryLabel_->setTextInteractionFlags(
+        Qt::TextSelectableByMouse);
+    layout->addWidget(logDirectoryLabel_);
+
+    diagnosticsCrashNote_ = makeNote(
+        QStringLiteral(
+            "上次运行未正常退出。可先打开日志目录，或导出一份脱敏诊断包供排查。"),
+        content);
+    diagnosticsCrashNote_->setObjectName(
+        QStringLiteral("settingsDiagnosticsCrashNote"));
+    diagnosticsCrashNote_->setStyleSheet(
+        QStringLiteral("color: #f0b45a;"));
+    layout->addWidget(diagnosticsCrashNote_);
+
+    auto *diagnosticsActions = new QHBoxLayout;
+    diagnosticsActions->setContentsMargins(0, 0, 0, 0);
+    diagnosticsActions->setSpacing(8);
+    openLogsButton_ = new QPushButton(
+        QStringLiteral("打开日志目录"),
+        content);
+    openLogsButton_->setObjectName(
+        QStringLiteral("settingsOpenLogsButton"));
+    openLogsButton_->setCursor(Qt::PointingHandCursor);
+    openLogsButton_->setMinimumHeight(34);
+    diagnosticsActions->addWidget(openLogsButton_);
+    exportDiagnosticsButton_ = new QPushButton(
+        QStringLiteral("导出诊断包…"),
+        content);
+    exportDiagnosticsButton_->setObjectName(
+        QStringLiteral("settingsExportDiagnosticsButton"));
+    exportDiagnosticsButton_->setCursor(Qt::PointingHandCursor);
+    exportDiagnosticsButton_->setMinimumHeight(34);
+    diagnosticsActions->addWidget(exportDiagnosticsButton_);
+    diagnosticsActions->addStretch(1);
+    layout->addLayout(diagnosticsActions);
+
+    diagnosticsStatusLabel_ = makeNote(QString(), content);
+    diagnosticsStatusLabel_->setObjectName(
+        QStringLiteral("settingsDiagnosticsStatusLabel"));
+    diagnosticsStatusLabel_->hide();
+    layout->addWidget(diagnosticsStatusLabel_);
+    layout->addWidget(makeNote(
+        QStringLiteral(
+            "诊断包只包含当前客户端日志、应用版本和系统环境；服务器地址与网络端点会被替换为占位符，不包含令牌、连接码、文件名或接收目录。"),
+        content));
+
     layout->addWidget(makeNote(
         QStringLiteral("服务器和令牌会用于下一次连接，不会中断当前会话；画质和声音立即生效。"),
         content));
@@ -288,6 +349,16 @@ void SettingsDialog::buildUi()
         &QAbstractButton::toggled,
         this,
         [this]() { errorLabel_->hide(); });
+    connect(
+        openLogsButton_,
+        &QPushButton::clicked,
+        this,
+        &SettingsDialog::openLogDirectory);
+    connect(
+        exportDiagnosticsButton_,
+        &QPushButton::clicked,
+        this,
+        &SettingsDialog::exportDiagnostics);
 }
 
 void SettingsDialog::reload()
@@ -326,12 +397,99 @@ void SettingsDialog::applyPreferences()
         startupSupported
             ? QStringLiteral("仅对当前 Windows 用户生效，不需要管理员权限；可随时在这里关闭。")
             : QStringLiteral("当前平台不支持登录时启动。"));
+    refreshDiagnosticsInfo();
 }
 
 void SettingsDialog::showError(const QString &message)
 {
     errorLabel_->setText(message);
     errorLabel_->show();
+}
+
+void SettingsDialog::refreshDiagnosticsInfo()
+{
+    const QString directory = DiagnosticService::logDirectory();
+    logDirectoryLabel_->setText(
+        QStringLiteral("日志目录：%1").arg(directory));
+    diagnosticsCrashNote_->setVisible(
+        diagnostics::LogManager::instance().previousSessionCrashed());
+}
+
+void SettingsDialog::openLogDirectory()
+{
+    const QString directory = DiagnosticService::logDirectory();
+    if (!QDir().mkpath(directory)) {
+        diagnosticsStatusLabel_->setStyleSheet(
+            QStringLiteral("color: #f2555a;"));
+        diagnosticsStatusLabel_->setText(
+            QStringLiteral("无法创建日志目录。"));
+        diagnosticsStatusLabel_->show();
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(directory))) {
+        diagnosticsStatusLabel_->setStyleSheet(
+            QStringLiteral("color: #f2555a;"));
+        diagnosticsStatusLabel_->setText(
+            QStringLiteral("无法打开日志目录，可从上方路径手动访问。"));
+        diagnosticsStatusLabel_->show();
+        return;
+    }
+    diagnosticsStatusLabel_->setStyleSheet(
+        QStringLiteral("color: #70d69c;"));
+    diagnosticsStatusLabel_->setText(
+        QStringLiteral("已在文件资源管理器中打开日志目录。"));
+    diagnosticsStatusLabel_->show();
+}
+
+void SettingsDialog::exportDiagnostics()
+{
+    if (!preferences_) {
+        diagnosticsStatusLabel_->setStyleSheet(
+            QStringLiteral("color: #f2555a;"));
+        diagnosticsStatusLabel_->setText(
+            QStringLiteral("无法读取本机设置，诊断包未导出。"));
+        diagnosticsStatusLabel_->show();
+        return;
+    }
+
+    const QString downloads = QStandardPaths::writableLocation(
+        QStandardPaths::DownloadLocation);
+    const QString initialPath = QDir(
+        downloads.isEmpty() ? QDir::homePath() : downloads)
+                                    .filePath(
+                                        DiagnosticService::defaultFileName());
+    QString outputPath = QFileDialog::getSaveFileName(
+        this,
+        QStringLiteral("导出诊断包"),
+        initialPath,
+        QStringLiteral("ZIP 诊断包 (*.zip)"));
+    if (outputPath.isEmpty()) {
+        return;
+    }
+    if (!outputPath.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)) {
+        outputPath += QStringLiteral(".zip");
+    }
+
+    QString error;
+    if (!DiagnosticService::exportBundle(
+            *preferences_,
+            outputPath,
+            &error)) {
+        diagnosticsStatusLabel_->setStyleSheet(
+            QStringLiteral("color: #f2555a;"));
+        diagnosticsStatusLabel_->setText(
+            error.isEmpty()
+                ? QStringLiteral("诊断包导出失败。")
+                : QStringLiteral("诊断包导出失败：%1").arg(error));
+        diagnosticsStatusLabel_->show();
+        return;
+    }
+    diagnosticsStatusLabel_->setStyleSheet(
+        QStringLiteral("color: #70d69c;"));
+    diagnosticsStatusLabel_->setText(
+        QStringLiteral("诊断包已导出：%1").arg(
+            QFileInfo(outputPath).fileName()));
+    diagnosticsStatusLabel_->show();
 }
 
 void SettingsDialog::save()

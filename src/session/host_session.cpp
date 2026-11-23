@@ -349,8 +349,7 @@ void HostSession::resumeOutgoingFile()
             &error,
             offer)) {
         emit logMessage(
-            QStringLiteral("无法续传 %1：%2")
-                .arg(offer.name)
+            QStringLiteral("无法续传文件：%1")
                 .arg(error));
     }
 }
@@ -1027,10 +1026,10 @@ void HostSession::handleFileBegin(const QJsonObject &message)
     emit eventReceived(event);
     emit logMessage(
         resumed
-            ? QStringLiteral("续传文件 %1，从 %2 字节继续")
-                  .arg(name)
+            ? QStringLiteral("文件续传已开始，从 %1 字节继续")
                   .arg(offset)
-            : QStringLiteral("接收文件 %1").arg(name));
+            : QStringLiteral("文件接收已开始，共 %1 字节")
+                  .arg(size));
 }
 
 void HostSession::handleFileResume(const QJsonObject &message)
@@ -1105,7 +1104,7 @@ void HostSession::handleFileEnd(const QJsonObject &message)
     emit eventReceived(event);
     emit fileReceived(path, size);
     emit logMessage(
-        QStringLiteral("文件已保存 %1").arg(QFileInfo(path).fileName()));
+        QStringLiteral("文件已保存，共 %1 字节").arg(size));
 }
 
 void HostSession::rejectFile(

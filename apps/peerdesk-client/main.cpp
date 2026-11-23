@@ -3,6 +3,7 @@
 #include "app/preferences.h"
 #include "app/single_instance.h"
 #include "app/viewer_controller.h"
+#include "diagnostics/logging.h"
 #include "platform/startup_registration.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
@@ -27,6 +28,7 @@
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QTemporaryDir>
 #include <QTimer>
 
 #include <cstdio>
@@ -113,6 +115,39 @@ void applyOverrides(
     }
 }
 
+void registerLoggingSecrets(
+    const std::shared_ptr<pd::Preferences> &preferences)
+{
+    if (!preferences) {
+        return;
+    }
+    const pd::HostPreferences host = preferences->host();
+    const pd::ViewerPreferences viewer = preferences->viewer();
+    auto &logging = pd::diagnostics::LogManager::instance();
+    logging.addSecret(host.token);
+    logging.addSecret(viewer.token);
+    logging.addSecret(host.code);
+    logging.addSecret(viewer.code);
+}
+
+void forwardControllerLogs(
+    pd::HostController &host,
+    pd::ViewerController &viewer)
+{
+    QObject::connect(
+        &host,
+        &pd::HostController::logMessage,
+        [](const QString &message) {
+            qInfo().noquote() << message;
+        });
+    QObject::connect(
+        &viewer,
+        &pd::ViewerController::logMessage,
+        [](const QString &message) {
+            qInfo().noquote() << message;
+        });
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -171,6 +206,10 @@ int main(int argc, char *argv[])
         QStringList{QStringLiteral("exit-after")},
         QStringLiteral("指定毫秒后自动退出"),
         QStringLiteral("milliseconds"));
+    const QCommandLineOption logDirectoryOption(
+        QStringList{QStringLiteral("log-dir")},
+        QStringLiteral("日志目录（默认 %APPDATA%\\PeerDesk\\logs）"),
+        QStringLiteral("path"));
 
     parser.addOptions({
         backgroundOption,
@@ -183,6 +222,7 @@ int main(int argc, char *argv[])
         audioTestOption,
         screenshotOption,
         exitAfterOption,
+        logDirectoryOption,
     });
     parser.process(application);
 
@@ -260,6 +300,39 @@ int main(int argc, char *argv[])
         }
     }
 
+    std::unique_ptr<QTemporaryDir> isolatedLogDirectory;
+    QString logDirectory;
+    if (parser.isSet(logDirectoryOption)) {
+        logDirectory = QDir::current().absoluteFilePath(
+            parser.value(logDirectoryOption).trimmed());
+    } else if (isolated) {
+        isolatedLogDirectory = std::make_unique<QTemporaryDir>();
+        if (isolatedLogDirectory->isValid()) {
+            logDirectory = isolatedLogDirectory->filePath(
+                QStringLiteral("logs"));
+        }
+    }
+
+    pd::diagnostics::LoggingOptions loggingOptions;
+    loggingOptions.directory = logDirectory;
+    loggingOptions.applicationId = isolated
+        ? QStringLiteral("peerdesk-client-test")
+        : QStringLiteral("peerdesk-client");
+    loggingOptions.trackSession = !isolated;
+    QString loggingError;
+    const bool loggingEnabled =
+        pd::diagnostics::LogManager::instance().start(
+            loggingOptions,
+            &loggingError);
+    if (!loggingEnabled) {
+        printError(QStringLiteral("无法启用文件日志：%1")
+                       .arg(loggingError));
+    }
+    const bool previousSessionCrashed =
+        loggingEnabled
+        && pd::diagnostics::LogManager::instance()
+               .previousSessionCrashed();
+
     pd::ui::applyTheme(application);
 
     const auto preferences = std::make_shared<pd::Preferences>(
@@ -271,11 +344,13 @@ int main(int argc, char *argv[])
         serverOption,
         tokenOption,
         codeOption);
+    registerLoggingSecrets(preferences);
 
     pd::HostController host;
     pd::ViewerController viewer;
     host.setPreferences(preferences);
     viewer.setPreferences(preferences);
+    forwardControllerLogs(host, viewer);
     installPlatformBackends(
         host,
         viewer,
@@ -364,12 +439,23 @@ int main(int argc, char *argv[])
         [&host, &viewer]() {
             viewer.hangUp();
             host.stop();
+            pd::diagnostics::LogManager::instance().stop();
         });
 
     if (!startHidden) {
         window.show();
         window.raise();
         window.activateWindow();
+        if (previousSessionCrashed) {
+            QTimer::singleShot(
+                700,
+                &window,
+                [&window]() {
+                    window.showToast(
+                        QStringLiteral(
+                            "上次运行未正常退出，可在设置中导出诊断包"));
+                });
+        }
     }
 
     if (hasScreenshot) {

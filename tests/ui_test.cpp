@@ -1,6 +1,7 @@
 #include "app/host_controller.h"
 #include "app/preferences.h"
 #include "app/viewer_controller.h"
+#include "diagnostics/logging.h"
 #include "platform/startup_registration.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
@@ -14,6 +15,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDir>
 #include <QFile>
 #include <QGraphicsOpacityEffect>
 #include <QJsonArray>
@@ -25,6 +27,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QToolButton>
@@ -124,6 +127,7 @@ private slots:
     void closeToTrayHidesAndExplicitQuitWorks();
     void appWindowLoadsAndClearsRecentConnections();
     void settingsUpdateControllersAndConnectionPage();
+    void settingsShowDiagnosticsAndRecoveryHint();
     void settingsStartupRegistrationRoundTrip();
     void appWindowStartsInBackgroundOnlyWithTray();
 };
@@ -1812,6 +1816,75 @@ void UiTest::settingsUpdateControllersAndConnectionPage()
     QCOMPARE(preferences->viewer().receiveDirectory, receiveDirectory.path());
     QVERIFY(!preferences->window().closeToTray);
     QVERIFY(dialog->isHidden());
+}
+
+void UiTest::settingsShowDiagnosticsAndRecoveryHint()
+{
+    QTemporaryDir logDirectory;
+    QVERIFY(logDirectory.isValid());
+    const QString marker = QDir(logDirectory.path()).filePath(
+        QStringLiteral("peerdesk-ui-logging.running"));
+    QFile stale(marker);
+    QVERIFY(stale.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(stale.write(QByteArrayLiteral("stale\n")), qint64(6));
+    stale.close();
+
+    auto &logging = pd::diagnostics::LogManager::instance();
+    logging.stop();
+    logging.clearSecrets();
+    const auto resetLogging = qScopeGuard([]() {
+        pd::diagnostics::LogManager::instance().stop();
+        pd::diagnostics::LogManager::instance().clearSecrets();
+    });
+    Q_UNUSED(resetLogging)
+
+    pd::diagnostics::LoggingOptions options;
+    options.directory = logDirectory.path();
+    options.applicationId = QStringLiteral("peerdesk-ui-logging");
+    options.installMessageHandler = false;
+    options.trackSession = true;
+    QString loggingError;
+    QVERIFY2(
+        logging.start(options, &loggingError),
+        qPrintable(loggingError));
+    QVERIFY(logging.previousSessionCrashed());
+
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.setTrayAvailableForTesting(false);
+    window.show();
+    QTest::qWait(20);
+    window.settingsButton()->click();
+
+    auto *dialog = window.settingsDialog();
+    QVERIFY(dialog);
+    QVERIFY(dialog->isVisible());
+    QVERIFY(dialog->openLogsButton());
+    QCOMPARE(
+        dialog->openLogsButton()->objectName(),
+        QStringLiteral("settingsOpenLogsButton"));
+    QVERIFY(dialog->exportDiagnosticsButton());
+    QCOMPARE(
+        dialog->exportDiagnosticsButton()->objectName(),
+        QStringLiteral("settingsExportDiagnosticsButton"));
+    QVERIFY(dialog->logDirectoryLabel());
+    QVERIFY(dialog->logDirectoryLabel()->text().contains(
+        QDir::cleanPath(logDirectory.path())));
+    QVERIFY(dialog->diagnosticsCrashNote());
+    QVERIFY(dialog->diagnosticsCrashNote()->isVisible());
+    QVERIFY(dialog->diagnosticsCrashNote()->text().contains(
+        QStringLiteral("未正常退出")));
+    QVERIFY(dialog->diagnosticsStatusLabel());
+    QVERIFY(dialog->diagnosticsStatusLabel()->isHidden());
+
+    dialog->reload();
+    QVERIFY(dialog->diagnosticsCrashNote()->isVisible());
 }
 
 void UiTest::settingsStartupRegistrationRoundTrip()

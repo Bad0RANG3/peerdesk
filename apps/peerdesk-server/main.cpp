@@ -1,8 +1,10 @@
+#include "diagnostics/logging.h"
 #include "server/server.h"
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QDir>
 #include <QLoggingCategory>
 
 #include <cstdio>
@@ -68,6 +70,10 @@ int main(int argc, char *argv[])
          QStringLiteral("60")},
         {QStringList{QStringLiteral("v"), QStringLiteral("verbose")},
          QStringLiteral("输出更详细的日志")},
+        {QStringList{QStringLiteral("log-dir")},
+         QStringLiteral("日志目录（默认 %APPDATA%\\PeerDesk\\logs）"),
+         QStringLiteral("path"),
+         environmentValue("PEERDESK_LOG_DIR", QString())},
     });
     parser.process(app);
 
@@ -116,6 +122,24 @@ int main(int argc, char *argv[])
             QStringLiteral("*.debug=true"));
     }
 
+    pd::diagnostics::LoggingOptions loggingOptions;
+    loggingOptions.directory = parser
+        .value(QStringLiteral("log-dir"))
+        .trimmed();
+    if (!loggingOptions.directory.isEmpty()) {
+        loggingOptions.directory = QDir::current().absoluteFilePath(
+            loggingOptions.directory);
+    }
+    loggingOptions.applicationId = QStringLiteral("peerdesk-server");
+    loggingOptions.trackSession = false;
+    QString loggingError;
+    if (!pd::diagnostics::LogManager::instance().start(
+            loggingOptions,
+            &loggingError)) {
+        printError(QStringLiteral("无法启用文件日志：%1")
+                       .arg(loggingError));
+    }
+
     pd::SignalingServer::Options options;
     options.host = parser.value(QStringLiteral("host"));
     options.port = static_cast<quint16>(port);
@@ -124,6 +148,7 @@ int main(int argc, char *argv[])
     options.relayMbps = relayMbps;
     options.connectMax = connectMax;
     options.connectWindow = connectWindow;
+    pd::diagnostics::LogManager::instance().addSecret(options.token);
 
     pd::SignalingServer server(options);
     QObject::connect(
@@ -135,7 +160,20 @@ int main(int argc, char *argv[])
     QString error;
     if (!server.start(&error)) {
         printError(error);
+        pd::diagnostics::LogManager::instance().stop();
         return 1;
     }
+    QObject::connect(
+        &app,
+        &QCoreApplication::aboutToQuit,
+        &app,
+        []() {
+            pd::diagnostics::LogManager::instance().stop();
+        });
+    qInfo().noquote()
+        << QStringLiteral("PeerDesk 服务端已启动：%1:%2，UDP %3")
+               .arg(options.host)
+               .arg(options.port)
+               .arg(options.udpPort);
     return app.exec();
 }
