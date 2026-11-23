@@ -85,7 +85,7 @@ private slots:
         QVERIFY(plain->hostToClient != changed->hostToClient);
     }
 
-    void aeadMatchesPythonVector()
+    void aeadMatchesReferenceVector()
     {
         const KeyPair host = fixedPair(0);
         const KeyPair client = fixedPair(32);

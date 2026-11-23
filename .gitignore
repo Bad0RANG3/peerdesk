@@ -1,14 +1,3 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.venv/
-venv/
-.pytest_cache/
-.ruff_cache/
-
 # 运行期产物
 logs/
 scratch/
@@ -18,6 +7,8 @@ scratch/
 *.ilk
 
 # CMake / 本地构建
+build/
+dist/
 CMakeUserPresets.json
 compile_commands.json
 install/

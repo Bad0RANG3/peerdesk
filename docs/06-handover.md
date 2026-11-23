@@ -10,6 +10,10 @@
 PeerDesk 是 Windows 远程桌面项目。当前服务端、UDP 传输、加密、会话控制与 Qt
 客户端都位于同一套原生 C++ 工程中，默认分支为 `main`。
 
+仓库只保留原生实现：旧 Python 包、Web UI、PyInstaller 入口、pytest/e2e 脚本及其缓存
+已删除。构建、测试和 CI 不再需要 Python、Node.js 或旧 Web 服务；唯一技术栈是 C++20、
+Qt 6.8、CMake 和 Ninja。
+
 已经接通的主路径：
 
 - `peerdesk-server`：TCP 信令、UDP 打洞辅助、中继、STUN、令牌、连接频次限制和每会话限速。
@@ -258,7 +262,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 4. 产品化：安装包、自动更新、开机自启策略、崩溃诊断和版本升级路径。
 5. 媒体升级：H.264 与 Opus 动态接入，失败时保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID 与拥塞控制。
-8. 完整迁移验收通过后，再清理旧技术栈文件、旧测试和过期打包资产。
+7. 仓库清理已完成；后续改动继续保证构建、测试、文档和发布入口只引用原生资产。
 
 ## 11. 提交前检查
 
@@ -266,6 +270,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 git diff --check
 cmake --build --preset windows-mingw
 ctest --preset windows-mingw --output-on-failure
+git ls-files | Select-String -Pattern '(?i)(\.py$|\.pyi$|\.pyw$|\.pyc$|pyproject|pytest|ruff|pyinstaller|\.spec$)'
 git status --short
 ```
 
