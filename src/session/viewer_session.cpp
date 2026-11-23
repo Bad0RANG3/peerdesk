@@ -39,18 +39,6 @@ QString jsonString(
     return value.isString() ? value.toString() : fallback;
 }
 
-QImage decodeJpeg(const QByteArray &jpeg)
-{
-    if (jpeg.isEmpty()) {
-        return {};
-    }
-    QImage image = QImage::fromData(jpeg, "jpeg");
-    if (image.isNull()) {
-        image = QImage::fromData(jpeg, "jpg");
-    }
-    return image;
-}
-
 } // namespace
 
 ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
@@ -113,6 +101,23 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
         &FileSender::interrupted,
         this,
         &ViewerSession::outgoingFileInterrupted);
+    connect(
+        &video_,
+        &ViewerVideoPipeline::frameDecoded,
+        this,
+        [this](
+            const QImage &image,
+            quint32,
+            bool keyframe) {
+            if (started_) {
+                emit frameDecoded(image, keyframe);
+            }
+        });
+    connect(
+        &video_,
+        &ViewerVideoPipeline::decodeFailed,
+        this,
+        &ViewerSession::logMessage);
 }
 
 ViewerSession::~ViewerSession()
@@ -128,6 +133,7 @@ void ViewerSession::start()
         return;
     }
     started_ = true;
+    video_.start();
     if (link_ && link_->established()) {
         sendControlNoReply(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("hello")},
@@ -140,6 +146,7 @@ void ViewerSession::start()
 void ViewerSession::suspend()
 {
     started_ = false;
+    video_.stop();
     if (fileSender_->active()) {
         fileSender_->interrupt(QStringLiteral("interrupted"));
     }
@@ -555,12 +562,7 @@ void ViewerSession::onVideoFrame(
     }
     ++videoSequence_;
     emit videoFrameReceived(jpeg, videoSequence_, keyframe);
-    const QImage image = decodeJpeg(jpeg);
-    if (image.isNull()) {
-        emit logMessage(QStringLiteral("收到无法解码的视频帧"));
-        return;
-    }
-    emit frameDecoded(image, keyframe);
+    video_.submit(jpeg, videoSequence_, keyframe);
 }
 
 void ViewerSession::onAudioPacket(const QByteArray &payload)

@@ -8,6 +8,7 @@
 #include "transport/peer_link.h"
 
 #include <QCoreApplication>
+#include <QBuffer>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -15,6 +16,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QImageWriter>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QThread>
@@ -517,6 +519,77 @@ private slots:
         QVERIFY(waitUntil(
             [&]() { return frames.size() > afterStop; },
             4000));
+        pipeline.stop();
+    }
+
+    void viewerVideoPipelineDecodesOffMainThread()
+    {
+        QImage sourceImage(320, 180, QImage::Format_RGB32);
+        sourceImage.fill(QColor(32, 96, 160));
+        QByteArray jpeg;
+        QBuffer buffer(&jpeg);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QImageWriter writer(&buffer, QByteArrayLiteral("jpeg"));
+        QVERIFY(writer.write(sourceImage));
+        buffer.close();
+        QVERIFY(!jpeg.isEmpty());
+
+        ViewerVideoPipeline pipeline;
+        QList<quint32> sequences;
+        QList<QImage> frames;
+        QList<QString> errors;
+        connect(
+            &pipeline,
+            &ViewerVideoPipeline::frameDecoded,
+            [&sequences, &frames](
+                const QImage &image,
+                quint32 sequence,
+                bool) {
+                sequences.append(sequence);
+                frames.append(image);
+            });
+        connect(
+            &pipeline,
+            &ViewerVideoPipeline::decodeFailed,
+            [&errors](const QString &error) { errors.append(error); });
+
+        pipeline.start();
+        pipeline.submit(jpeg, 7, true);
+        QVERIFY(waitUntil(
+            [&]() { return !frames.isEmpty(); },
+            3000));
+        QCOMPARE(sequences.constLast(), 7U);
+        QCOMPARE(frames.constLast().size(), sourceImage.size());
+        QCOMPARE(
+            pipeline.decoderThreadName(),
+            QStringLiteral("PeerDeskViewerVideo"));
+
+        pipeline.submit(jpeg, 8, true);
+        pipeline.submit(jpeg, 9, false);
+        QVERIFY(waitUntil(
+            [&]() { return sequences.size() >= 2; },
+            3000));
+        QCOMPARE(sequences.at(1), 8U);
+
+        pipeline.submit(QByteArrayLiteral("not-a-jpeg"), 10, false);
+        QVERIFY(waitUntil(
+            [&]() { return !errors.isEmpty(); },
+            3000));
+
+        pipeline.stop();
+        const qsizetype stoppedCount = frames.size();
+        pipeline.submit(jpeg, 11, false);
+        pumpEvents(150);
+        QCOMPARE(frames.size(), stoppedCount);
+
+        pipeline.start();
+        pipeline.submit(jpeg, 12, false);
+        QVERIFY(waitUntil(
+            [&]() {
+                return !sequences.isEmpty()
+                    && sequences.constLast() == 12;
+            },
+            3000));
         pipeline.stop();
     }
 
@@ -1785,6 +1858,9 @@ private slots:
         QVERIFY(waitUntil(
             [&]() { return !decodedFrames.isEmpty(); },
             6000));
+        QCOMPARE(
+            viewer.videoDecoderThreadName(),
+            QStringLiteral("PeerDeskViewerVideo"));
         QCOMPARE(decodedFrames.constFirst().size(), QSize(1280, 720));
         QVERIFY(!encodedFrames.constFirst().isEmpty());
         QVERIFY(waitUntil(
