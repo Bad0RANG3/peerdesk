@@ -2,6 +2,7 @@
 
 #include "session/audio_codec.h"
 #include "session/file_transfer.h"
+#include "session/host_input_pipeline.h"
 #include "session/media_sources.h"
 #include "session/session_types.h"
 #include "session/video_pipeline.h"
@@ -107,13 +108,14 @@ private:
     void handleFileEnd(const QJsonObject &message);
     void rejectFile(const QString &id, const QString &reason);
 
-    [[nodiscard]] QPointF mapToVirtualDesktop(double nx, double ny) const;
+    void submitInput(const HostInputCommand &command);
+    [[nodiscard]] QRect currentMonitorRect() const;
 
     PeerLink *link_ = nullptr;
     VideoPipeline videoPipeline_;
     std::shared_ptr<IAudioSource> audioSource_;
-    std::shared_ptr<IInputSink> inputSink_;
     std::shared_ptr<IClipboard> clipboard_;
+    HostInputPipeline inputPipeline_;
 
     VideoSettings settings_;
     QList<MonitorInfo> monitors_;

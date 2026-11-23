@@ -178,7 +178,7 @@ void HostSession::setAudioSource(std::shared_ptr<IAudioSource> source)
 
 void HostSession::setInputSink(std::shared_ptr<IInputSink> sink)
 {
-    inputSink_ = std::move(sink);
+    inputPipeline_.setSink(std::move(sink));
 }
 
 void HostSession::setClipboard(std::shared_ptr<IClipboard> clipboard)
@@ -267,6 +267,7 @@ void HostSession::startStreaming()
     lastCaptureMs_ = 0;
     lastEncodeMs_ = 0;
     statsClock_.restart();
+    inputPipeline_.start();
 
     if (clipboard_) {
         lastClipboard_ = clipboard_->text().left(kClipboardLimit);
@@ -287,9 +288,7 @@ void HostSession::stopStreaming()
     statsTimer_->stop();
     clipboardTimer_->stop();
     stopAudio();
-    if (inputSink_) {
-        inputSink_->releaseAll();
-    }
+    inputPipeline_.stop();
     if (fileSender_->active()) {
         fileSender_->interrupt(QStringLiteral("interrupted"));
     }
@@ -359,6 +358,9 @@ void HostSession::setSettings(const VideoSettings &settings)
 void HostSession::setAllowInput(bool allow)
 {
     allowInput_ = allow;
+    if (!allowInput_) {
+        inputPipeline_.releaseAll();
+    }
 }
 
 void HostSession::setReceiveDirectory(const QString &directory)
@@ -660,23 +662,20 @@ void HostSession::dispatch(const QJsonObject &message)
         return;
     }
     if (kind == QStringLiteral("mouse")) {
-        if (allowInput_) {
+        if (running_ && allowInput_) {
             handleMouse(message);
         }
         return;
     }
     if (kind == QStringLiteral("key")) {
-        if (allowInput_ && inputSink_) {
-            inputSink_->key(
-                jsonString(message, "code"),
-                message.value(QStringLiteral("down")).toBool());
-        }
+        submitInput(HostInputCommand::key(
+            jsonString(message, "code"),
+            message.value(QStringLiteral("down")).toBool()));
         return;
     }
     if (kind == QStringLiteral("text")) {
-        if (allowInput_ && inputSink_) {
-            inputSink_->typeText(jsonString(message, "s"));
-        }
+        submitInput(
+            HostInputCommand::typeText(jsonString(message, "s")));
         return;
     }
     if (kind == QStringLiteral("clip")) {
@@ -696,9 +695,7 @@ void HostSession::dispatch(const QJsonObject &message)
         return;
     }
     if (kind == QStringLiteral("cad")) {
-        if (allowInput_ && inputSink_) {
-            inputSink_->ctrlAltDelete();
-        }
+        submitInput(HostInputCommand::ctrlAltDelete());
         return;
     }
     if (kind == QStringLiteral("file_begin")) {
@@ -767,89 +764,83 @@ void HostSession::dispatch(const QJsonObject &message)
 
 void HostSession::handleMouse(const QJsonObject &message)
 {
-    if (!inputSink_) {
-        return;
-    }
+    const QRect monitor = currentMonitorRect();
     const QString action =
         jsonString(message, "act", QStringLiteral("move"));
     if (action == QStringLiteral("move")) {
-        const QPointF point = mapToVirtualDesktop(
+        submitInput(HostInputCommand::moveAbsolute(
             message.value(QStringLiteral("x")).toDouble(),
-            message.value(QStringLiteral("y")).toDouble());
-        inputSink_->moveAbsolute(point.x(), point.y());
+            message.value(QStringLiteral("y")).toDouble(),
+            monitor));
         return;
     }
     if (action == QStringLiteral("down")
         || action == QStringLiteral("up")) {
         if (action == QStringLiteral("down")) {
-            const QPointF point = mapToVirtualDesktop(
+            submitInput(HostInputCommand::moveAbsolute(
                 message.value(QStringLiteral("x")).toDouble(),
-                message.value(QStringLiteral("y")).toDouble());
-            inputSink_->moveAbsolute(point.x(), point.y());
+                message.value(QStringLiteral("y")).toDouble(),
+                monitor));
         }
-        inputSink_->mouseButton(
+        submitInput(HostInputCommand::mouseButton(
             jsonString(message, "btn", QStringLiteral("left")),
-            action == QStringLiteral("down"));
+            action == QStringLiteral("down")));
         return;
     }
     if (action == QStringLiteral("click")) {
-        const QPointF point = mapToVirtualDesktop(
+        submitInput(HostInputCommand::moveAbsolute(
             message.value(QStringLiteral("x")).toDouble(),
-            message.value(QStringLiteral("y")).toDouble());
-        inputSink_->moveAbsolute(point.x(), point.y());
-        inputSink_->click(
-            jsonString(message, "btn", QStringLiteral("left")));
+            message.value(QStringLiteral("y")).toDouble(),
+            monitor));
+        submitInput(HostInputCommand::click(
+            jsonString(message, "btn", QStringLiteral("left"))));
         return;
     }
     if (action == QStringLiteral("wheel")) {
-        inputSink_->wheel(
+        submitInput(HostInputCommand::wheel(
             static_cast<int>(
                 message.value(QStringLiteral("dy")).toDouble()),
-            message.value(QStringLiteral("h")).toBool());
+            message.value(QStringLiteral("h")).toBool()));
         return;
     }
     if (action == QStringLiteral("rel")) {
-        inputSink_->moveRelative(
+        submitInput(HostInputCommand::moveRelative(
             static_cast<int>(
                 message.value(QStringLiteral("dx")).toDouble()),
             static_cast<int>(
-                message.value(QStringLiteral("dy")).toDouble()));
+                message.value(QStringLiteral("dy")).toDouble())));
         return;
     }
     if (action == QStringLiteral("reldown")
         || action == QStringLiteral("relup")) {
-        inputSink_->mouseButton(
+        submitInput(HostInputCommand::mouseButton(
             jsonString(message, "btn", QStringLiteral("left")),
-            action == QStringLiteral("reldown"));
+            action == QStringLiteral("reldown")));
     }
 }
 
-QPointF HostSession::mapToVirtualDesktop(double nx, double ny) const
+void HostSession::submitInput(const HostInputCommand &command)
 {
-    const double clampedX = std::clamp(nx, 0.0, 1.0);
-    const double clampedY = std::clamp(ny, 0.0, 1.0);
-    if (!inputSink_ || monitors_.isEmpty()) {
-        return {clampedX, clampedY};
+    if (running_ && allowInput_) {
+        inputPipeline_.submit(command);
+    }
+}
+
+QRect HostSession::currentMonitorRect() const
+{
+    if (monitors_.isEmpty()) {
+        return {};
     }
     const int index = std::clamp(
         currentMonitor_,
         0,
         static_cast<int>(monitors_.size()) - 1);
     const MonitorInfo &monitor = monitors_.at(index);
-    const double x = monitor.left + clampedX * monitor.width;
-    const double y = monitor.top + clampedY * monitor.height;
-    const QRect desktop = inputSink_->virtualDesktop();
     return {
-        std::clamp(
-            (x - desktop.left())
-                / std::max(1, desktop.width() - 1),
-            0.0,
-            1.0),
-        std::clamp(
-            (y - desktop.top())
-                / std::max(1, desktop.height() - 1),
-            0.0,
-            1.0),
+        monitor.left,
+        monitor.top,
+        monitor.width,
+        monitor.height,
     };
 }
 

@@ -1,6 +1,7 @@
 #include "server/server.h"
 #include "session/audio_codec.h"
 #include "session/file_transfer.h"
+#include "session/host_input_pipeline.h"
 #include "session/host_session.h"
 #include "session/media_sources.h"
 #include "session/session_types.h"
@@ -24,8 +25,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 using namespace pd;
@@ -194,6 +198,20 @@ bool hasFileState(
 
 class FakeInputSink final : public IInputSink {
 public:
+    struct Snapshot {
+        QList<QPointF> absoluteMoves;
+        QList<QPoint> relativeMoves;
+        QList<QPair<QString, bool>> buttons;
+        QList<QString> clicks;
+        QList<QPair<int, bool>> wheels;
+        QList<QPair<QString, bool>> keys;
+        QString typed;
+        int cadCount = 0;
+        int releaseCount = 0;
+        QStringList operations;
+        QStringList threadNames;
+    };
+
     [[nodiscard]] QRect virtualDesktop() const override
     {
         return QRect(0, 0, 2304, 768);
@@ -201,52 +219,136 @@ public:
 
     void moveAbsolute(double x, double y) override
     {
-        absoluteMoves.append(QPointF(x, y));
+        const std::lock_guard<std::mutex> lock(mutex_);
+        state_.absoluteMoves.append(QPointF(x, y));
+        state_.operations.append(QStringLiteral("move:%1:%2")
+                                     .arg(x, 0, 'f', 6)
+                                     .arg(y, 0, 'f', 6));
+        recordThread();
     }
 
     void moveRelative(int dx, int dy) override
     {
-        relativeMoves.append(QPoint(dx, dy));
+        const std::lock_guard<std::mutex> lock(mutex_);
+        state_.relativeMoves.append(QPoint(dx, dy));
+        state_.operations.append(
+            QStringLiteral("relative:%1:%2").arg(dx).arg(dy));
+        recordThread();
     }
 
     void mouseButton(const QString &button, bool down) override
     {
-        buttons.append(qMakePair(button, down));
+        const std::lock_guard<std::mutex> lock(mutex_);
+        state_.buttons.append(qMakePair(button, down));
+        state_.operations.append(QStringLiteral("button:%1:%2")
+                                     .arg(button, down ? QStringLiteral("down")
+                                                       : QStringLiteral("up")));
+        recordThread();
     }
 
     void click(const QString &button) override
     {
-        clicks.append(button);
+        const std::lock_guard<std::mutex> lock(mutex_);
+        state_.clicks.append(button);
+        state_.operations.append(QStringLiteral("click:%1").arg(button));
+        recordThread();
     }
 
     void wheel(int delta, bool horizontal) override
     {
-        wheels.append(qMakePair(delta, horizontal));
+        const std::lock_guard<std::mutex> lock(mutex_);
+        state_.wheels.append(qMakePair(delta, horizontal));
+        state_.operations.append(QStringLiteral("wheel:%1:%2")
+                                     .arg(delta)
+                                     .arg(horizontal ? 1 : 0));
+        recordThread();
     }
 
     void key(const QString &code, bool down) override
     {
-        keys.append(qMakePair(code, down));
+        std::unique_lock<std::mutex> lock(mutex_);
+        state_.keys.append(qMakePair(code, down));
+        state_.operations.append(QStringLiteral("key:%1:%2")
+                                     .arg(code, down ? QStringLiteral("down")
+                                                     : QStringLiteral("up")));
+        recordThread();
+        if (!gateCode_.isEmpty() && code == gateCode_) {
+            gateCode_.clear();
+            gateEntered_ = true;
+            gateCondition_.notify_all();
+            gateCondition_.wait(lock, [this]() { return gateOpen_; });
+        }
     }
 
     void typeText(const QString &text) override
     {
-        typed.append(text);
+        const std::lock_guard<std::mutex> lock(mutex_);
+        state_.typed.append(text);
+        state_.operations.append(QStringLiteral("text:%1").arg(text));
+        recordThread();
     }
 
     void ctrlAltDelete() override
     {
-        ++cadCount;
+        const std::lock_guard<std::mutex> lock(mutex_);
+        ++state_.cadCount;
+        state_.operations.append(QStringLiteral("cad"));
+        recordThread();
     }
 
-    QList<QPointF> absoluteMoves;
-    QList<QPoint> relativeMoves;
-    QList<QPair<QString, bool>> buttons;
-    QList<QString> clicks;
-    QList<QPair<int, bool>> wheels;
-    QList<QPair<QString, bool>> keys;
-    QString typed;
-    int cadCount = 0;
+    void releaseAll() override
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        ++state_.releaseCount;
+        state_.operations.append(QStringLiteral("release"));
+        recordThread();
+    }
+
+    [[nodiscard]] Snapshot snapshot() const
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        return state_;
+    }
+
+    void armKeyGate(const QString &code)
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        gateCode_ = code;
+        gateEntered_ = false;
+        gateOpen_ = false;
+    }
+
+    [[nodiscard]] bool waitForKeyGate(int timeoutMs = 3000)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return gateCondition_.wait_for(
+            lock,
+            std::chrono::milliseconds(timeoutMs),
+            [this]() { return gateEntered_; });
+    }
+
+    void openKeyGate()
+    {
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            gateOpen_ = true;
+        }
+        gateCondition_.notify_all();
+    }
+
+private:
+    void recordThread()
+    {
+        state_.threadNames.append(
+            QThread::currentThread()->objectName());
+    }
+
+    mutable std::mutex mutex_;
+    Snapshot state_;
+    QString gateCode_;
+    bool gateEntered_ = false;
+    bool gateOpen_ = false;
+    std::condition_variable gateCondition_;
 };
 
 class FakeClipboard final : public IClipboard {
@@ -695,6 +797,130 @@ private slots:
             },
             3000));
         QCOMPARE(frames.constLast().size(), qsizetype(kAudioPcmBytes));
+        pipeline.stop();
+    }
+
+    void hostInputPipelineSerializesAndCoalescesOffUiThread()
+    {
+        auto sink = std::make_shared<FakeInputSink>();
+        HostInputPipeline pipeline;
+        pipeline.setSink(sink);
+        pipeline.start();
+
+        QCOMPARE(sink->snapshot().releaseCount, 1);
+        pipeline.submit(HostInputCommand::key(
+            QStringLiteral("KeyA"),
+            true));
+        pipeline.submit(
+            HostInputCommand::typeText(QStringLiteral("PeerDesk")));
+        pipeline.submit(HostInputCommand::key(
+            QStringLiteral("KeyA"),
+            false));
+        QVERIFY(waitUntil(
+            [&]() {
+                const FakeInputSink::Snapshot state = sink->snapshot();
+                return state.keys.size() == 2
+                    && state.typed == QStringLiteral("PeerDesk");
+            },
+            3000));
+
+        FakeInputSink::Snapshot state = sink->snapshot();
+        QVERIFY(!state.threadNames.isEmpty());
+        QVERIFY(std::all_of(
+            state.threadNames.cbegin(),
+            state.threadNames.cend(),
+            [](const QString &name) {
+                return name == QStringLiteral("PeerDeskHostInput");
+            }));
+        const qsizetype keyDown = state.operations.indexOf(
+            QStringLiteral("key:KeyA:down"));
+        const qsizetype text = state.operations.indexOf(
+            QStringLiteral("text:PeerDesk"));
+        const qsizetype keyUp = state.operations.indexOf(
+            QStringLiteral("key:KeyA:up"));
+        QVERIFY(keyDown >= 0);
+        QVERIFY(keyDown < text);
+        QVERIFY(text < keyUp);
+
+        sink->armKeyGate(QStringLiteral("KeyGate"));
+        pipeline.submit(HostInputCommand::key(
+            QStringLiteral("KeyGate"),
+            true));
+        const bool gated = sink->waitForKeyGate();
+        for (int index = 0; index < 200; ++index) {
+            const double value = static_cast<double>(index) / 199.0;
+            pipeline.submit(HostInputCommand::moveAbsolute(
+                value,
+                value,
+                QRect(0, 0, 2303, 767)));
+        }
+        sink->openKeyGate();
+        QVERIFY(gated);
+        QVERIFY(waitUntil(
+            [&]() {
+                return !sink->snapshot().absoluteMoves.isEmpty();
+            },
+            3000));
+        pumpEvents(150);
+        state = sink->snapshot();
+        QCOMPARE(state.absoluteMoves.size(), qsizetype(1));
+        QCOMPARE(
+            state.absoluteMoves.constFirst(),
+            QPointF(1.0, 1.0));
+
+        pipeline.submit(HostInputCommand::key(
+            QStringLiteral("KeyGate"),
+            false));
+        QVERIFY(waitUntil(
+            [&]() {
+                const QList<QPair<QString, bool>> keys =
+                    sink->snapshot().keys;
+                return std::find(
+                           keys.cbegin(),
+                           keys.cend(),
+                           qMakePair(QStringLiteral("KeyGate"), false))
+                    != keys.cend();
+            },
+            3000));
+        state = sink->snapshot();
+        const qsizetype gateDown =
+            state.operations.indexOf(QStringLiteral("key:KeyGate:down"));
+        const qsizetype move = state.operations.indexOf(
+            QStringLiteral("move:1.000000:1.000000"));
+        const qsizetype gateUp =
+            state.operations.indexOf(QStringLiteral("key:KeyGate:up"));
+        QVERIFY(gateDown >= 0);
+        QVERIFY(gateDown < move);
+        QVERIFY(move < gateUp);
+
+        pipeline.stop();
+        const int releases = sink->snapshot().releaseCount;
+        QVERIFY(releases >= 2);
+        const qsizetype stoppedOperations =
+            sink->snapshot().operations.size();
+        pipeline.submit(HostInputCommand::key(
+            QStringLiteral("KeyLate"),
+            true));
+        pumpEvents(150);
+        QCOMPARE(
+            sink->snapshot().operations.size(),
+            stoppedOperations);
+
+        pipeline.start();
+        pipeline.submit(HostInputCommand::key(
+            QStringLiteral("KeyB"),
+            true));
+        QVERIFY(waitUntil(
+            [&]() {
+                const QList<QPair<QString, bool>> keys =
+                    sink->snapshot().keys;
+                return std::find(
+                           keys.cbegin(),
+                           keys.cend(),
+                           qMakePair(QStringLiteral("KeyB"), true))
+                    != keys.cend();
+            },
+            3000));
         pipeline.stop();
     }
 
@@ -2089,50 +2315,70 @@ private slots:
             },
             4000));
 
-        const qsizetype movesBefore = input->absoluteMoves.size();
+        const qsizetype movesBefore =
+            input->snapshot().absoluteMoves.size();
         viewer.sendMouseMove(0.5, 0.5);
         QVERIFY(waitUntil(
-            [&]() { return input->absoluteMoves.size() > movesBefore; },
+            [&]() {
+                return input->snapshot().absoluteMoves.size() > movesBefore;
+            },
             3000));
-        const QPointF mapped = input->absoluteMoves.constLast();
+        const FakeInputSink::Snapshot moved = input->snapshot();
+        const QPointF mapped = moved.absoluteMoves.constLast();
         QVERIFY(qAbs(mapped.x() - (1792.0 / 2303.0)) < 0.005);
         QVERIFY(qAbs(mapped.y() - (384.0 / 767.0)) < 0.005);
+        QVERIFY(
+            moved.threadNames.contains(QStringLiteral("PeerDeskHostInput")));
 
         QVERIFY(viewer.sendKey(QStringLiteral("KeyA"), true));
         QVERIFY(waitUntil(
             [&]() {
+                const QList<QPair<QString, bool>> keys =
+                    input->snapshot().keys;
                 return std::find(
-                           input->keys.cbegin(),
-                           input->keys.cend(),
+                           keys.cbegin(),
+                           keys.cend(),
                            qMakePair(QStringLiteral("KeyA"), true))
-                    != input->keys.cend();
+                    != keys.cend();
             },
             3000));
         viewer.sendText(QStringLiteral("PeerDesk 输入"));
         QVERIFY(waitUntil(
-            [&]() { return input->typed == QStringLiteral("PeerDesk 输入"); },
+            [&]() {
+                return input->snapshot().typed
+                    == QStringLiteral("PeerDesk 输入");
+            },
             3000));
         viewer.sendMouseButton(QStringLiteral("click"), 0.25, 0.75, QStringLiteral("right"));
         QVERIFY(waitUntil(
             [&]() {
-                return !input->clicks.isEmpty()
-                    && input->clicks.constLast() == QStringLiteral("right");
+                const QList<QString> clicks = input->snapshot().clicks;
+                return !clicks.isEmpty()
+                    && clicks.constLast() == QStringLiteral("right");
             },
             3000));
         viewer.sendMouseWheel(120, false);
         QVERIFY(waitUntil(
-            [&]() { return !input->wheels.isEmpty(); },
+            [&]() { return !input->snapshot().wheels.isEmpty(); },
             3000));
-        QCOMPARE(input->wheels.constLast(), qMakePair(120, false));
+        QCOMPARE(
+            input->snapshot().wheels.constLast(),
+            qMakePair(120, false));
         viewer.sendMouseRelative(7, -4);
         QVERIFY(waitUntil(
-            [&]() { return !input->relativeMoves.isEmpty(); },
+            [&]() { return !input->snapshot().relativeMoves.isEmpty(); },
             3000));
-        QCOMPARE(input->relativeMoves.constLast(), QPoint(7, -4));
+        QCOMPARE(
+            input->snapshot().relativeMoves.constLast(),
+            QPoint(7, -4));
+        const FakeInputSink::Snapshot beforeRelativeButtons =
+            input->snapshot();
         const qsizetype absoluteBeforeRelativeButtons =
-            input->absoluteMoves.size();
-        const qsizetype clicksBeforeRelativeButtons = input->clicks.size();
-        const qsizetype buttonsBeforeRelativeButtons = input->buttons.size();
+            beforeRelativeButtons.absoluteMoves.size();
+        const qsizetype clicksBeforeRelativeButtons =
+            beforeRelativeButtons.clicks.size();
+        const qsizetype buttonsBeforeRelativeButtons =
+            beforeRelativeButtons.buttons.size();
         viewer.sendMouseRelativeButton(QStringLiteral("reldown"));
         viewer.sendMouseRelativeButton(
             QStringLiteral("reldown"),
@@ -2143,34 +2389,44 @@ private slots:
         viewer.sendMouseRelativeButton(QStringLiteral("relup"));
         QVERIFY(waitUntil(
             [&]() {
-                return input->buttons.size()
+                return input->snapshot().buttons.size()
                     >= buttonsBeforeRelativeButtons + 4;
             },
             3000));
+        const FakeInputSink::Snapshot relativeButtons =
+            input->snapshot();
         QCOMPARE(
-            input->buttons.at(buttonsBeforeRelativeButtons),
+            relativeButtons.buttons.at(buttonsBeforeRelativeButtons),
             qMakePair(QStringLiteral("left"), true));
         QCOMPARE(
-            input->buttons.at(buttonsBeforeRelativeButtons + 1),
+            relativeButtons.buttons.at(buttonsBeforeRelativeButtons + 1),
             qMakePair(QStringLiteral("right"), true));
         QCOMPARE(
-            input->buttons.at(buttonsBeforeRelativeButtons + 2),
+            relativeButtons.buttons.at(buttonsBeforeRelativeButtons + 2),
             qMakePair(QStringLiteral("right"), false));
         QCOMPARE(
-            input->buttons.at(buttonsBeforeRelativeButtons + 3),
+            relativeButtons.buttons.at(buttonsBeforeRelativeButtons + 3),
             qMakePair(QStringLiteral("left"), false));
-        QCOMPARE(input->absoluteMoves.size(), absoluteBeforeRelativeButtons);
-        QCOMPARE(input->clicks.size(), clicksBeforeRelativeButtons);
+        QCOMPARE(
+            relativeButtons.absoluteMoves.size(),
+            absoluteBeforeRelativeButtons);
+        QCOMPARE(
+            relativeButtons.clicks.size(),
+            clicksBeforeRelativeButtons);
         viewer.sendCtrlAltDelete();
         QVERIFY(waitUntil(
-            [&]() { return input->cadCount == 1; },
+            [&]() { return input->snapshot().cadCount == 1; },
             3000));
 
-        const int mutedMoves = static_cast<int>(input->absoluteMoves.size());
-        const int mutedKeys = static_cast<int>(input->keys.size());
-        const int mutedCad = input->cadCount;
-        const QString mutedTyped = input->typed;
+        const FakeInputSink::Snapshot muted = input->snapshot();
+        const int mutedMoves =
+            static_cast<int>(muted.absoluteMoves.size());
+        const int mutedKeys = static_cast<int>(muted.keys.size());
+        const int mutedCad = muted.cadCount;
+        const QString mutedTyped = muted.typed;
         host.setAllowInput(false);
+        QVERIFY(
+            input->snapshot().releaseCount > muted.releaseCount);
         QVERIFY(viewer.sendKey(QStringLiteral("KeyB"), true));
         viewer.sendText(QStringLiteral("blocked"));
         viewer.sendCtrlAltDelete();
@@ -2205,20 +2461,25 @@ private slots:
         QVERIFY(viewer.sendKey(QStringLiteral("KeyC"), true));
         QVERIFY(waitUntil(
             [&]() {
+                const QList<QPair<QString, bool>> keys =
+                    input->snapshot().keys;
                 return std::find(
-                           input->keys.cbegin(),
-                           input->keys.cend(),
+                           keys.cbegin(),
+                           keys.cend(),
                            qMakePair(QStringLiteral("KeyC"), true))
-                    != input->keys.cend();
+                    != keys.cend();
             },
             3000));
-        QCOMPARE(static_cast<int>(input->absoluteMoves.size()), mutedMoves);
-        QCOMPARE(static_cast<int>(input->keys.size()), mutedKeys + 1);
-        QCOMPARE(input->cadCount, mutedCad);
-        QCOMPARE(input->typed, mutedTyped);
+        const FakeInputSink::Snapshot resumed = input->snapshot();
+        QCOMPARE(
+            static_cast<int>(resumed.absoluteMoves.size()),
+            mutedMoves);
+        QCOMPARE(static_cast<int>(resumed.keys.size()), mutedKeys + 1);
+        QCOMPARE(resumed.cadCount, mutedCad);
+        QCOMPARE(resumed.typed, mutedTyped);
         QVERIFY(std::none_of(
-            input->keys.cbegin(),
-            input->keys.cend(),
+            resumed.keys.cbegin(),
+            resumed.keys.cend(),
             [](const QPair<QString, bool> &entry) {
                 return entry.first == QStringLiteral("KeyB");
             }));
