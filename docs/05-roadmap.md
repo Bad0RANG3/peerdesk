@@ -18,8 +18,8 @@
   重放窗口、视频 FEC/NACK、控制可靠流和 G.711 音频。
 - `[已完成]` **桌面能力**：GDI 抓屏、多显示器、被控端独立媒体线程内的缩放/静帧检测/
   JPEG 编码、Viewer 独立 JPEG 解码、视频分片/FEC/NACK 重传缓存检索工作线程、
-  WASAPI loopback、Win32 键鼠、文本剪贴板、带发送中取消与断线续传的双向文件传输，
-  以及 Viewer 与被控端可重试多文件队列。
+  UDP socket 收发/包头/AEAD 发送工作线程、WASAPI loopback、Win32 键鼠、文本剪贴板、
+  带发送中取消与断线续传的双向文件传输，以及 Viewer 与被控端可重试多文件队列。
 - `[已完成]` **游戏鼠标（回环）**：相对捕获、16 ms 合帧、独立相对按键、
   Windows 边缘回中、`Esc` 退出和断线/结束释放；真实游戏兼容性仍待跨机验收。
 - `[已完成]` **Qt 应用壳**：连接页、被控端页、Viewer、设置、系统托盘、窗口几何
@@ -62,7 +62,7 @@
 | `peerdesk-transport` | 视频重组、NACK、控制流和 ACK 语义 |
 | `peerdesk-stun` | Binding Request/Success、地址解析和 XOR 地址 |
 | `peerdesk-server` | 信令、注册、配对、令牌、限流、STUN、中继 |
-| `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态和视频发送流水线 |
+| `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态、视频发送和 UDP I/O 管线 |
 | `peerdesk-session` | 被控/控制会话、独立音视频编解码线程、设置、音频、文件和输入事件 |
 | `peerdesk-signaling-client` | TCP JSON Lines、重连策略和消息映射 |
 | `peerdesk-app-controller` | 控制器生命周期、偏好、最近连接持久化、错误和 UI 门面 |
@@ -144,9 +144,10 @@ CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试
   `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，音频包校验与
   G.711 µ-law 解码已迁入 FIFO 的 `PeerDeskViewerAudio`，PCM16 再进入
   `PeerDeskAudio` 线程，由其独占最长 360 ms 待播队列、10 ms 泵和 `QAudioSink`；
-  视频分片、XOR FEC 生成和 NACK 重传缓存检索已迁入 `PeerDeskVideoSend`。回环测试
+  视频分片、XOR FEC 生成和 NACK 重传缓存检索已迁入 `PeerDeskVideoSend`；UDP socket
+  绑定/收发、包头、AEAD 发送、发送序号和发送统计已迁入 `PeerDeskUdpIo`。回环测试
   覆盖跨线程输出、最新帧背压、待解码关键帧保护、音频顺序、播放线程、部分写入续泵、
-  热更新、分片重传和停止隔离。UDP 写入、AEAD 发送统计与线程池仍待继续拆解。
+  热更新、分片重传、UDP 实际收写和停止隔离。接收解密、画面绘制与线程池仍待继续拆解。
 - `[待开始]` GPU 抓屏、脏矩形、硬件编码和帧间压缩评估。
 - `[待开始]` 虚拟显示器能力评估。
 - `[已完成]` 应用层游戏鼠标：相对捕获、16 ms 合帧、`reldown`/`relup` 按键语义、
@@ -155,9 +156,9 @@ CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试
 - `[待开始]` 更细的自适应码率策略、拥塞信号和弱网恢复。
 
 当前视频是 GDI + 整帧 JPEG，音频是 G.711。抓屏、缩放、静帧检测、JPEG 编码、Viewer
-视频/音频解码、音频播放以及视频分片/FEC/NACK 重传缓存检索已在独立线程执行；UDP
-写入、AEAD 加密、发送统计、画面绘制和大部分 UI 仍在主线程。没有线程池、GPU 编码、
-硬件编码、正式吞吐基准或性能报告。
+视频/音频解码、音频播放、视频分片/FEC/NACK 重传缓存检索以及 UDP socket 收发/包头/
+AEAD 发送已在独立线程执行；接收解密、画面绘制和大部分 UI 仍在主线程。没有线程池、
+GPU 编码、硬件编码、正式吞吐基准或性能报告。
 
 ### P2：交互与文件
 

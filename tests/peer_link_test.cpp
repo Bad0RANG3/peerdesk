@@ -1,4 +1,5 @@
 #include "transport/peer_link.h"
+#include "transport/udp_io_pipeline.h"
 
 #include "server/server.h"
 
@@ -220,6 +221,16 @@ private slots:
         QVERIFY(
             host.videoPacketizerThreadName()
             != QThread::currentThread()->objectName());
+        QCOMPARE(
+            host.udpIoThreadName(),
+            QStringLiteral("PeerDeskUdpIo"));
+        QVERIFY(
+            host.udpIoThreadName()
+            != QThread::currentThread()->objectName());
+        QVERIFY(waitUntil([&]() {
+            return host.stats().sentPackets > 0
+                && host.stats().sentBytes > 0;
+        }));
 
         AudioPacket audio;
         audio.sequence = 7;
@@ -284,6 +295,73 @@ private slots:
         QCOMPARE(retry.packets.size(), qsizetype(2));
         QCOMPARE(retry.packets.at(0).payload, fragments.at(0).payload);
         QCOMPARE(retry.packets.at(1).payload, fragments.at(2).payload);
+    }
+
+    void udpIoReceivesAndWritesOffThread()
+    {
+        UdpIoPipeline sender;
+        UdpIoPipeline receiver;
+        QHostAddress senderAddress;
+        QHostAddress receiverAddress;
+        quint16 senderPort = 0;
+        quint16 receiverPort = 0;
+        QString error;
+        QVERIFY2(
+            sender.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &senderAddress,
+                &senderPort,
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &receiverAddress,
+                &receiverPort,
+                &error),
+            qPrintable(error));
+        QVERIFY(senderPort != 0);
+        QVERIFY(receiverPort != 0);
+        QCOMPARE(
+            sender.ioThreadName(),
+            QStringLiteral("PeerDeskUdpIo"));
+        QCOMPARE(
+            receiver.ioThreadName(),
+            QStringLiteral("PeerDeskUdpIo"));
+        QVERIFY(
+            sender.ioThreadName()
+            != QThread::currentThread()->objectName());
+
+        QList<QByteArray> received;
+        QList<QHostAddress> senders;
+        QList<quint16> sourcePorts;
+        connect(
+            &receiver,
+            &UdpIoPipeline::datagramReceived,
+            [&received, &senders, &sourcePorts](
+                const QByteArray &datagram,
+                const QHostAddress &senderAddress,
+                quint16 senderPort) {
+                received.append(datagram);
+                senders.append(senderAddress);
+                sourcePorts.append(senderPort);
+            });
+
+        const QByteArray payload = QByteArrayLiteral("udp-io-probe");
+        sender.sendRawDatagram(payload, receiverAddress, receiverPort);
+        QVERIFY(waitUntil([&]() { return !received.isEmpty(); }));
+        QCOMPARE(received.constFirst(), payload);
+        QCOMPARE(sourcePorts.constFirst(), senderPort);
+        QVERIFY(!senders.constFirst().isNull());
+
+        sender.stop();
+        QVERIFY(!sender.running());
+        QVERIFY(!sender.sendRawDatagram(
+            QByteArrayLiteral("ignored"),
+            receiverAddress,
+            receiverPort));
     }
 
     void videoPacketizerIsolatesRestartedGenerations()

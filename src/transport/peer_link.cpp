@@ -11,11 +11,11 @@
 #include <QDateTime>
 #include <QSet>
 #include <QTimer>
-#include <QUdpSocket>
 #include <QtEndian>
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace pd {
 namespace {
@@ -59,7 +59,6 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
     : QObject(parent)
     , isHost_(isHost)
     , psk_(psk)
-    , socket_(new QUdpSocket(this))
     , timer_(new QTimer(this))
     , keyPair_(KeyPair::generate())
     , videoReceiver_(
@@ -87,12 +86,29 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &VideoSendPipeline::packetizationFailed,
         this,
         &PeerLink::emitLog);
+    connect(
+        &udpIo_,
+        &UdpIoPipeline::datagramReceived,
+        this,
+        [this](
+            const QByteArray &datagram,
+            const QHostAddress &sender,
+            quint16 senderPort) {
+            if (closing_) {
+                return;
+            }
+            processDatagram(datagram, sender, senderPort);
+        });
+    connect(
+        &udpIo_,
+        &UdpIoPipeline::logMessage,
+        this,
+        &PeerLink::emitLog);
 
     sessionId_ = randomBytes(4);
     const QByteArray tagBytes = randomBytes(4);
     sessionTag_ = qFromBigEndian<quint32>(tagBytes.constData());
 
-    connect(socket_, &QUdpSocket::readyRead, this, [this]() { tick(); });
     connect(timer_, &QTimer::timeout, this, [this]() { tick(); });
     timer_->setInterval(kLinkTickMs);
     timer_->setTimerType(Qt::PreciseTimer);
@@ -107,40 +123,26 @@ PeerLink::~PeerLink()
 
 bool PeerLink::start(const QString &bindAddress, quint16 port, QString *error)
 {
-    if (socket_->state() != QAbstractSocket::UnconnectedState) {
+    if (udpIo_.running()) {
         if (error) {
             *error = QStringLiteral("UDP socket is already open");
         }
         return false;
     }
 
-    QHostAddress address(bindAddress);
-    if (address.isNull() && bindAddress != QStringLiteral("0.0.0.0")) {
-        const QHostInfo info = QHostInfo::fromName(bindAddress);
-        if (!info.addresses().isEmpty()) {
-            address = info.addresses().constFirst();
-        }
-    }
-    if (address.isNull()) {
-        if (error) {
-            *error = QStringLiteral("Invalid bind address: %1").arg(bindAddress);
-        }
+    QHostAddress localAddress;
+    quint16 localPort = 0;
+    if (!udpIo_.start(
+            bindAddress,
+            port,
+            &localAddress,
+            &localPort,
+            error)) {
         return false;
     }
 
-    if (!socket_->bind(address, port, QAbstractSocket::DefaultForPlatform)) {
-        if (error) {
-            *error = socket_->errorString();
-        }
-        return false;
-    }
-
-    localAddress_ = socket_->localAddress();
-    localPort_ = socket_->localPort();
-    socket_->setSocketOption(
-        QAbstractSocket::ReceiveBufferSizeSocketOption, 4 * 1024 * 1024);
-    socket_->setSocketOption(
-        QAbstractSocket::SendBufferSizeSocketOption, 1024 * 1024);
+    localAddress_ = localAddress;
+    localPort_ = localPort;
     closing_ = false;
     lastStatsAt_ = ReliableStream::currentTimeSeconds();
     timer_->start();
@@ -156,11 +158,11 @@ void PeerLink::close()
     }
     closing_ = true;
     videoSend_.stop();
-    if (crypto_ && socket_->state() == QAbstractSocket::BoundState) {
+    if (crypto_ && udpIo_.running()) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
     }
     timer_->stop();
-    socket_->close();
+    udpIo_.stop();
     crypto_.reset();
     established_ = false;
     setState(QStringLiteral("closed"));
@@ -172,12 +174,12 @@ void PeerLink::resetPeer()
         return;
     }
     if (established_ && crypto_
-        && socket_->state() == QAbstractSocket::BoundState) {
+        && udpIo_.running()) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
     }
 
     const bool packetizerRunning =
-        socket_->state() == QAbstractSocket::BoundState;
+        udpIo_.running();
     if (packetizerRunning) {
         videoSend_.stop();
     }
@@ -195,6 +197,7 @@ void PeerLink::resetPeer()
     const QByteArray tagBytes = randomBytes(4);
     sessionTag_ = qFromBigEndian<quint32>(tagBytes.constData());
     keyPair_ = KeyPair::generate();
+    udpIo_.resetSession();
     crypto_.reset();
     helloClientBytes_.clear();
     helloHostBytes_.clear();
@@ -216,6 +219,7 @@ void PeerLink::resetPeer()
     keyframeRequests_ = 0;
 
     sentBytesWindow_.clear();
+    sentBytesSnapshot_ = 0;
     recvBytesWindow_.clear();
     sentFramesWindow_.clear();
     recvFramesWindow_.clear();
@@ -313,7 +317,7 @@ void PeerLink::discoverReflexive(
     quint16 port,
     int timeoutMs)
 {
-    if (socket_->state() != QAbstractSocket::BoundState || port == 0) {
+    if (!udpIo_.running() || port == 0) {
         emit reflexiveDiscoveryFinished(false, {}, 0);
         return;
     }
@@ -328,7 +332,7 @@ void PeerLink::discoverReflexive(
         stunDeadline_ = ReliableStream::currentTimeSeconds()
             + std::max(1, timeoutMs) / 1000.0;
         const QByteArray request = stun::buildBindingRequest(stunTransactionId_);
-        socket_->writeDatagram(request, address, port);
+        udpIo_.sendRawDatagram(request, address, port);
     };
 
     QHostAddress address(host);
@@ -393,6 +397,11 @@ QString PeerLink::videoPacketizerThreadName() const
     return videoSend_.packetizerThreadName();
 }
 
+QString PeerLink::udpIoThreadName() const
+{
+    return udpIo_.ioThreadName();
+}
+
 QList<Candidate> PeerLink::localCandidates() const
 {
     QList<Candidate> result;
@@ -436,21 +445,6 @@ void PeerLink::tick()
 {
     if (closing_) {
         return;
-    }
-
-    while (socket_->hasPendingDatagrams()) {
-        QByteArray datagram(
-            static_cast<qsizetype>(std::max<qint64>(0, socket_->pendingDatagramSize())),
-            '\0');
-        QHostAddress sender;
-        quint16 senderPort = 0;
-        const qint64 received = socket_->readDatagram(
-            datagram.data(), datagram.size(), &sender, &senderPort);
-        if (received < 0) {
-            continue;
-        }
-        datagram.truncate(static_cast<qsizetype>(received));
-        processDatagram(datagram, sender, senderPort);
     }
 
     const double now = ReliableStream::currentTimeSeconds();
@@ -688,6 +682,7 @@ void PeerLink::handleHello(
             emitLog(QStringLiteral("hello key derivation failed"));
             return;
         }
+        udpIo_.setSession(*keys, true);
         crypto_ = std::make_unique<CryptoContext>(*keys, true);
         emitLog(QStringLiteral("hello from %1; keys derived, sending ack")
                     .arg(endpointText(sender, port)));
@@ -759,6 +754,7 @@ void PeerLink::handleHelloAck(
             emitLog(QStringLiteral("hello_ack key derivation failed"));
             return;
         }
+        udpIo_.setSession(*keys, false);
         crypto_ = std::make_unique<CryptoContext>(*keys, false);
         emitLog(QStringLiteral("hello_ack from %1; keys derived")
                     .arg(endpointText(sender, port)));
@@ -975,7 +971,7 @@ bool PeerLink::sendPacket(
     bool plain,
     std::optional<quint64> sequence)
 {
-    if (socket_->state() != QAbstractSocket::BoundState) {
+    if (!udpIo_.running()) {
         return false;
     }
 
@@ -1002,50 +998,24 @@ bool PeerLink::sendPacket(
         return false;
     }
 
-    quint64 sequenceValue = 0;
-    QByteArray body;
-    quint16 payloadLength = 0;
-    if (plain) {
-        body = payload;
-        payloadLength = static_cast<quint16>(payload.size());
-    } else {
-        if (!crypto_) {
-            return false;
-        }
-        sequenceValue = sequence.value_or(crypto_->nextSeq());
-        body.clear();
-        payloadLength = static_cast<quint16>(payload.size() + kAuthTagLen);
-    }
-
-    Header header;
-    header.type = type;
-    header.seq = static_cast<quint32>(sequenceValue);
-    header.tsMs = static_cast<quint32>(
-        static_cast<quint64>(ReliableStream::currentTimeSeconds() * 1000.0));
-    header.stream = stream;
-    header.flags = flags;
-    header.plen = payloadLength;
-    header.session = sessionTag_;
-    const QByteArray headerBytes = header.pack();
-
-    if (!plain) {
-        body = crypto_->seal(headerBytes, payload, sequenceValue);
-    }
-    QByteArray datagram = headerBytes + body;
-    if (usingRelay_ && relayPort_ != 0 && !relayAddress_.isNull()) {
-        datagram = wrapRelay(relayOutTag_ != 0 ? relayOutTag_ : sessionTag_, datagram);
-    }
-
-    const qint64 written = socket_->writeDatagram(
-        datagram, target.address, target.port);
-    if (written < 0) {
+    if (!plain && !crypto_) {
         return false;
     }
-    stats_.sentBytes += static_cast<quint64>(datagram.size());
-    ++stats_.sentPackets;
-    sentBytesWindow_.append(
-        qMakePair(ReliableStream::currentTimeSeconds(), datagram.size()));
-    return true;
+
+    UdpSendJob job;
+    job.type = type;
+    job.stream = stream;
+    job.flags = flags;
+    job.payload = payload;
+    job.address = target.address;
+    job.port = target.port;
+    job.plain = plain;
+    job.wrapRelay =
+        usingRelay_ && relayPort_ != 0 && !relayAddress_.isNull();
+    job.sessionTag = sessionTag_;
+    job.relayTag = relayOutTag_;
+    job.sequence = sequence;
+    return udpIo_.send(job);
 }
 
 void PeerLink::sendControlRaw(
@@ -1142,6 +1112,21 @@ void PeerLink::setState(const QString &state)
 void PeerLink::updateStats(double now)
 {
     pruneWindows(now);
+    const quint64 totalSentBytes = udpIo_.sentBytes();
+    if (totalSentBytes >= sentBytesSnapshot_) {
+        const quint64 delta = totalSentBytes - sentBytesSnapshot_;
+        if (delta > 0) {
+            sentBytesWindow_.append(qMakePair(
+                now,
+                static_cast<int>(std::min<quint64>(
+                    delta,
+                    static_cast<quint64>(std::numeric_limits<int>::max())))));
+        }
+    }
+    sentBytesSnapshot_ = totalSentBytes;
+    stats_.sentBytes = totalSentBytes;
+    stats_.sentPackets = udpIo_.sentPackets();
+
     qint64 sentBytes = 0;
     for (const auto &entry : sentBytesWindow_) {
         sentBytes += entry.second;

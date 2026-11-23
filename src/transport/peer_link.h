@@ -4,6 +4,7 @@
 #include "core/protocol.h"
 #include "core/reliable.h"
 #include "core/video.h"
+#include "transport/udp_io_pipeline.h"
 #include "transport/video_send_pipeline.h"
 
 #include <QByteArray>
@@ -19,8 +20,6 @@
 #include <optional>
 
 class QTimer;
-class QUdpSocket;
-
 namespace pd {
 
 inline constexpr int kHelloIntervalMs = 250;
@@ -102,6 +101,7 @@ public:
     [[nodiscard]] QString localAddressText() const;
     [[nodiscard]] quint16 localPort() const;
     [[nodiscard]] QString videoPacketizerThreadName() const;
+    [[nodiscard]] QString udpIoThreadName() const;
     [[nodiscard]] QList<Candidate> localCandidates() const;
     [[nodiscard]] QList<Candidate> peerCandidates() const;
 
@@ -172,8 +172,9 @@ private:
     bool forceRelay_ = false;
     bool closing_ = false;
 
-    QUdpSocket *socket_ = nullptr;
     QTimer *timer_ = nullptr;
+
+    UdpIoPipeline udpIo_;
 
     QHostAddress localAddress_;
     quint16 localPort_ = 0;
@@ -221,6 +222,7 @@ private:
     QString state_ = QStringLiteral("idle");
     LinkStats stats_;
     QList<QPair<double, int>> sentBytesWindow_;
+    quint64 sentBytesSnapshot_ = 0;
     QList<QPair<double, int>> recvBytesWindow_;
     QList<double> sentFramesWindow_;
     QList<double> recvFramesWindow_;
