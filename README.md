@@ -202,10 +202,11 @@ PeerDesk，并会恢复测试前的同名启动项。
 ctest --preset windows-mingw --output-on-failure
 ```
 
-当前有 14 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
+当前有 15 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
 `peerdesk-stun`、`peerdesk-server`、`peerdesk-peer-link`、`peerdesk-session`、
 `peerdesk-signaling-client`、`peerdesk-app-controller`、`peerdesk-single-instance`、
-`peerdesk-audio-output`、`peerdesk-ui`、`peerdesk-logging`、`peerdesk-platform`。
+`peerdesk-audio-output`、`peerdesk-ui`、`peerdesk-logging`、`peerdesk-platform`、
+`peerdesk-codec`。
 Windows CI 会配置、编译并执行
 全部套件，并在独立打包任务中生成 Release 安装包，执行静默安装、离屏启动截图和静默卸载
 冒烟。
@@ -314,7 +315,9 @@ Windows CI 会配置、编译并执行
   质量与帧率降级、调整冷却、健康恢复和静态带宽上限叠加；真实丢包、抖动、带宽突变和
   长时间会话下的阈值与恢复节奏尚未完成参数校准。
 - 真实跨机、NAT 组合、丢包、抖动和长时间会话尚未形成正式验收报告。
-- 视频仍是整帧 JPEG，未使用帧间编码或硬件编码，弱网下码率明显高于 H.264 方案。
+- 产品视频路径仍是整帧 JPEG。仓库已具备 Windows Media Foundation H.264 编解码封装，
+  并通过 Annex B 编解码、关键帧和码率调整回环测试，但尚未接入 PDTP 分片、会话协商和
+  自动回退，因此还不能宣称端到端 H.264 或硬件编码能力。
 - 抓屏仅有 GDI 路径，每帧完整抓取/缩放/编码；被控端媒体线程、Viewer 解码与呈现线程、
   `PeerDeskVideoSend` 分片线程、`PeerDeskVideoReceive` 重组线程和 `PeerDeskUdpIo`
   UDP 收发/解析/认证线程以及 `PeerDeskPeerLinkRx` 已认证包处理线程已拆分，但

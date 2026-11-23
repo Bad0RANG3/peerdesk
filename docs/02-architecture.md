@@ -44,6 +44,7 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 | `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态，以及 UDP I/O、已认证包和视频发送/接收流水线 |
 | `src/server/` | TCP JSON Lines 信令、UDP 中继、STUN、连接频次限制和每会话令牌桶 |
 | `src/client/` | TCP 信令客户端、注册/配对、候选更新和错误映射 |
+| `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入会话媒体路径） |
 | `src/session/` | 被控端/控制端会话、视频、音频、输入工作线程、剪贴板、文件和统计 |
 | `src/app/` | `HostController`、`ViewerController`、偏好、单实例守卫、五档画质、音频播放 |
 | `src/diagnostics/` | 滚动文件日志、脱敏、运行标记和无压缩 ZIP 诊断包 |
@@ -163,6 +164,15 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   `PeerDeskViewerPresent` 线程，按当前窗口与 `devicePixelRatio` 生成等比缩放后的
   物理像素图像；缩放同样只保留最新请求。主线程画布只执行最终 `drawImage`，输入坐标
   仍按源图对应的实际画面矩形归一化。
+
+`src/codec/` 另提供 Windows Media Foundation H.264 底层封装：
+
+- `H264Encoder` 将 RGB32 转为 NV12，使用低延迟异步 MFT 输出 Annex B，支持强制 IDR、
+  动态码率，并在关键帧中携带 SPS/PPS。
+- `H264Decoder` 从 Annex B 输入自动协商 NV12 输出，处理流格式变化并转换为 RGB32。
+- 编解码回环、关键帧刷新、非法输入和码率更新已有 Windows 自动化测试。
+- 该封装尚未接入 PDTP codec 元数据、FEC/NACK 重传、会话协商、JPEG 自动回退或 Viewer
+  解码线程；当前实况视频仍全部使用 JPEG。
 
 ### 3.4 音频数据流
 
@@ -405,7 +415,8 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 
 ## 8. 当前架构限制
 
-- 视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码。
+- 实况视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码；Media Foundation H.264
+  封装虽已通过底层回环，但尚未接入协议和会话。
 - 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、JPEG 编码、Viewer
   解码与呈现、视频发送分片/FEC/NACK 缓存检索、入站视频重组/FEC/NACK 判定已移至
   独立线程，音频包校验和 µ-law 解码也已移至 FIFO 工作线程，抖动缓冲和 `QAudioSink`

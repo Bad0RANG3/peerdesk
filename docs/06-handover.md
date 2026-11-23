@@ -58,7 +58,10 @@ RLY1 封装、实际收写和原子发送统计。只有已认证包会回到主
 连续绝对移动合并，停止会立即拒绝并清空待处理队列，再等待 worker 释放按键与鼠标按钮。
 文件发送分块、接收 Base64 解码/校验、临时文件读写与提交由 `PeerDeskFileTransfer`
 工作线程串行处理，UI 线程只选择文件、展示进度并排队提交控制消息；WASAPI loopback
-另有采集线程。尚未接入 GPU 抓屏、脏矩形、硬件编码、H.264 或 Opus。
+另有采集线程。`src/codec/` 已有 Windows Media Foundation H.264 Annex B 编解码封装，
+并通过关键帧、动态码率和 RGB32/NV12 转换回环测试；它尚未接入 PDTP 分片、FEC/NACK、
+会话协商或 Viewer 解码线程，产品路径仍使用 JPEG。尚未接入 GPU 抓屏、脏矩形、硬件编码
+或 Opus。
 
 文件发送支持主动取消：发送端最多发出一次 `file_cancel`，接收端回滚临时文件并回执
 `file_cancelled`。接收失败、本地读写失败与断链中断使用不同事件；断链只清理本机状态，
@@ -149,7 +152,7 @@ CMake 预设中的 Qt 路径若与你的安装位置不同，请在本机预设�
 
 ### 2.2 CTest
 
-测试共 14 个套件：
+测试共 15 个套件：
 
 ```text
 peerdesk-core
@@ -166,6 +169,7 @@ peerdesk-single-instance
 peerdesk-ui
 peerdesk-logging
 peerdesk-platform
+peerdesk-codec
 ```
 
 常用命令：
@@ -350,6 +354,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `src/transport/` | `PeerLink` 握手、打洞、直连/中继、UDP I/O、已认证包处理、链路统计和视频发送/接收流水线 |
 | `src/server/` | TCP 信令、UDP 中继、STUN、令牌、频次限制与中继限速 |
 | `src/client/` | TCP JSON Lines 信令客户端 |
+| `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入会话） |
 | `src/session/` | 被控/Viewer 会话、`VideoPipeline` 媒体线程、`HostInputPipeline` 输入线程、音视频处理和文件传输 |
 | `src/app/` | 页面控制器、偏好、最近连接、单实例守卫、画质决策、音频播放和错误状态 |
 | `src/diagnostics/` | 文件日志、轮转、脱敏、运行标记、诊断服务和无压缩 ZIP 打包 |
@@ -359,7 +364,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `apps/peerdesk-client/` | Qt 客户端入口、启动参数、demo 和截图流程 |
 | `apps/peerdesk-link-harness/` | 双端 UDP 链路诊断工具 |
 | `packaging/windows/` | Windows 版本资源、Inno Setup 模板、打包脚本、安装冒烟和用户说明 |
-| `tests/` | 14 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
+| `tests/` | 15 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
 
 修改链路问题时，先从 `src/transport/peer_link.*` 和 `src/core/protocol.*` 开始；
 修改界面与会话状态时，从 `src/app/viewer_controller.*`、`src/session/viewer_session.*`
@@ -425,7 +430,8 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
    优化顺序；评估渲染线程和线程池的收益与队列边界。
 4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证，以及在现有
    诊断包之上评估 minidump 与远程诊断。
-5. 媒体升级：H.264 与 Opus 动态接入，失败时保留整帧 JPEG 与 G.711 回退。
+5. 媒体升级：先把现有 Media Foundation H.264 封装接入协议、传输、会话和 JPEG 回退，
+   再接 Opus；失败时始终保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID、真实游戏兼容性与真实弱网
    下的拥塞参数校准。
 7. 交互低摩擦入口：在本地历史之上评估收藏、二维码和账号云同步，明确隐私边界后再实现。

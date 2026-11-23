@@ -87,6 +87,18 @@ target_link_libraries(peerdesk_client
     PUBLIC peerdesk_transport Qt6::Core Qt6::Network
 )
 
+if(WIN32)
+    add_library(peerdesk_codec STATIC
+        src/codec/media_foundation_h264.cpp
+        src/codec/media_foundation_h264.h
+    )
+    target_include_directories(peerdesk_codec PUBLIC src)
+    target_link_libraries(peerdesk_codec
+        PUBLIC Qt6::Core Qt6::Gui
+        PRIVATE mfplat mfuuid mf ole32 oleaut32 strmiids uuid wmcodecdspuuid
+    )
+endif()
+
 add_library(peerdesk_session STATIC
     src/session/session_types.cpp
     src/session/session_types.h
@@ -214,6 +226,9 @@ else()
     target_compile_options(peerdesk_server PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_transport PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_client PRIVATE -Wall -Wextra -Wpedantic)
+    if(TARGET peerdesk_codec)
+        target_compile_options(peerdesk_codec PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
     target_compile_options(peerdesk_session PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_app PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(peerdesk_ui PRIVATE -Wall -Wextra -Wpedantic)
@@ -384,6 +399,12 @@ if(WIN32)
     target_link_libraries(peerdesk-platform-tests
         PRIVATE peerdesk_platform Qt6::Test
     )
+    add_executable(peerdesk-codec-tests
+        tests/codec_test.cpp
+    )
+    target_link_libraries(peerdesk-codec-tests
+        PRIVATE peerdesk_codec Qt6::Test
+    )
 endif()
 
 enable_testing()
@@ -406,6 +427,7 @@ set_tests_properties(peerdesk-ui PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(WIN32)
     add_test(NAME peerdesk-platform COMMAND peerdesk-platform-tests)
+    add_test(NAME peerdesk-codec COMMAND peerdesk-codec-tests)
 endif()
 
 install(TARGETS
