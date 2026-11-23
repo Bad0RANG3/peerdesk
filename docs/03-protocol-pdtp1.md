@@ -297,6 +297,7 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
 | `mouse` | 归一化画面坐标、按钮、滚轮 |
 | `key` | 键码、按下/释放、文本输入 |
 | `clip` | 文本剪贴板同步 |
+| `audio` | 音频采集开关与状态；Host 回报 `on`、`enabled`、编码参数、音源和错误 |
 | `file_begin` / `file_data` / `file_end` | 文件传输 |
 | `reboot` | 只回提示，不执行重启 |
 | `stats` | 会话统计 |

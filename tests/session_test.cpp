@@ -540,6 +540,7 @@ private slots:
         QList<QImage> decodedFrames;
         QList<bool> keyframes;
         QList<QByteArray> audioFrames;
+        QList<QJsonObject> viewerAudioStates;
         QList<QString> hostFiles;
         QList<QString> viewerFiles;
         QList<QJsonObject> viewerStats;
@@ -597,6 +598,12 @@ private slots:
             &ViewerSession::statsChanged,
             [&viewerStats](const QJsonObject &stats) {
                 viewerStats.append(stats);
+            });
+        connect(
+            &viewer,
+            &ViewerSession::audioStateChanged,
+            [&viewerAudioStates](const QJsonObject &state) {
+                viewerAudioStates.append(state);
             });
         connect(
             &host,
@@ -659,6 +666,57 @@ private slots:
             5000));
         QCOMPARE(audioFrames.constFirst().size(), qsizetype(kAudioPcmBytes));
         QVERIFY(host.audioState().value(QStringLiteral("on")).toBool());
+        QCOMPARE(
+            host.audioState().value(QStringLiteral("t")).toString(),
+            QStringLiteral("audio"));
+        QVERIFY(waitUntil(
+            [&]() {
+                return !viewer.audioState().isEmpty()
+                    && viewer.audioState()
+                           .value(QStringLiteral("on"))
+                           .toBool();
+            },
+            3000));
+        QCOMPARE(
+            viewer.audioState().value(QStringLiteral("t")).toString(),
+            QStringLiteral("audio"));
+        QCOMPARE(
+            viewer.audioState().value(QStringLiteral("codec")).toString(),
+            QStringLiteral("pcmu"));
+        QVERIFY(!viewerAudioStates.isEmpty());
+
+        viewer.setAudioEnabled(false);
+        QVERIFY(waitUntil(
+            [&]() {
+                return !host.audioState()
+                            .value(QStringLiteral("enabled"))
+                            .toBool()
+                    && !viewer.audioState()
+                            .value(QStringLiteral("enabled"))
+                            .toBool()
+                    && !viewer.audioState()
+                            .value(QStringLiteral("on"))
+                            .toBool();
+            },
+            3000));
+
+        viewer.setAudioEnabled(true);
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.audioState()
+                           .value(QStringLiteral("enabled"))
+                           .toBool()
+                    && host.audioState()
+                           .value(QStringLiteral("on"))
+                           .toBool()
+                    && viewer.audioState()
+                           .value(QStringLiteral("enabled"))
+                           .toBool()
+                    && viewer.audioState()
+                           .value(QStringLiteral("on"))
+                           .toBool();
+            },
+            3000));
         QVERIFY(waitUntil(
             [&]() { return !viewerStats.isEmpty(); },
             5000));

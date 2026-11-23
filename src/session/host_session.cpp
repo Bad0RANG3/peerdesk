@@ -406,6 +406,7 @@ QJsonObject HostSession::info()
 QJsonObject HostSession::audioState() const
 {
     return {
+        {QStringLiteral("t"), QStringLiteral("audio")},
         {QStringLiteral("on"), audioRunning_},
         {QStringLiteral("enabled"), settings_.audio},
         {QStringLiteral("codec"), QStringLiteral("pcmu")},
