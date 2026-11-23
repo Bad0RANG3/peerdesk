@@ -214,6 +214,12 @@ private slots:
         QVERIFY(waitUntil([&]() { return !clientFrames.isEmpty(); }));
         QCOMPARE(clientFrames.constFirst(), jpeg);
         QCOMPARE(clientKeyframes.constFirst(), true);
+        QCOMPARE(
+            host.videoPacketizerThreadName(),
+            QStringLiteral("PeerDeskVideoSend"));
+        QVERIFY(
+            host.videoPacketizerThreadName()
+            != QThread::currentThread()->objectName());
 
         AudioPacket audio;
         audio.sequence = 7;
@@ -232,6 +238,86 @@ private slots:
 
         client.close();
         QTRY_COMPARE_WITH_TIMEOUT(host.state(), QStringLiteral("closed"), 2000);
+    }
+
+    void videoPacketizerBuildsAndRetransmitsOffThread()
+    {
+        VideoSendPipeline pipeline;
+        QList<VideoPacketBatch> batches;
+        connect(
+            &pipeline,
+            &VideoSendPipeline::packetsReady,
+            [&batches](const VideoPacketBatch &batch) {
+                batches.append(batch);
+            });
+        pipeline.start();
+
+        pipeline.submit(QByteArray(24000, 'v'), true);
+        QVERIFY(waitUntil([&]() { return !batches.isEmpty(); }));
+        const VideoPacketBatch original = batches.constFirst();
+        QCOMPARE(original.keyframe, true);
+        QCOMPARE(original.retransmit, false);
+        QVERIFY(original.frameId > 0);
+        QCOMPARE(
+            pipeline.packetizerThreadName(),
+            QStringLiteral("PeerDeskVideoSend"));
+        QVERIFY(
+            pipeline.packetizerThreadName()
+            != QThread::currentThread()->objectName());
+
+        QList<WirePacket> fragments;
+        for (const WirePacket &packet : original.packets) {
+            if (packet.type == PacketType::Data) {
+                fragments.append(packet);
+            }
+        }
+        QVERIFY(fragments.size() >= 3);
+
+        const qsizetype before = batches.size();
+        pipeline.retransmit(original.frameId, QList<quint16>{0, 2});
+        QVERIFY(waitUntil([&]() {
+            return batches.size() > before;
+        }));
+        const VideoPacketBatch retry = batches.constLast();
+        QCOMPARE(retry.frameId, original.frameId);
+        QCOMPARE(retry.retransmit, true);
+        QCOMPARE(retry.packets.size(), qsizetype(2));
+        QCOMPARE(retry.packets.at(0).payload, fragments.at(0).payload);
+        QCOMPARE(retry.packets.at(1).payload, fragments.at(2).payload);
+    }
+
+    void videoPacketizerIsolatesRestartedGenerations()
+    {
+        VideoSendPipeline pipeline;
+        QList<VideoPacketBatch> batches;
+        connect(
+            &pipeline,
+            &VideoSendPipeline::packetsReady,
+            [&batches](const VideoPacketBatch &batch) {
+                batches.append(batch);
+            });
+        pipeline.start();
+        pipeline.submit(QByteArray(2 * 1024 * 1024, 'a'), false);
+        pipeline.stop();
+
+        batches.clear();
+        pipeline.start();
+        pipeline.submit(QByteArray(4000, 'b'), true);
+        QVERIFY(waitUntil([&]() { return !batches.isEmpty(); }));
+        pumpEvents(100);
+
+        QVERIFY(!batches.isEmpty());
+        for (const VideoPacketBatch &batch : std::as_const(batches)) {
+            for (const WirePacket &packet : batch.packets) {
+                if (packet.type != PacketType::Data) {
+                    continue;
+                }
+                const auto fragment = unpackVideoFragment(packet.payload);
+                QVERIFY(fragment.has_value());
+                QVERIFY(!fragment->data.isEmpty());
+                QCOMPARE(fragment->data.at(0), 'b');
+            }
+        }
     }
 
     void signalingRelayHandshakeControlVideoAndAudio()

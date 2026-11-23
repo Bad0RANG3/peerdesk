@@ -64,6 +64,8 @@ target_link_libraries(peerdesk_server
 add_library(peerdesk_transport STATIC
     src/transport/peer_link.cpp
     src/transport/peer_link.h
+    src/transport/video_send_pipeline.cpp
+    src/transport/video_send_pipeline.h
 )
 target_link_libraries(peerdesk_transport
     PUBLIC peerdesk_core Qt6::Core Qt6::Network

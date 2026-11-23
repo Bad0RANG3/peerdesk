@@ -77,6 +77,17 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
 {
     qRegisterMetaType<pd::LinkStats>("pd::LinkStats");
 
+    connect(
+        &videoSend_,
+        &VideoSendPipeline::packetsReady,
+        this,
+        &PeerLink::onVideoPacketsReady);
+    connect(
+        &videoSend_,
+        &VideoSendPipeline::packetizationFailed,
+        this,
+        &PeerLink::emitLog);
+
     sessionId_ = randomBytes(4);
     const QByteArray tagBytes = randomBytes(4);
     sessionTag_ = qFromBigEndian<quint32>(tagBytes.constData());
@@ -133,6 +144,7 @@ bool PeerLink::start(const QString &bindAddress, quint16 port, QString *error)
     closing_ = false;
     lastStatsAt_ = ReliableStream::currentTimeSeconds();
     timer_->start();
+    videoSend_.start();
     emitLog(QStringLiteral("bound udp %1").arg(endpointText(localAddress_, localPort_)));
     return true;
 }
@@ -143,6 +155,7 @@ void PeerLink::close()
         return;
     }
     closing_ = true;
+    videoSend_.stop();
     if (crypto_ && socket_->state() == QAbstractSocket::BoundState) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
     }
@@ -161,6 +174,12 @@ void PeerLink::resetPeer()
     if (established_ && crypto_
         && socket_->state() == QAbstractSocket::BoundState) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
+    }
+
+    const bool packetizerRunning =
+        socket_->state() == QAbstractSocket::BoundState;
+    if (packetizerRunning) {
+        videoSend_.stop();
     }
 
     peerCandidates_.clear();
@@ -189,7 +208,6 @@ void PeerLink::resetPeer()
     remoteSessionId_.clear();
     remoteDeviceId_.clear();
 
-    videoSender_.reset();
     videoReceiver_.reset();
     controlFragments_.reset();
     controlStream_.reset();
@@ -205,6 +223,9 @@ void PeerLink::resetPeer()
     stats_ = LinkStats{};
     stats_.reflexive = reflexive;
 
+    if (packetizerRunning) {
+        videoSend_.start();
+    }
     setState(QStringLiteral("idle"));
     emitLog(QStringLiteral("peer state reset"));
 }
@@ -345,12 +366,7 @@ void PeerLink::sendVideo(const QByteArray &jpeg, bool keyframe)
     if (!crypto_ || !established_) {
         return;
     }
-    const QList<WirePacket> packets = videoSender_.build(jpeg, keyframe);
-    for (const WirePacket &packet : packets) {
-        (void)sendPacket(packet.type, static_cast<quint8>(StreamKind::Video),
-                         packet.flags, packet.payload);
-    }
-    sentFramesWindow_.append(ReliableStream::currentTimeSeconds());
+    videoSend_.submit(jpeg, keyframe);
 }
 
 void PeerLink::sendAudio(const QByteArray &payload)
@@ -370,6 +386,11 @@ QString PeerLink::localAddressText() const
 quint16 PeerLink::localPort() const
 {
     return localPort_;
+}
+
+QString PeerLink::videoPacketizerThreadName() const
+{
+    return videoSend_.packetizerThreadName();
 }
 
 QList<Candidate> PeerLink::localCandidates() const
@@ -815,15 +836,7 @@ void PeerLink::handleEncrypted(
     } else if (header.type == PacketType::Nack) {
         const auto nack = unpackNack(payload);
         if (nack) {
-            const QList<WirePacket> packets =
-                videoSender_.retransmit(nack->first, nack->second);
-            for (const WirePacket &packet : packets) {
-                (void)sendPacket(
-                    packet.type,
-                    static_cast<quint8>(StreamKind::Video),
-                    packet.flags,
-                    packet.payload);
-            }
+            videoSend_.retransmit(nack->first, nack->second);
         }
     } else if (header.type == PacketType::Ping) {
         (void)sendPacket(PacketType::Pong, 0, 0, payload);
@@ -833,6 +846,23 @@ void PeerLink::handleEncrypted(
         emitLog(QStringLiteral("peer closed"));
         established_ = false;
         setState(QStringLiteral("closed"));
+    }
+}
+
+void PeerLink::onVideoPacketsReady(const VideoPacketBatch &batch)
+{
+    if (!crypto_ || !established_) {
+        return;
+    }
+    for (const WirePacket &packet : batch.packets) {
+        (void)sendPacket(
+            packet.type,
+            static_cast<quint8>(StreamKind::Video),
+            packet.flags,
+            packet.payload);
+    }
+    if (!batch.retransmit) {
+        sentFramesWindow_.append(ReliableStream::currentTimeSeconds());
     }
 }
 

@@ -4,6 +4,7 @@
 #include "core/protocol.h"
 #include "core/reliable.h"
 #include "core/video.h"
+#include "transport/video_send_pipeline.h"
 
 #include <QByteArray>
 #include <QHash>
@@ -100,6 +101,7 @@ public:
     [[nodiscard]] QString remoteSessionId() const { return remoteSessionId_; }
     [[nodiscard]] QString localAddressText() const;
     [[nodiscard]] quint16 localPort() const;
+    [[nodiscard]] QString videoPacketizerThreadName() const;
     [[nodiscard]] QList<Candidate> localCandidates() const;
     [[nodiscard]] QList<Candidate> peerCandidates() const;
 
@@ -154,6 +156,7 @@ private:
     void sendPing();
     void handlePong(const QByteArray &payload);
     void requestKeyframe();
+    void onVideoPacketsReady(const VideoPacketBatch &batch);
 
     void setState(const QString &state);
     void updateStats(double now);
@@ -207,7 +210,7 @@ private:
     QString remoteSessionId_;
     QString remoteDeviceId_;
 
-    VideoSender videoSender_;
+    VideoSendPipeline videoSend_;
     VideoReceiver videoReceiver_;
     ControlFragments controlFragments_;
     ReliableStream controlStream_;

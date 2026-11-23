@@ -41,7 +41,7 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 | 路径 | 职责 |
 | --- | --- |
 | `src/core/` | 20 字节报文头、JSON 载荷、视频/控制分片、XOR FEC、可靠流、STUN、X25519/HKDF/AEAD、重放窗口 |
-| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计和链路状态 |
+| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态和视频发送流水线 |
 | `src/server/` | TCP JSON Lines 信令、UDP 中继、STUN、连接频次限制和每会话令牌桶 |
 | `src/client/` | TCP 信令客户端、注册/配对、候选更新和错误映射 |
 | `src/session/` | 被控端/控制端会话、视频、音频、输入、剪贴板、文件和统计 |
@@ -120,9 +120,10 @@ Viewer 实况中断 ──▶ Reconnecting ──同码重新配对/握手──
 ```text
 PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePacer
   → queued frameReady
-  → HostSession/VideoSender
-  → 视频分片 DATA + XOR PARITY
-  → 包头 + AEAD
+  → HostSession → PeerLink::sendVideo
+  → PeerDeskVideoSend：视频分片 DATA + XOR PARITY
+  → queued packet batch
+  → 主线程 socket 写：包头 + AEAD
   → UDP 直连或 RLY1 中继
   → VideoReceiver 重组/恢复
   → PeerDeskViewerVideo 解码（保留最新帧）
@@ -131,11 +132,13 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
 
 - `VideoPipeline` 在独立的 `PeerDeskVideo` 线程中执行抓屏、缩放、静帧指纹和 JPEG
   编码，并用单次定时器在每帧编码完成后串行调度下一帧。
-- `HostSession` 在主线程接收编码完成的帧并交给 `PeerLink` 发送；画质、显示器和带宽
-  设置通过排队调用同步到媒体线程。
+- `HostSession` 在主线程接收编码完成的帧并交给 `PeerLink`；`PeerLink` 把 JPEG 提交到
+  `PeerDeskVideoSend`，由该线程独占 `VideoSender` 并完成分片、XOR FEC 和 NACK 重传
+  缓存检索。批次以排队信号回到主线程后才进入 socket 写入、包头和 AEAD 路径。
 - `FramePacer` 根据实际帧大小调整 JPEG 质量，带宽上限同时影响质量预算和有效发帧率。
 - 静帧可跳过发送；首帧和显式关键帧请求会提供新的编码基准。
-- 丢片由 NACK 请求重传；关键帧丢失会请求新的关键帧。
+- 丢片由 NACK 请求重传；接收线程把请求排队给 `PeerDeskVideoSend` 检索缓存并构造重传
+  包。关键帧丢失会请求新的关键帧。
 - Viewer 把收到的 JPEG 交给 `PeerDeskViewerVideo` 线程解码；解码慢时只保留最新帧，
   尚未交付的关键帧不会被普通帧覆盖。解码完成的 `QImage` 再排队交给主线程画布，
   坐标按实际画面矩形归一化。
@@ -227,7 +230,7 @@ Qt 事件循环是主执行体。以下工作都在主线程完成：
 
 - Qt 窗口、画布绘制、菜单、托盘和偏好读写。
 - TCP 信令和 UDP socket 回调。
-- 视频发送和画布更新。
+- UDP socket 写入、包头与 AEAD、视频发送统计和画布更新。
 - `QAudioSink` 播放。
 - 文件分块、剪贴板和大部分会话控制。
 
@@ -240,12 +243,17 @@ JPEG 编码和 `FramePacer` 都在该线程串行执行；启动、停止和设�
 JPEG 解码。输入帧使用最新值覆盖策略限制积压，并保留尚未解码的关键帧；停止或重启同样
 通过 generation 丢弃旧结果。解码后的 `QImage` 仍由主线程缩放、绘制。
 
+`VideoSendPipeline` 创建一个名为 `PeerDeskVideoSend` 的 `QThread`，由 worker 独占
+唯一的 `VideoSender`，串行执行 JPEG 分片、XOR FEC 生成和 NACK 重传缓存检索。待发送
+帧使用最新值覆盖策略限制积压，尚未开始处理的普通帧不会覆盖待处理关键帧；停止、重置
+或重启通过 generation 丢弃旧批次。生成的数据包批次以排队信号回到主线程，再由
+`PeerLink` 写入 UDP。
+
 `WasapiLoopbackSource` 内部另有一个 `std::thread`，负责读取 WASAPI loopback PCM，
 随后把数据交回会话路径。
 
-代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；视频发送、音频播放和画面绘制
-仍在主线程。当前只证明抓屏、缩放、静帧检测、JPEG 编码和 Viewer JPEG 解码已脱离
-UI 线程，不能据此宣称完整多线程媒体管线或已达到某个性能指标。
+代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；UDP 写入、AEAD 加密、发送统计、
+音频播放和画面绘制仍在主线程，不能据此宣称完整异步媒体管线或已达到某个性能指标。
 
 ## 6. 配置、日志与运行边界
 
@@ -304,8 +312,9 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 ## 8. 当前架构限制
 
 - 视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码。
-- 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、JPEG 编码和 Viewer
-  解码已移至独立线程，但视频发送、画面绘制和音频播放仍在主线程。
+- 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、JPEG 编码、Viewer
+  解码以及视频分片/FEC/NACK 重传缓存检索已移至独立线程，但 UDP 写入、AEAD 加密、
+  发送统计、画面绘制和音频播放仍在主线程。
 - 声音是固定 G.711 µ-law，没有 Opus。
 - 文件支持单文件断线续传，但断点只保留 10 分钟，跨机续传仍待真实验收；断点失效时
   回退为整文件重试。接收端同名同大小文件已通过回环测试分配独立路径并隔离断点，但
