@@ -16,7 +16,6 @@
 #include <QPair>
 #include <QString>
 
-#include <memory>
 #include <optional>
 
 class QTimer;
@@ -122,17 +121,13 @@ private:
     };
 
     void tick();
-    void processDatagram(
-        const QByteArray &datagram,
-        const QHostAddress &sender,
-        quint16 senderPort);
+    void processDatagram(const UdpReceivePacket &packet);
     void handleStun(const QByteArray &datagram);
     void handleHello(const QByteArray &body, const QHostAddress &sender, quint16 port);
     void handleHelloAck(const QByteArray &body, const QHostAddress &sender, quint16 port);
-    void handleEncrypted(
-        const QByteArray &headerBytes,
+    void handleAuthenticated(
         const Header &header,
-        const QByteArray &body,
+        const QByteArray &payload,
         const QHostAddress &sender,
         quint16 port);
 
@@ -197,7 +192,7 @@ private:
     QByteArray sessionId_;
     quint32 sessionTag_ = 0;
     KeyPair keyPair_;
-    std::unique_ptr<CryptoContext> crypto_;
+    bool sessionReady_ = false;
     QByteArray helloClientBytes_;
     QByteArray helloHostBytes_;
 

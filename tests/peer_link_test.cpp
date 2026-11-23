@@ -130,6 +130,33 @@ quint32 relayTag(const QJsonObject &message)
             message.value(QStringLiteral("relay_tag")).toDouble()));
 }
 
+struct TestSessionPair {
+    SessionKeys host;
+    SessionKeys client;
+};
+
+std::optional<TestSessionPair> makeTestSessionPair()
+{
+    const KeyPair host = KeyPair::generate();
+    const KeyPair client = KeyPair::generate();
+    const QByteArray helloHost = QByteArrayLiteral("test-hello-host");
+    const QByteArray helloClient = QByteArrayLiteral("test-hello-client");
+    const auto hostKeys = SessionKeys::derive(
+        host,
+        client.publicKey,
+        helloHost,
+        helloClient);
+    const auto clientKeys = SessionKeys::derive(
+        client,
+        host.publicKey,
+        helloHost,
+        helloClient);
+    if (!hostKeys || !clientKeys) {
+        return std::nullopt;
+    }
+    return TestSessionPair{*hostKeys, *clientKeys};
+}
+
 } // namespace
 
 class PeerLinkTest : public QObject {
@@ -334,25 +361,33 @@ private slots:
             sender.ioThreadName()
             != QThread::currentThread()->objectName());
 
-        QList<QByteArray> received;
+        QList<UdpReceivePacket> received;
         QList<QHostAddress> senders;
         QList<quint16> sourcePorts;
         connect(
             &receiver,
-            &UdpIoPipeline::datagramReceived,
+            &UdpIoPipeline::packetReceived,
             [&received, &senders, &sourcePorts](
-                const QByteArray &datagram,
-                const QHostAddress &senderAddress,
-                quint16 senderPort) {
-                received.append(datagram);
-                senders.append(senderAddress);
-                sourcePorts.append(senderPort);
+                const UdpReceivePacket &packet) {
+                received.append(packet);
+                senders.append(packet.sender);
+                sourcePorts.append(packet.senderPort);
             });
 
         const QByteArray payload = QByteArrayLiteral("udp-io-probe");
-        sender.sendRawDatagram(payload, receiverAddress, receiverPort);
+        Header header;
+        header.type = PacketType::Hello;
+        header.seq = 1;
+        header.plen = static_cast<quint16>(payload.size());
+        header.session = 0x12345678;
+        QByteArray datagram = header.pack() + payload;
+        sender.sendRawDatagram(datagram, receiverAddress, receiverPort);
         QVERIFY(waitUntil([&]() { return !received.isEmpty(); }));
-        QCOMPARE(received.constFirst(), payload);
+        QVERIFY(received.constFirst().kind == UdpReceiveKind::Plaintext);
+        QCOMPARE(received.constFirst().wireBytes, quint64(datagram.size()));
+        QCOMPARE(received.constFirst().header.type, PacketType::Hello);
+        QCOMPARE(received.constFirst().header.seq, quint32(1));
+        QCOMPARE(received.constFirst().payload, payload);
         QCOMPARE(sourcePorts.constFirst(), senderPort);
         QVERIFY(!senders.constFirst().isNull());
 
@@ -362,6 +397,153 @@ private slots:
             QByteArrayLiteral("ignored"),
             receiverAddress,
             receiverPort));
+    }
+
+    void udpIoAuthenticatesRejectsForgeryReplayAndReset()
+    {
+        const auto sessions = makeTestSessionPair();
+        QVERIFY(sessions.has_value());
+
+        UdpIoPipeline sender;
+        UdpIoPipeline receiver;
+        QHostAddress senderAddress;
+        QHostAddress receiverAddress;
+        quint16 senderPort = 0;
+        quint16 receiverPort = 0;
+        QString error;
+        QVERIFY2(
+            sender.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &senderAddress,
+                &senderPort,
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &receiverAddress,
+                &receiverPort,
+                &error),
+            qPrintable(error));
+
+        QList<UdpReceivePacket> received;
+        connect(
+            &receiver,
+            &UdpIoPipeline::packetReceived,
+            [&received](const UdpReceivePacket &packet) {
+                received.append(packet);
+            });
+
+        const auto sealedPacket = [](
+                                      CryptoContext &context,
+                                      quint32 sequence,
+                                      const QByteArray &payload,
+                                      bool relayed) {
+            Header header;
+            header.type = PacketType::Data;
+            header.stream = static_cast<quint8>(StreamKind::Control);
+            header.seq = sequence;
+            header.plen = static_cast<quint16>(payload.size() + kAuthTagLen);
+            header.session = 0x11223344;
+            const QByteArray headerBytes = header.pack();
+            QByteArray datagram = headerBytes
+                + context.seal(headerBytes, payload, sequence);
+            if (relayed) {
+                datagram = wrapRelay(0x55667788, datagram);
+            }
+            return datagram;
+        };
+
+        CryptoContext earlyContext(sessions->host, true);
+        sender.sendRawDatagram(
+            sealedPacket(
+                earlyContext,
+                1,
+                QByteArrayLiteral("before-keys"),
+                false),
+            receiverAddress,
+            receiverPort);
+        pumpEvents(120);
+        QVERIFY(received.isEmpty());
+
+        receiver.setSession(sessions->client, false);
+        const quint64 firstGeneration = receiver.receiveGeneration();
+
+        CryptoContext hostContext(sessions->host, true);
+        const QByteArray legitimate = sealedPacket(
+            hostContext,
+            7,
+            QByteArrayLiteral("authenticated-payload"),
+            false);
+        sender.sendRawDatagram(legitimate, receiverAddress, receiverPort);
+        QVERIFY(waitUntil([&]() { return received.size() == 1; }));
+        QVERIFY(received.constFirst().kind == UdpReceiveKind::Encrypted);
+        QCOMPARE(received.constFirst().generation, firstGeneration);
+        QCOMPARE(received.constFirst().header.seq, quint32(7));
+        QCOMPARE(
+            received.constFirst().payload,
+            QByteArrayLiteral("authenticated-payload"));
+        QCOMPARE(received.constFirst().wireBytes, quint64(legitimate.size()));
+
+        QByteArray forged = sealedPacket(
+            hostContext,
+            4000,
+            QByteArrayLiteral("forged-high-sequence"),
+            false);
+        forged[forged.size() - 1] =
+            static_cast<char>(forged.at(forged.size() - 1) ^ 0x01);
+        sender.sendRawDatagram(forged, receiverAddress, receiverPort);
+        pumpEvents(120);
+        QCOMPARE(received.size(), qsizetype(1));
+
+        const QByteArray afterForgery = sealedPacket(
+            hostContext,
+            8,
+            QByteArrayLiteral("after-forgery"),
+            false);
+        sender.sendRawDatagram(
+            afterForgery,
+            receiverAddress,
+            receiverPort);
+        QVERIFY(waitUntil([&]() { return received.size() == 2; }));
+        QCOMPARE(received.constLast().header.seq, quint32(8));
+        QCOMPARE(
+            received.constLast().payload,
+            QByteArrayLiteral("after-forgery"));
+
+        sender.sendRawDatagram(
+            afterForgery,
+            receiverAddress,
+            receiverPort);
+        pumpEvents(120);
+        QCOMPARE(received.size(), qsizetype(2));
+
+        const QByteArray relayed = sealedPacket(
+            hostContext,
+            9,
+            QByteArrayLiteral("relayed-payload"),
+            true);
+        sender.sendRawDatagram(relayed, receiverAddress, receiverPort);
+        QVERIFY(waitUntil([&]() { return received.size() == 3; }));
+        QCOMPARE(
+            received.constLast().payload,
+            QByteArrayLiteral("relayed-payload"));
+        QCOMPARE(received.constLast().wireBytes, quint64(relayed.size()));
+
+        receiver.resetSession();
+        QVERIFY(receiver.receiveGeneration() > firstGeneration);
+        sender.sendRawDatagram(
+            sealedPacket(
+                hostContext,
+                10,
+                QByteArrayLiteral("old-session"),
+                false),
+            receiverAddress,
+            receiverPort);
+        pumpEvents(120);
+        QCOMPARE(received.size(), qsizetype(3));
     }
 
     void videoPacketizerIsolatesRestartedGenerations()

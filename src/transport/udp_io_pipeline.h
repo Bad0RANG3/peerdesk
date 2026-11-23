@@ -29,6 +29,22 @@ struct UdpSendJob {
     std::optional<quint64> sequence;
 };
 
+enum class UdpReceiveKind : quint8 {
+    Stun,
+    Plaintext,
+    Encrypted,
+};
+
+struct UdpReceivePacket {
+    quint64 generation = 0;
+    quint64 wireBytes = 0;
+    UdpReceiveKind kind = UdpReceiveKind::Plaintext;
+    Header header;
+    QByteArray payload;
+    QHostAddress sender;
+    quint16 senderPort = 0;
+};
+
 class UdpIoWorker;
 
 class UdpIoPipeline final : public QObject {
@@ -58,13 +74,14 @@ public:
     [[nodiscard]] bool running() const { return running_.load(); }
     [[nodiscard]] quint64 sentBytes() const { return sentBytes_.load(); }
     [[nodiscard]] quint64 sentPackets() const { return sentPackets_.load(); }
+    [[nodiscard]] quint64 receiveGeneration() const
+    {
+        return receiveGeneration_.load();
+    }
     [[nodiscard]] QString ioThreadName() const;
 
 signals:
-    void datagramReceived(
-        const QByteArray &datagram,
-        const QHostAddress &sender,
-        quint16 senderPort);
+    void packetReceived(const pd::UdpReceivePacket &packet);
     void logMessage(const QString &message);
 
 private:
@@ -73,8 +90,11 @@ private:
     std::atomic_bool running_{false};
     std::atomic<quint64> sentBytes_{0};
     std::atomic<quint64> sentPackets_{0};
+    std::atomic<quint64> receiveGeneration_{1};
     mutable QMutex threadNameMutex_;
     QString ioThreadName_;
 };
 
 } // namespace pd
+
+Q_DECLARE_METATYPE(pd::UdpReceivePacket)

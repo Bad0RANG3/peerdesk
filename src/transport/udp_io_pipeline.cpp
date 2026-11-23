@@ -10,6 +10,7 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 
 namespace pd {
@@ -29,6 +30,7 @@ public:
     void start(
         const QString &bindAddress,
         quint16 port,
+        quint64 generation,
         bool *ok,
         QString *error,
         QHostAddress *localAddress,
@@ -40,6 +42,7 @@ public:
         localAddress->clear();
         *localPort = 0;
         *threadName = QThread::currentThread()->objectName();
+        generation_ = generation;
 
         if (!socket_) {
             socket_ = new QUdpSocket(this);
@@ -97,20 +100,25 @@ public:
     void stop()
     {
         running_ = false;
-        sendCrypto_.reset();
+        crypto_.reset();
         if (socket_) {
             socket_->close();
         }
     }
 
-    void setSession(const SessionKeys &keys, bool isHost)
+    void setSession(
+        const SessionKeys &keys,
+        bool isHost,
+        quint64 generation)
     {
-        sendCrypto_ = std::make_unique<CryptoContext>(keys, isHost);
+        crypto_ = std::make_unique<CryptoContext>(keys, isHost);
+        generation_ = generation;
     }
 
-    void resetSession()
+    void resetSession(quint64 generation)
     {
-        sendCrypto_.reset();
+        crypto_.reset();
+        generation_ = generation;
         sentBytes_->store(0);
         sentPackets_->store(0);
     }
@@ -123,7 +131,7 @@ public:
             return;
         }
 
-        if (!job.plain && !sendCrypto_) {
+        if (!job.plain && !crypto_) {
             return;
         }
 
@@ -147,7 +155,7 @@ public:
             }
             sequenceValue = job.sequence
                 ? *job.sequence
-                : sendCrypto_->nextSeq();
+                : crypto_->nextSeq();
             payloadLength = static_cast<quint16>(
                 job.payload.size() + kAuthTagLen);
         }
@@ -165,7 +173,7 @@ public:
         const QByteArray headerBytes = header.pack();
 
         if (!job.plain) {
-            body = sendCrypto_->seal(
+            body = crypto_->seal(
                 headerBytes,
                 job.payload,
                 sequenceValue);
@@ -205,13 +213,76 @@ public:
     }
 
 signals:
-    void datagramReceived(
-        const QByteArray &datagram,
-        const QHostAddress &sender,
-        quint16 senderPort);
+    void packetReceived(const pd::UdpReceivePacket &packet);
     void logMessage(const QString &message);
 
 private:
+    void processIncoming(
+        const QByteArray &datagram,
+        const QHostAddress &sender,
+        quint16 senderPort)
+    {
+        UdpReceivePacket packet;
+        packet.generation = generation_;
+        packet.wireBytes = static_cast<quint64>(datagram.size());
+        packet.sender = sender;
+        packet.senderPort = senderPort;
+
+        if (datagram.size() >= 20
+            && ((static_cast<quint8>(datagram[0]) == 0
+                 && static_cast<quint8>(datagram[1]) == 0x01)
+                || (static_cast<quint8>(datagram[0]) == 0x01
+                    && static_cast<quint8>(datagram[1]) == 0x01))) {
+            packet.kind = UdpReceiveKind::Stun;
+            packet.payload = datagram;
+            emit packetReceived(packet);
+            return;
+        }
+
+        QByteArray packetBytes = datagram;
+        if (datagram.size() >= kRelayHeaderLen
+            && std::memcmp(datagram.constData(), "RLY1", 4) == 0) {
+            const auto relayed = unwrapRelay(datagram);
+            if (!relayed) {
+                return;
+            }
+            packetBytes = relayed->second;
+        }
+
+        const auto parsed = Header::parse(packetBytes);
+        if (!parsed) {
+            return;
+        }
+        packet.header = *parsed;
+        const QByteArray body = packetBytes.mid(kHeaderLen);
+        const bool plaintext =
+            parsed->type == PacketType::Hello
+            || parsed->type == PacketType::HelloAck
+            || parsed->type == PacketType::Punch
+            || parsed->type == PacketType::PunchAck
+            || (parsed->type == PacketType::Bye && !crypto_);
+        if (plaintext) {
+            packet.kind = UdpReceiveKind::Plaintext;
+            packet.payload = body;
+            emit packetReceived(packet);
+            return;
+        }
+        if (!crypto_) {
+            return;
+        }
+
+        const auto plain = crypto_->open(
+            packetBytes.left(kHeaderLen),
+            body,
+            parsed->seq);
+        if (!plain) {
+            return;
+        }
+        packet.kind = UdpReceiveKind::Encrypted;
+        packet.payload = *plain;
+        emit packetReceived(packet);
+    }
+
     void pumpIncoming()
     {
         if (!running_ || !socket_) {
@@ -233,14 +304,15 @@ private:
                 continue;
             }
             datagram.truncate(static_cast<qsizetype>(received));
-            emit datagramReceived(datagram, sender, senderPort);
+            processIncoming(datagram, sender, senderPort);
         }
     }
 
     QUdpSocket *socket_ = nullptr;
-    std::unique_ptr<CryptoContext> sendCrypto_;
+    std::unique_ptr<CryptoContext> crypto_;
     std::atomic<quint64> *sentBytes_ = nullptr;
     std::atomic<quint64> *sentPackets_ = nullptr;
+    quint64 generation_ = 0;
     bool running_ = false;
 };
 
@@ -248,6 +320,7 @@ UdpIoPipeline::UdpIoPipeline(QObject *parent)
     : QObject(parent)
 {
     qRegisterMetaType<QHostAddress>("QHostAddress");
+    qRegisterMetaType<pd::UdpReceivePacket>("pd::UdpReceivePacket");
 
     worker_ = new UdpIoWorker(&sentBytes_, &sentPackets_);
     worker_->moveToThread(&thread_);
@@ -259,9 +332,9 @@ UdpIoPipeline::UdpIoPipeline(QObject *parent)
         &QObject::deleteLater);
     connect(
         worker_,
-        &UdpIoWorker::datagramReceived,
+        &UdpIoWorker::packetReceived,
         this,
-        &UdpIoPipeline::datagramReceived);
+        &UdpIoPipeline::packetReceived);
     connect(
         worker_,
         &UdpIoWorker::logMessage,
@@ -312,6 +385,7 @@ bool UdpIoPipeline::start(
             worker_->start(
                 bindAddress,
                 port,
+                receiveGeneration_.load(),
                 &ok,
                 &failure,
                 &boundAddress,
@@ -339,6 +413,7 @@ bool UdpIoPipeline::start(
 
 void UdpIoPipeline::stop()
 {
+    receiveGeneration_.fetch_add(1);
     if (!worker_) {
         running_.store(false);
         return;
@@ -355,9 +430,12 @@ void UdpIoPipeline::setSession(const SessionKeys &keys, bool isHost)
     if (!worker_) {
         return;
     }
+    const quint64 generation = receiveGeneration_.fetch_add(1) + 1;
     QMetaObject::invokeMethod(
         worker_,
-        [this, keys, isHost]() { worker_->setSession(keys, isHost); },
+        [this, keys, isHost, generation]() {
+            worker_->setSession(keys, isHost, generation);
+        },
         Qt::BlockingQueuedConnection);
 }
 
@@ -366,9 +444,10 @@ void UdpIoPipeline::resetSession()
     if (!worker_) {
         return;
     }
+    const quint64 generation = receiveGeneration_.fetch_add(1) + 1;
     QMetaObject::invokeMethod(
         worker_,
-        [this]() { worker_->resetSession(); },
+        [this, generation]() { worker_->resetSession(generation); },
         Qt::BlockingQueuedConnection);
     sentBytes_.store(0);
     sentPackets_.store(0);

@@ -14,13 +14,10 @@
 #include <QtEndian>
 
 #include <algorithm>
-#include <cstring>
 #include <limits>
 
 namespace pd {
 namespace {
-
-constexpr char kRelayMagic[] = {'R', 'L', 'Y', '1'};
 
 QByteArray littleU32(quint32 value)
 {
@@ -88,16 +85,13 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &PeerLink::emitLog);
     connect(
         &udpIo_,
-        &UdpIoPipeline::datagramReceived,
+        &UdpIoPipeline::packetReceived,
         this,
-        [this](
-            const QByteArray &datagram,
-            const QHostAddress &sender,
-            quint16 senderPort) {
+        [this](const UdpReceivePacket &packet) {
             if (closing_) {
                 return;
             }
-            processDatagram(datagram, sender, senderPort);
+            processDatagram(packet);
         });
     connect(
         &udpIo_,
@@ -158,12 +152,12 @@ void PeerLink::close()
     }
     closing_ = true;
     videoSend_.stop();
-    if (crypto_ && udpIo_.running()) {
+    if (sessionReady_ && udpIo_.running()) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
     }
     timer_->stop();
     udpIo_.stop();
-    crypto_.reset();
+    sessionReady_ = false;
     established_ = false;
     setState(QStringLiteral("closed"));
 }
@@ -173,7 +167,7 @@ void PeerLink::resetPeer()
     if (closing_) {
         return;
     }
-    if (established_ && crypto_
+    if (established_ && sessionReady_
         && udpIo_.running()) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
     }
@@ -198,7 +192,7 @@ void PeerLink::resetPeer()
     sessionTag_ = qFromBigEndian<quint32>(tagBytes.constData());
     keyPair_ = KeyPair::generate();
     udpIo_.resetSession();
-    crypto_.reset();
+    sessionReady_ = false;
     helloClientBytes_.clear();
     helloHostBytes_.clear();
 
@@ -355,7 +349,7 @@ void PeerLink::discoverReflexive(
 
 void PeerLink::sendControl(const QJsonObject &message)
 {
-    if (!crypto_) {
+    if (!sessionReady_) {
         return;
     }
     const QList<QByteArray> parts =
@@ -367,7 +361,7 @@ void PeerLink::sendControl(const QJsonObject &message)
 
 void PeerLink::sendVideo(const QByteArray &jpeg, bool keyframe)
 {
-    if (!crypto_ || !established_) {
+    if (!sessionReady_ || !established_) {
         return;
     }
     videoSend_.submit(jpeg, keyframe);
@@ -375,7 +369,7 @@ void PeerLink::sendVideo(const QByteArray &jpeg, bool keyframe)
 
 void PeerLink::sendAudio(const QByteArray &payload)
 {
-    if (!crypto_ || !established_) {
+    if (!sessionReady_ || !established_) {
         return;
     }
     (void)sendPacket(PacketType::Audio, static_cast<quint8>(StreamKind::Audio),
@@ -463,7 +457,7 @@ void PeerLink::tick()
         emit reflexiveDiscoveryFinished(false, {}, 0);
     }
 
-    if (!crypto_) {
+    if (!sessionReady_) {
         if (handshakeStarted_ > 0 && now - handshakeStarted_ < kHelloTimeoutMs / 1000.0) {
             sendHello(false);
             static double lastPunch = 0;
@@ -512,50 +506,28 @@ void PeerLink::tick()
     updateStats(now);
 }
 
-void PeerLink::processDatagram(
-    const QByteArray &datagram,
-    const QHostAddress &sender,
-    quint16 senderPort)
+void PeerLink::processDatagram(const UdpReceivePacket &packet)
 {
-    stats_.recvBytes += static_cast<quint64>(datagram.size());
-    ++stats_.recvPackets;
-    recvBytesWindow_.append(
-        qMakePair(ReliableStream::currentTimeSeconds(), datagram.size()));
-
-    if (datagram.size() >= 20
-        && ((static_cast<quint8>(datagram[0]) == 0
-             && static_cast<quint8>(datagram[1]) == 0x01)
-            || (static_cast<quint8>(datagram[0]) == 0x01
-                && static_cast<quint8>(datagram[1]) == 0x01))) {
-        handleStun(datagram);
+    if (packet.generation != udpIo_.receiveGeneration()) {
         return;
     }
 
-    Header header;
-    QByteArray headerBytes = datagram;
-    QByteArray body;
-    if (datagram.size() >= kRelayHeaderLen
-        && std::memcmp(datagram.constData(), kRelayMagic, 4) == 0) {
-        const auto relayed = unwrapRelay(datagram);
-        if (!relayed) {
-            return;
-        }
-        headerBytes = relayed->second;
-        const auto parsed = Header::parse(headerBytes);
-        if (!parsed) {
-            return;
-        }
-        header = *parsed;
-        body = headerBytes.mid(kHeaderLen);
-    } else {
-        const auto parsed = Header::parse(datagram);
-        if (!parsed) {
-            return;
-        }
-        header = *parsed;
-        headerBytes = datagram.left(kHeaderLen);
-        body = datagram.mid(kHeaderLen);
+    stats_.recvBytes += packet.wireBytes;
+    ++stats_.recvPackets;
+    recvBytesWindow_.append(
+        qMakePair(
+            ReliableStream::currentTimeSeconds(),
+            static_cast<int>(packet.wireBytes)));
+
+    if (packet.kind == UdpReceiveKind::Stun) {
+        handleStun(packet.payload);
+        return;
     }
+
+    const Header header = packet.header;
+    const QByteArray &body = packet.payload;
+    const QHostAddress &sender = packet.sender;
+    const quint16 senderPort = packet.senderPort;
 
     if (header.type == PacketType::Hello) {
         if (isHost_) {
@@ -581,7 +553,7 @@ void PeerLink::processDatagram(
             {},
             Destination{sender, senderPort},
             true);
-        if (isHost_ && !crypto_) {
+        if (isHost_ && !sessionReady_) {
             sendHello(true);
         }
         return;
@@ -593,16 +565,16 @@ void PeerLink::processDatagram(
         }
         return;
     }
-    if (header.type == PacketType::Bye && !crypto_) {
+    if (header.type == PacketType::Bye && !sessionReady_) {
         established_ = false;
         setState(QStringLiteral("closed"));
         return;
     }
 
-    if (!crypto_) {
+    if (packet.kind != UdpReceiveKind::Encrypted || !sessionReady_) {
         return;
     }
-    handleEncrypted(headerBytes, header, body, sender, senderPort);
+    handleAuthenticated(header, body, sender, senderPort);
 }
 
 void PeerLink::handleStun(const QByteArray &datagram)
@@ -672,7 +644,7 @@ void PeerLink::handleHello(
     addCandidates(parsedCandidates);
     emit peerHello(remoteDeviceId_, remoteSessionId_);
 
-    if (!crypto_) {
+    if (!sessionReady_) {
         if (helloHostBytes_.isEmpty()) {
             helloHostBytes_ = buildHelloBody();
         }
@@ -683,7 +655,7 @@ void PeerLink::handleHello(
             return;
         }
         udpIo_.setSession(*keys, true);
-        crypto_ = std::make_unique<CryptoContext>(*keys, true);
+        sessionReady_ = true;
         emitLog(QStringLiteral("hello from %1; keys derived, sending ack")
                     .arg(endpointText(sender, port)));
         helloSentAt_ = ReliableStream::currentTimeSeconds();
@@ -719,7 +691,7 @@ void PeerLink::handleHelloAck(
     const QString sid = object->value(QStringLiteral("sid")).toString();
     const bool newRemoteSession =
         remoteSessionId_ != sid && !sid.isEmpty();
-    if (!hasPeer() || (!established_ && !crypto_) || newRemoteSession) {
+    if (!hasPeer() || (!established_ && !sessionReady_) || newRemoteSession) {
         peerAddress_ = sender;
         peerPort_ = port;
     }
@@ -747,7 +719,7 @@ void PeerLink::handleHelloAck(
     addCandidates(parsedCandidates);
     emit peerHello(remoteDeviceId_, remoteSessionId_);
 
-    if (!crypto_) {
+    if (!sessionReady_) {
         const auto keys = SessionKeys::derive(
             keyPair_, publicKey, body, helloClientBytes_, psk_);
         if (!keys) {
@@ -755,24 +727,19 @@ void PeerLink::handleHelloAck(
             return;
         }
         udpIo_.setSession(*keys, false);
-        crypto_ = std::make_unique<CryptoContext>(*keys, false);
+        sessionReady_ = true;
         emitLog(QStringLiteral("hello_ack from %1; keys derived")
                     .arg(endpointText(sender, port)));
         sendPing();
     }
 }
 
-void PeerLink::handleEncrypted(
-    const QByteArray &headerBytes,
+void PeerLink::handleAuthenticated(
     const Header &header,
-    const QByteArray &body,
+    const QByteArray &payload,
     const QHostAddress &sender,
     quint16 port)
 {
-    const auto plain = crypto_->open(headerBytes, body, header.seq);
-    if (!plain) {
-        return;
-    }
     if (!usingRelay_
         && (!hasPeer() || peerAddress_ != sender || peerPort_ != port)) {
         peerAddress_ = sender;
@@ -793,7 +760,6 @@ void PeerLink::handleEncrypted(
         });
     }
 
-    const QByteArray &payload = *plain;
     if (header.type == PacketType::Data) {
         if (header.stream == static_cast<quint8>(StreamKind::Video)) {
             const auto fragment = unpackVideoFragment(payload);
@@ -847,7 +813,7 @@ void PeerLink::handleEncrypted(
 
 void PeerLink::onVideoPacketsReady(const VideoPacketBatch &batch)
 {
-    if (!crypto_ || !established_) {
+    if (!sessionReady_ || !established_) {
         return;
     }
     for (const WirePacket &packet : batch.packets) {
@@ -998,7 +964,7 @@ bool PeerLink::sendPacket(
         return false;
     }
 
-    if (!plain && !crypto_) {
+    if (!plain && !sessionReady_) {
         return false;
     }
 
