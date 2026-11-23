@@ -1,10 +1,30 @@
 #include "ui/outgoing_file_queue.h"
 
+#include <QDir>
 #include <QFileInfo>
 
 #include <algorithm>
 
 namespace pd::ui {
+
+namespace {
+
+QString normalizedSourcePath(const QString &path)
+{
+    if (path.isEmpty()) {
+        return {};
+    }
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath())
+        .toCaseFolded();
+}
+
+bool sameSourcePath(const QString &left, const QString &right)
+{
+    return !left.isEmpty() && !right.isEmpty()
+        && normalizedSourcePath(left) == normalizedSourcePath(right);
+}
+
+} // namespace
 
 int OutgoingFileQueue::enqueue(const QStringList &paths)
 {
@@ -141,13 +161,18 @@ bool OutgoingFileQueue::interruptActive(const QString &reason)
 bool OutgoingFileQueue::markStarted(
     const QString &id,
     const QString &name,
-    qint64 size)
+    qint64 size,
+    const QString &sourcePath)
 {
     if (id.isEmpty() || seenIds_.contains(id)) {
         return false;
     }
     if (Task *task = mutableActiveTask()) {
         if (!task->id.isEmpty() && task->id != id) {
+            return false;
+        }
+        if (!sourcePath.isEmpty()
+            && !sameSourcePath(task->path, sourcePath)) {
             return false;
         }
         seenIds_.insert(id);
@@ -162,11 +187,19 @@ bool OutgoingFileQueue::markStarted(
         return true;
     }
 
-    const auto matches = [&name, size](const Task &task) {
-        if (name.isEmpty() || task.name != name) {
+    const auto metadataMatches = [&name, size](const Task &task) {
+        if (!name.isEmpty() && task.name != name) {
             return false;
         }
         return size <= 0 || task.size <= 0 || task.size == size;
+    };
+    const auto matches = [&metadataMatches, &sourcePath](
+                             const Task &task) {
+        if (!sourcePath.isEmpty()) {
+            return sameSourcePath(task.path, sourcePath)
+                && metadataMatches(task);
+        }
+        return !task.name.isEmpty() && metadataMatches(task);
     };
     const auto reusable = [&matches](const Task &task) {
         return task.state == TaskState::Interrupted && matches(task);
@@ -215,6 +248,7 @@ bool OutgoingFileQueue::markStarted(
     }
 
     Task task;
+    task.path = sourcePath;
     task.name = name;
     task.id = id;
     task.size = std::max<qint64>(size, 0);

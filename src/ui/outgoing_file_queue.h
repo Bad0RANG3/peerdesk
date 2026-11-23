@@ -51,7 +51,8 @@ public:
     bool markStarted(
         const QString &id,
         const QString &name,
-        qint64 size);
+        qint64 size,
+        const QString &sourcePath = {});
     bool markProgress(
         const QString &id,
         qint64 sent,

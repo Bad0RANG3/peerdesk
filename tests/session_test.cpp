@@ -995,6 +995,9 @@ private slots:
             sender.start(path, collect, &error, offer),
             qPrintable(error));
         QCOMPARE(started.count(), 1);
+        QCOMPARE(
+            started.at(0).at(3).toString(),
+            QFileInfo(path).absoluteFilePath());
         QVERIFY(sender.active());
         QVERIFY(sender.waitingForResume());
         QCOMPARE(sender.sent(), qint64(84000));
@@ -1376,6 +1379,9 @@ private slots:
         QVERIFY2(host.sendFile(firstPath, &error), qPrintable(error));
         QCOMPARE(hostStarted.count(), 1);
         const QString firstId = hostStarted.at(0).at(0).toString();
+        QCOMPARE(
+            hostStarted.at(0).at(3).toString(),
+            QFileInfo(firstPath).absoluteFilePath());
         QVERIFY(waitUntil(
             [&]() {
                 return std::any_of(
@@ -1406,6 +1412,9 @@ private slots:
         const QString resumedId =
             hostStarted.constLast().at(0).toString();
         QVERIFY(resumedId != firstId);
+        QCOMPARE(
+            hostStarted.constLast().at(3).toString(),
+            QFileInfo(firstPath).absoluteFilePath());
         const auto resumedBegin = std::find_if(
             viewerEvents.cbegin(),
             viewerEvents.cend(),

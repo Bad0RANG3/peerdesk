@@ -65,7 +65,8 @@ signals:
     void outgoingFileStarted(
         const QString &id,
         const QString &name,
-        qint64 size);
+        qint64 size,
+        const QString &sourcePath);
     void outgoingFileProgress(const QString &id, qint64 sent, qint64 total);
     void outgoingFileFinished(
         const QString &id,

@@ -653,8 +653,16 @@ void HostPanel::connectSignals()
         controller_,
         &HostController::outgoingFileStarted,
         this,
-        [this](const QString &id, const QString &name, qint64 size) {
-            if (!fileQueue_.markStarted(id, name, size)) {
+        [this](
+            const QString &id,
+            const QString &name,
+            qint64 size,
+            const QString &sourcePath) {
+            if (!fileQueue_.markStarted(
+                    id,
+                    name,
+                    size,
+                    sourcePath)) {
                 return;
             }
             const auto *task = fileQueue_.activeTask();

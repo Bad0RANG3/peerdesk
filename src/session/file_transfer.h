@@ -139,7 +139,11 @@ public:
     }
 
 signals:
-    void started(const QString &id, const QString &name, qint64 size);
+    void started(
+        const QString &id,
+        const QString &name,
+        qint64 size,
+        const QString &sourcePath);
     void progress(const QString &id, qint64 sent, qint64 total);
     void completed(const QString &id, const QString &name, qint64 size);
     void failed(const QString &id, const QString &reason);

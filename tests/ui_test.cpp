@@ -116,6 +116,7 @@ private slots:
     void outgoingFileQueuePausesAndResumes();
     void outgoingFileQueueIgnoresStaleCallbacks();
     void outgoingFileQueueAdoptsResumedTransfer();
+    void outgoingFileQueueMatchesResumeSourcePath();
     void viewerFileTransferCancelState();
     void hostFileTransferCancelState();
     void hostFileQueueFiltersAndRetries();
@@ -828,7 +829,8 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     controller.outgoingFileStarted(
         QStringLiteral("reconnect-file"),
         QStringLiteral("reconnect.bin"),
-        4096);
+        4096,
+        QString());
     controller.outgoingFileProgress(
         QStringLiteral("reconnect-file"),
         2048,
@@ -1220,6 +1222,114 @@ void UiTest::outgoingFileQueueAdoptsResumedTransfer()
     QCOMPARE(queue.size(), 1);
 }
 
+void UiTest::outgoingFileQueueMatchesResumeSourcePath()
+{
+    QTemporaryDir firstDirectory;
+    QTemporaryDir secondDirectory;
+    QTemporaryDir otherDirectory;
+    QVERIFY(firstDirectory.isValid());
+    QVERIFY(secondDirectory.isValid());
+    QVERIFY(otherDirectory.isValid());
+
+    const QString firstPath =
+        firstDirectory.filePath(QStringLiteral("same.bin"));
+    const QString secondPath =
+        secondDirectory.filePath(QStringLiteral("same.bin"));
+    const QString otherPath =
+        otherDirectory.filePath(QStringLiteral("same.bin"));
+    for (const QString &path : {firstPath, secondPath, otherPath}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("data"), qint64(4));
+    }
+
+    pd::ui::OutgoingFileQueue queue;
+    QCOMPARE(queue.enqueue({firstPath, secondPath}), 2);
+    const auto sender = [](const QString &, QString *error) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    };
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("second-waiting"),
+        QStringLiteral("same.bin"),
+        4,
+        secondPath));
+    QCOMPARE(queue.activeTask()->path, secondPath);
+    QVERIFY(queue.markProgress(
+        QStringLiteral("second-waiting"),
+        2,
+        4));
+    QVERIFY(queue.markInterrupted(
+        QStringLiteral("second-waiting"),
+        QStringLiteral("pause")));
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("first-1"),
+        QStringLiteral("same.bin"),
+        4,
+        firstPath));
+    QCOMPARE(queue.activeTask()->path, firstPath);
+    QVERIFY(queue.markProgress(QStringLiteral("first-1"), 3, 4));
+    QVERIFY(queue.markInterrupted(
+        QStringLiteral("first-1"),
+        QStringLiteral("pause")));
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("second-2"),
+        QStringLiteral("same.bin"),
+        4,
+        secondPath));
+    QCOMPARE(queue.activeTask()->path, secondPath);
+    QCOMPARE(queue.activeTask()->sent, qint64(2));
+    QVERIFY(queue.markInterrupted(
+        QStringLiteral("second-2"),
+        QStringLiteral("pause")));
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("first-2"),
+        QStringLiteral("same.bin"),
+        4,
+        firstPath));
+    QCOMPARE(queue.activeTask()->path, firstPath);
+    QCOMPARE(queue.activeTask()->sent, qint64(3));
+
+    QVERIFY(!queue.markStarted(
+        QStringLiteral("stranger-active"),
+        QStringLiteral("same.bin"),
+        4,
+        otherPath));
+    QVERIFY(queue.markInterrupted(
+        QStringLiteral("first-2"),
+        QStringLiteral("pause")));
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("stranger"),
+        QStringLiteral("same.bin"),
+        4,
+        otherPath));
+    QCOMPARE(queue.activeTask()->path, otherPath);
+    QCOMPARE(queue.size(), 3);
+    QVERIFY(queue.markFinished(
+        QStringLiteral("stranger"),
+        QStringLiteral("same.bin"),
+        4));
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("first-3"),
+        QStringLiteral("same.bin"),
+        4,
+        firstPath));
+    QCOMPARE(queue.activeTask()->path, firstPath);
+    QCOMPARE(queue.activeTask()->sent, qint64(3));
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::NoTask);
+}
+
 void UiTest::viewerFileTransferCancelState()
 {
     const auto preferences = testPreferences();
@@ -1241,7 +1351,8 @@ void UiTest::viewerFileTransferCancelState()
     controller.outgoingFileStarted(
         QStringLiteral("cancel-file"),
         QStringLiteral("演示文件.bin"),
-        8192);
+        8192,
+        QString());
     QTest::qWait(10);
     QVERIFY(page.fileCancelButton()->isVisible());
     QVERIFY(page.fileCancelButton()->isEnabled());
@@ -1260,7 +1371,8 @@ void UiTest::viewerFileTransferCancelState()
     controller.outgoingFileStarted(
         QStringLiteral("retry-file"),
         QStringLiteral("retry.bin"),
-        2048);
+        2048,
+        QString());
     controller.outgoingFileFailed(
         QStringLiteral("retry-file"),
         QStringLiteral("io"));
@@ -1272,7 +1384,8 @@ void UiTest::viewerFileTransferCancelState()
     controller.outgoingFileStarted(
         QStringLiteral("interrupt-file"),
         QStringLiteral("interrupt.bin"),
-        4096);
+        4096,
+        QString());
     controller.outgoingFileProgress(
         QStringLiteral("interrupt-file"),
         1024,
@@ -1316,7 +1429,8 @@ void UiTest::hostFileTransferCancelState()
     host.outgoingFileStarted(
         QStringLiteral("host-file"),
         QStringLiteral("host.bin"),
-        8192);
+        8192,
+        QString());
     QTest::qWait(10);
     QVERIFY(panel.fileBusy());
     QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("取消发送"));
@@ -1343,7 +1457,8 @@ void UiTest::hostFileTransferCancelState()
     host.outgoingFileStarted(
         QStringLiteral("host-file-2"),
         QStringLiteral("host-2.bin"),
-        4096);
+        4096,
+        QString());
     QTest::qWait(10);
     QVERIFY(panel.fileBusy());
     host.outgoingFileCancelled(
@@ -1358,7 +1473,8 @@ void UiTest::hostFileTransferCancelState()
     host.outgoingFileStarted(
         QStringLiteral("host-file-3"),
         QStringLiteral("host-3.bin"),
-        2048);
+        2048,
+        QString());
     QTest::qWait(10);
     host.outgoingFileInterrupted(
         QStringLiteral("host-file-3"),
@@ -1425,7 +1541,8 @@ void UiTest::hostFileQueueFiltersAndRetries()
     host.outgoingFileStarted(
         QStringLiteral("alpha-1"),
         QStringLiteral("alpha.bin"),
-        alpha.size());
+        alpha.size(),
+        alphaPath);
     QTest::qWait(10);
     QVERIFY(panel.fileBusy());
     QVERIFY(panel.fileRetryButton()->isHidden());
@@ -1440,7 +1557,8 @@ void UiTest::hostFileQueueFiltersAndRetries()
     host.outgoingFileStarted(
         QStringLiteral("beta-1"),
         QStringLiteral("beta.txt"),
-        beta.size());
+        beta.size(),
+        betaPath);
     host.outgoingFileFailed(
         QStringLiteral("beta-1"),
         QStringLiteral("io"));
@@ -1483,7 +1601,8 @@ void UiTest::hostFileQueuePausesAndResumes()
     host.outgoingFileStarted(
         QStringLiteral("resume-1"),
         QStringLiteral("resume.bin"),
-        4096);
+        4096,
+        path);
     host.outgoingFileProgress(
         QStringLiteral("resume-1"),
         1024,
@@ -1501,7 +1620,8 @@ void UiTest::hostFileQueuePausesAndResumes()
     host.outgoingFileStarted(
         QStringLiteral("resume-2"),
         QStringLiteral("resume.bin"),
-        4096);
+        4096,
+        path);
     QTest::qWait(10);
     QCOMPARE(panel.fileQueueSize(), 1);
     QVERIFY(panel.fileQueuePaused());

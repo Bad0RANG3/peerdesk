@@ -555,7 +555,7 @@ bool FileSender::start(
         begin.insert(QStringLiteral("resume_of"), resumeOf_);
     }
     sender_(begin);
-    emit started(id_, name_, size_);
+    emit started(id_, name_, size_, path_);
     if (wantsResume) {
         emit progress(id_, sent_, size_);
         resumeTimer_->start(resumeTimeoutMs_);
