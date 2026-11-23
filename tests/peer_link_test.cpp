@@ -7,11 +7,13 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTcpSocket>
 #include <QThread>
+#include <QtEndian>
 #include <QtTest>
 
 #include <algorithm>
@@ -261,6 +263,12 @@ private slots:
         QVERIFY(
             host.udpIoThreadName()
             != QThread::currentThread()->objectName());
+        QCOMPARE(
+            host.authenticatedThreadName(),
+            QStringLiteral("PeerDeskPeerLinkRx"));
+        QVERIFY(
+            host.authenticatedThreadName()
+            != QThread::currentThread()->objectName());
         QVERIFY(waitUntil([&]() {
             return host.stats().sentPackets > 0
                 && host.stats().sentBytes > 0;
@@ -283,6 +291,171 @@ private slots:
 
         client.close();
         QTRY_COMPARE_WITH_TIMEOUT(host.state(), QStringLiteral("closed"), 2000);
+    }
+
+    void authenticatedPacketPipelineRunsOffThread()
+    {
+        AuthenticatedPacketPipeline pipeline;
+        QList<QJsonObject> controls;
+        QList<LinkWireCommand> commands;
+        QList<QPair<quint32, QList<quint16>>> retransmits;
+        QList<double> rttSamples;
+        int byeCount = 0;
+        connect(
+            &pipeline,
+            &AuthenticatedPacketPipeline::controlMessageReceived,
+            [&controls](const QJsonObject &message) {
+                controls.append(message);
+            });
+        connect(
+            &pipeline,
+            &AuthenticatedPacketPipeline::wireCommandReady,
+            [&commands](const LinkWireCommand &command) {
+                commands.append(command);
+            });
+        connect(
+            &pipeline,
+            &AuthenticatedPacketPipeline::videoRetransmitRequested,
+            [&retransmits](quint32 frameId, const QList<quint16> &missing) {
+                retransmits.append(qMakePair(frameId, missing));
+            });
+        connect(
+            &pipeline,
+            &AuthenticatedPacketPipeline::rttMeasured,
+            [&rttSamples](double rttMs) {
+                rttSamples.append(rttMs);
+            });
+        connect(
+            &pipeline,
+            &AuthenticatedPacketPipeline::peerByeReceived,
+            [&byeCount]() { ++byeCount; });
+
+        pipeline.start();
+        QVERIFY(pipeline.running());
+        QCOMPARE(
+            pipeline.workerThreadName(),
+            QStringLiteral("PeerDeskPeerLinkRx"));
+        QVERIFY(
+            pipeline.workerThreadName()
+            != QThread::currentThread()->objectName());
+        const quint64 initialGeneration = pipeline.sessionGeneration();
+        QVERIFY(initialGeneration > 0);
+
+        const QJsonObject outbound{
+            {QStringLiteral("t"), QStringLiteral("async-control")},
+            {QStringLiteral("body"), QString(3000, QChar(u'c'))},
+        };
+        pipeline.sendControl(outbound);
+        QVERIFY(waitUntil([&]() {
+            int controlPackets = 0;
+            for (const LinkWireCommand &command : std::as_const(commands)) {
+                if (command.type == PacketType::Data
+                    && command.stream
+                        == static_cast<quint8>(StreamKind::Control)) {
+                    ++controlPackets;
+                }
+            }
+            return controlPackets >= 3;
+        }));
+
+        QHash<quint32, LinkWireCommand> uniqueControlPackets;
+        for (const LinkWireCommand &command : std::as_const(commands)) {
+            if (command.type != PacketType::Data
+                || command.stream != static_cast<quint8>(StreamKind::Control)
+                || command.payload.size() < 4) {
+                continue;
+            }
+            uniqueControlPackets.insert(
+                qFromLittleEndian<quint32>(command.payload.constData()),
+                command);
+        }
+        QCOMPARE(uniqueControlPackets.size(), qsizetype(3));
+        for (const LinkWireCommand &command : std::as_const(uniqueControlPackets)) {
+            Header header;
+            header.type = PacketType::Data;
+            header.stream = static_cast<quint8>(StreamKind::Control);
+            header.flags = command.flags;
+            header.plen = static_cast<quint16>(command.payload.size());
+            pipeline.receive(header, command.payload);
+        }
+        QVERIFY(waitUntil([&]() { return !controls.isEmpty(); }));
+        QCOMPARE(
+            controls.constFirst().value(QStringLiteral("body")).toString(),
+            QString(3000, QChar(u'c')));
+        QVERIFY(waitUntil([&]() {
+            return std::any_of(
+                commands.cbegin(),
+                commands.cend(),
+                [](const LinkWireCommand &command) {
+                    return command.type == PacketType::Ack;
+                });
+        }));
+
+        commands.clear();
+        pipeline.sendPing();
+        QVERIFY(waitUntil([&]() {
+            return std::any_of(
+                commands.cbegin(),
+                commands.cend(),
+                [](const LinkWireCommand &command) {
+                    return command.type == PacketType::Ping;
+                });
+        }));
+        const auto ping = std::find_if(
+            commands.cbegin(),
+            commands.cend(),
+            [](const LinkWireCommand &command) {
+                return command.type == PacketType::Ping;
+            });
+        QVERIFY(ping != commands.cend());
+        Header pingHeader;
+        pingHeader.type = PacketType::Ping;
+        pingHeader.plen = static_cast<quint16>(ping->payload.size());
+        pipeline.receive(pingHeader, ping->payload);
+        QVERIFY(waitUntil([&]() {
+            return std::any_of(
+                commands.cbegin(),
+                commands.cend(),
+                [](const LinkWireCommand &command) {
+                    return command.type == PacketType::Pong;
+                });
+        }));
+        const auto pong = std::find_if(
+            commands.cbegin(),
+            commands.cend(),
+            [](const LinkWireCommand &command) {
+                return command.type == PacketType::Pong;
+            });
+        QVERIFY(pong != commands.cend());
+        Header pongHeader;
+        pongHeader.type = PacketType::Pong;
+        pongHeader.plen = static_cast<quint16>(pong->payload.size());
+        pipeline.receive(pongHeader, pong->payload);
+        QVERIFY(waitUntil([&]() { return !rttSamples.isEmpty(); }));
+        QVERIFY(rttSamples.constFirst() >= 0.0);
+
+        Header nackHeader;
+        nackHeader.type = PacketType::Nack;
+        const QByteArray nack =
+            packNack(42, QList<quint16>{1, 3});
+        nackHeader.plen = static_cast<quint16>(nack.size());
+        pipeline.receive(nackHeader, nack);
+        QVERIFY(waitUntil([&]() { return !retransmits.isEmpty(); }));
+        QCOMPARE(retransmits.constFirst().first, quint32(42));
+        QCOMPARE(
+            retransmits.constFirst().second,
+            QList<quint16>({1, 3}));
+
+        Header byeHeader;
+        byeHeader.type = PacketType::Bye;
+        pipeline.receive(byeHeader, {});
+        QVERIFY(waitUntil([&]() { return byeCount == 1; }));
+
+        const quint64 beforeReset = pipeline.sessionGeneration();
+        pipeline.resetSession();
+        QVERIFY(pipeline.sessionGeneration() > beforeReset);
+        pipeline.stop();
+        QVERIFY(!pipeline.running());
     }
 
     void videoPacketizerBuildsAndRetransmitsOffThread()

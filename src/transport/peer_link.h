@@ -4,12 +4,12 @@
 #include "core/protocol.h"
 #include "core/reliable.h"
 #include "core/video.h"
+#include "transport/authenticated_packet_pipeline.h"
 #include "transport/udp_io_pipeline.h"
 #include "transport/video_receive_pipeline.h"
 #include "transport/video_send_pipeline.h"
 
 #include <QByteArray>
-#include <QHash>
 #include <QHostAddress>
 #include <QJsonObject>
 #include <QList>
@@ -103,6 +103,7 @@ public:
     [[nodiscard]] QString videoPacketizerThreadName() const;
     [[nodiscard]] QString videoReassemblerThreadName() const;
     [[nodiscard]] QString udpIoThreadName() const;
+    [[nodiscard]] QString authenticatedThreadName() const;
     [[nodiscard]] QList<Candidate> localCandidates() const;
     [[nodiscard]] QList<Candidate> peerCandidates() const;
 
@@ -147,11 +148,8 @@ private:
         bool plain = false,
         std::optional<quint64> sequence = std::nullopt);
 
-    void sendControlRaw(quint32 sequence, const QByteArray &payload, quint8 flags);
-    void maybeAck();
-    void deliverControl(const QByteArray &payload);
+    void onWireCommandReady(const LinkWireCommand &command);
     void sendPing();
-    void handlePong(const QByteArray &payload);
     void requestKeyframe();
     void onVideoFrameReady(const QByteArray &frame, bool keyframe);
     void onVideoNackReady(quint32 frameId, const QList<quint16> &missing);
@@ -204,7 +202,6 @@ private:
     double helloSentAt_ = -1e9;
     double lastRxAt_ = 0;
     double lastPingAt_ = 0;
-    double lastAckAt_ = 0;
     double lastStatsAt_ = 0;
     bool established_ = false;
     QString remoteSessionId_;
@@ -212,11 +209,7 @@ private:
 
     VideoSendPipeline videoSend_;
     VideoReceivePipeline videoReceive_;
-    ControlFragments controlFragments_;
-    ReliableStream controlStream_;
-    quint16 pingSequence_ = 0;
-    QHash<quint16, double> pingsOut_;
-    quint64 keyframeRequests_ = 0;
+    AuthenticatedPacketPipeline authenticatedPackets_;
 
     QString state_ = QStringLiteral("idle");
     LinkStats stats_;

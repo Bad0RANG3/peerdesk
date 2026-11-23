@@ -41,7 +41,7 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 | 路径 | 职责 |
 | --- | --- |
 | `src/core/` | 20 字节报文头、JSON 载荷、视频/控制分片、XOR FEC、可靠流、STUN、X25519/HKDF/AEAD、重放窗口 |
-| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态和视频发送/接收流水线 |
+| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态，以及 UDP I/O、已认证包和视频发送/接收流水线 |
 | `src/server/` | TCP JSON Lines 信令、UDP 中继、STUN、连接频次限制和每会话令牌桶 |
 | `src/client/` | TCP 信令客户端、注册/配对、候选更新和错误映射 |
 | `src/session/` | 被控端/控制端会话、视频、音频、输入工作线程、剪贴板、文件和统计 |
@@ -127,7 +127,7 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   → queued UdpSendJob
   → PeerDeskUdpIo：包头 + AEAD + socket 写
   → UDP 直连或 RLY1 中继
-  → PeerDeskUdpIo 认证 → PeerLink 协议分发
+  → PeerDeskUdpIo 认证 → PeerDeskPeerLinkRx 协议分发
   → PeerDeskVideoReceive：分片解析/重组、XOR FEC、超时丢帧、NACK 判定
   → queued frameReady / nackReady / keyframeRequested
   → PeerLink 主线程：统计、实际发送 NACK/关键帧请求
@@ -246,7 +246,7 @@ Viewer 与被控端的文件批次状态都由 UI 侧 `OutgoingFileQueue` 管理
 Qt 事件循环是主执行体。以下工作都在主线程完成：
 
 - Qt 窗口、画布最终 `drawImage`、菜单、托盘和偏好读写。
-- TCP 信令、已认证 UDP 包的协议分发、ACK/重传决策和画布更新。
+- TCP 信令、已认证 UDP 包的路径锁定、发送调度、会话衔接和画布更新。
 - 文件分块、剪贴板和大部分会话控制。
 - 被控端控制消息的解析和鼠标坐标区域选择；实际系统输入注入提交给独立工作线程。
 
@@ -289,10 +289,20 @@ generation，主线程据此丢弃旧会话路径尚未交付的帧、NACK 和�
 `QUdpSocket` 和唯一的 `CryptoContext`，负责绑定和关闭 socket、入站报文类型识别、
 RLY1 解包、PDTP 包头解析、接收侧 AEAD 与重放检查、构造发送包头、发送侧 AEAD、
 分配发送序号、封装 RLY1、写入 UDP 并维护原子发送统计。只有已解析的握手包、STUN
-候选包或通过认证的加密包会以排队信号回到主线程；`PeerLink` 随后完成协议分发、
-可靠流 ACK 和重传决策。会话密钥通过阻塞调用同步到 worker；每次设置或重置会话都会
-递增接收代际，主线程据此丢弃重置前排队的旧包。回环测试覆盖接收认证、篡改拒绝、
-重放拒绝、RLY1 包装、旧密钥失效、接收代际递增和实际 UDP 收写。
+候选包或通过认证的加密包会以排队信号回到主线程；`PeerLink` 完成路径锁定、统计和
+会话衔接后，再把已认证包排队交给 `AuthenticatedPacketPipeline`。会话密钥通过阻塞
+调用同步到 worker；每次设置或重置会话都会递增接收代际，主线程据此丢弃重置前排队的
+旧包。回环测试覆盖接收认证、篡改拒绝、重放拒绝、RLY1 包装、旧密钥失效、接收代际
+递增和实际 UDP 收写。
+
+`AuthenticatedPacketPipeline` 创建一个名为 `PeerDeskPeerLinkRx` 的 `QThread`，由
+worker 独占控制分片、可靠控制流、ACK 状态、PING/RTT 和 Bye 处理。视频 Data/Parity、
+音频、控制消息、ACK/NACK、Ping/Pong 和 Bye 都通过排队调用进入该线程；worker 将
+重组后的控制消息、视频/音频负载、重传请求和 RTT 以排队信号送回主线程，并通过
+`LinkWireCommand` 请求发送 ACK、Pong 和控制 DATA。主线程仍负责路径锁定、接收统计、
+选择 UDP 路径和实际发送。启动、停止和会话重置使用阻塞调用，generation 隔离重置前
+排队的旧会话结果。回环测试覆盖线程归属、3 KiB 控制消息分片与重组、可靠流 ACK、
+Ping/Pong、RTT、NACK、Bye 和 reset 代际隔离。
 
 `HostInputPipeline` 创建一个名为 `PeerDeskHostInput` 的 `QThread`，由 worker 独占
 唯一的 `IInputSink`，按 FIFO 串行执行鼠标、滚轮、键盘、文本和 `Ctrl+Alt+Del` 注入。
@@ -305,9 +315,9 @@ generation 隔离旧会话命令；停止会先在调用线程拒绝并清空待
 `WasapiLoopbackSource` 内部另有一个 `std::thread`，负责读取 WASAPI loopback PCM，
 随后把数据交回会话路径。
 
-代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；已认证包的协议分发、
-NACK/关键帧请求的实际发送、窗口最终合成和大部分 UI 仍在主线程。被控端输入已移出
-UI 线程，但不能据此宣称完整异步媒体管线或已达到某个性能指标。
+代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；NACK/关键帧请求的实际发送、
+窗口最终合成和大部分 UI 仍在主线程。已认证包处理和被控端输入已移出 UI 线程，但不能
+据此宣称完整异步媒体管线或已达到某个性能指标。
 
 ## 6. 配置、日志与运行边界
 
@@ -371,8 +381,9 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
   独立线程，音频包校验和 µ-law 解码也已移至 FIFO 工作线程，抖动缓冲和 `QAudioSink`
   播放已移至 `PeerDeskAudio` 工作线程，UDP socket 收发、入站类型识别、RLY1 解包、
   包头解析、双向 AEAD、重放检查和发送统计已移至 `PeerDeskUdpIo` 工作线程，被控端
-  输入注入已移至 `PeerDeskHostInput` 工作线程；但已认证包的协议分发、NACK/关键帧
-  请求的实际发送、窗口最终合成和大部分 UI 仍在主线程。
+  输入注入已移至 `PeerDeskHostInput` 工作线程，已认证包分发、控制可靠流、
+  ACK/PING/RTT 和媒体转发已移至 `PeerDeskPeerLinkRx` 工作线程；但 NACK/关键帧请求的
+  实际发送、窗口最终合成和大部分 UI 仍在主线程。
 - 声音是固定 G.711 µ-law，没有 Opus。
 - 文件支持单文件断线续传，但断点只保留 10 分钟，跨机续传仍待真实验收；断点失效时
   回退为整文件重试。接收端同名同大小文件已通过回环测试分配独立路径并隔离断点，但
