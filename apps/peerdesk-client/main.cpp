@@ -1,6 +1,7 @@
 #include "app/audio_output.h"
 #include "app/host_controller.h"
 #include "app/preferences.h"
+#include "app/single_instance.h"
 #include "app/viewer_controller.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
@@ -233,6 +234,24 @@ int main(int argc, char *argv[])
         }
     }
 
+    std::unique_ptr<pd::SingleInstance> instanceGuard;
+    if (!isolated) {
+        const QString instanceName = pd::SingleInstance::defaultServerName();
+        instanceGuard =
+            std::make_unique<pd::SingleInstance>(instanceName);
+        QString instanceError;
+        if (!instanceGuard->listen(&instanceError)) {
+            if (pd::SingleInstance::notifyRunningInstance(instanceName)) {
+                return 0;
+            }
+            if (!instanceGuard->listen(&instanceError)) {
+                printError(QStringLiteral("无法启动客户端：%1")
+                               .arg(instanceError));
+                return 1;
+            }
+        }
+    }
+
     pd::ui::applyTheme(application);
 
     const auto preferences = std::make_shared<pd::Preferences>(
@@ -256,6 +275,15 @@ int main(int argc, char *argv[])
         syntheticAudio || viewerDemo);
 
     pd::ui::AppWindow window(&host, &viewer);
+    if (instanceGuard) {
+        QObject::connect(
+            instanceGuard.get(),
+            &pd::SingleInstance::activationRequested,
+            &window,
+            [&window]() {
+                window.showMainWindow();
+            });
+    }
     QObject::connect(
         &window,
         &pd::ui::AppWindow::quitRequested,

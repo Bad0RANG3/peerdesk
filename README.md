@@ -22,8 +22,9 @@ PeerDesk 以逆向分析得到的 UU远程 交互为参照，持续补齐连接�
 Qt 应用壳均已切换到同一套 C++ 实现，主连接路径可用；真实跨机、弱网和长时间会话
 仍需单独验收。Viewer 在同一连接码下的断线恢复已经接入并通过回环测试；
 连接页会保留最近 4 个成功连接的本地记录，支持一键回填连接码与服务器；
-安装器、自动更新和开机自启尚未完成。旧 Python 实现、Web 前端、PyInstaller 打包和
-pytest 资产已经从仓库移除，构建、测试与 CI 只依赖原生工具链。
+普通模式采用单实例运行，再次启动会唤醒现有窗口。安装器、自动更新和开机自启尚未完成。
+旧 Python 实现、Web 前端、PyInstaller 打包和 pytest 资产已经从仓库移除，构建、测试与
+CI 只依赖原生工具链。
 
 ## 体验目标
 
@@ -36,6 +37,8 @@ pytest 资产已经从仓库移除，构建、测试与 CI 只依赖原生工具
 ## 已实现
 
 - **原生客户端**：Qt 6 Widgets 连接页、被控端面板、Viewer、设置对话框、系统托盘和窗口状态记忆。
+- **单实例运行**：普通启动只保留一个客户端进程；再次启动通过本机命名管道唤醒已有窗口。
+  截图、合成采集、合成音源和 Viewer demo 使用隔离模式，仍可与日常实例并行运行。
 - **最近连接**：成功进入实况后记录最近 4 个对端，按“连接码 + 服务器”去重并置顶；
   点击只回填连接码与服务器，不自动连接，也不保存服务器令牌。记录仅保存在本机，
   可随时从连接页清除。
@@ -113,10 +116,10 @@ cmake --build --preset windows-mingw
 ctest --preset windows-mingw --output-on-failure
 ```
 
-当前有 11 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
+当前有 12 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
 `peerdesk-stun`、`peerdesk-server`、`peerdesk-peer-link`、`peerdesk-session`、
-`peerdesk-signaling-client`、`peerdesk-app-controller`、`peerdesk-ui`、`peerdesk-platform`。
-CI 在 Windows 上配置、编译并执行全部套件。
+`peerdesk-signaling-client`、`peerdesk-app-controller`、`peerdesk-single-instance`、
+`peerdesk-ui`、`peerdesk-platform`。CI 在 Windows 上配置、编译并执行全部套件。
 
 ## 运行
 

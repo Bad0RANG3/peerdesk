@@ -90,6 +90,8 @@ add_library(peerdesk_app STATIC
     src/app/quality_presets.h
     src/app/preferences.cpp
     src/app/preferences.h
+    src/app/single_instance.cpp
+    src/app/single_instance.h
     src/app/audio_output.cpp
     src/app/audio_output.h
     src/app/host_controller.cpp
@@ -264,6 +266,20 @@ target_link_libraries(peerdesk-app-controller-tests
     PRIVATE peerdesk_app peerdesk_server Qt6::Test
 )
 
+add_executable(peerdesk-single-instance-tests
+    tests/single_instance_test.cpp
+)
+target_link_libraries(peerdesk-single-instance-tests
+    PRIVATE peerdesk_app Qt6::Test
+)
+
+add_executable(peerdesk-single-instance-host
+    tests/single_instance_host.cpp
+)
+target_link_libraries(peerdesk-single-instance-host
+    PRIVATE peerdesk_app
+)
+
 add_executable(peerdesk-ui-tests
     tests/ui_test.cpp
 )
@@ -291,7 +307,10 @@ add_test(NAME peerdesk-peer-link COMMAND peerdesk-peer-link-tests)
 add_test(NAME peerdesk-session COMMAND peerdesk-session-tests)
 add_test(NAME peerdesk-signaling-client COMMAND peerdesk-signaling-client-tests)
 add_test(NAME peerdesk-app-controller COMMAND peerdesk-app-controller-tests)
+add_test(NAME peerdesk-single-instance COMMAND peerdesk-single-instance-tests)
 add_test(NAME peerdesk-ui COMMAND peerdesk-ui-tests)
+set_tests_properties(peerdesk-single-instance PROPERTIES
+    ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1")
 set_tests_properties(peerdesk-ui PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(WIN32)
@@ -310,6 +329,7 @@ install(TARGETS
     peerdesk-session-tests
     peerdesk-signaling-client-tests
     peerdesk-app-controller-tests
+    peerdesk-single-instance-tests
     peerdesk-ui-tests
     RUNTIME DESTINATION bin)
 

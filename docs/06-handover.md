@@ -18,7 +18,7 @@ Qt 6.8、CMake 和 Ninja。
 
 - `peerdesk-server`：TCP 信令、UDP 打洞辅助、中继、STUN、令牌、连接频次限制和每会话限速。
 - `peerdesk-client`：9 位连接码、被控端控制、Viewer、键鼠与文本、剪贴板、声音、文件传输、
-  多显示器、设置、系统托盘和窗口状态持久化。
+  多显示器、设置、系统托盘、窗口状态持久化和单实例窗口唤回。
 - PDTP/1：X25519 握手、HKDF 派生、AEAD 数据包、重放窗口、视频分片/FEC/NACK、
   可靠控制流和音频数据包。
 - Windows 平台层：GDI `BitBlt`/`StretchBlt` 抓屏、Win32 `SendInput`、剪贴板 API、
@@ -50,6 +50,11 @@ Viewer 已实现应用层游戏鼠标：勾选工具栏按钮后隐藏本机光�
 按“连接码 + 服务器”去重并把最新记录置顶。点击记录只回填连接码和服务器，保留当前
 令牌，不自动连接；失败或仍在连接的尝试不会写入。记录保存在本机 Qt 偏好中，不包含
 服务器令牌，可从连接页一键清除。
+
+普通客户端启动使用用户级锁保证单实例。第二次启动会连接本机命名管道发送唤醒请求，
+由已有进程恢复、置顶并激活窗口，然后立即退出；不会创建第二个托盘图标。正常退出会
+释放锁，异常终止后新进程也能识别并回收陈旧锁。`--screenshot`、`--capture test`、
+`--audio-test` 和 `--viewer-demo` 属于隔离模式，不参与单实例锁，可并行运行。
 
 以下能力尚未完成，不应写入发布说明：
 
@@ -89,7 +94,7 @@ CMake 预设中的 Qt 路径若与你的安装位置不同，请在本机预设�
 
 ### 2.2 CTest
 
-测试共 11 个套件：
+测试共 12 个套件：
 
 ```text
 peerdesk-core
@@ -101,6 +106,7 @@ peerdesk-peer-link
 peerdesk-session
 peerdesk-signaling-client
 peerdesk-app-controller
+peerdesk-single-instance
 peerdesk-ui
 peerdesk-platform
 ```
@@ -223,13 +229,13 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `src/server/` | TCP 信令、UDP 中继、STUN、令牌、频次限制与中继限速 |
 | `src/client/` | TCP JSON Lines 信令客户端 |
 | `src/session/` | 被控会话、Viewer 会话、音视频处理和文件传输 |
-| `src/app/` | 页面控制器、偏好、最近连接、画质决策、音频播放和错误状态 |
+| `src/app/` | 页面控制器、偏好、最近连接、单实例守卫、画质决策、音频播放和错误状态 |
 | `src/ui/` | 连接页、被控端页、Viewer、设置对话框、托盘与窗口壳 |
 | `src/platform/` | GDI 抓屏、WASAPI、Win32 输入和剪贴板 |
 | `apps/peerdesk-server/` | 服务端进程入口 |
 | `apps/peerdesk-client/` | Qt 客户端入口、启动参数、demo 和截图流程 |
 | `apps/peerdesk-link-harness/` | 双端 UDP 链路诊断工具 |
-| `tests/` | 11 个 CTest 套件与共享测试支持 |
+| `tests/` | 12 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
 
 修改链路问题时，先从 `src/transport/peer_link.*` 和 `src/core/protocol.*` 开始；
 修改界面与会话状态时，从 `src/app/viewer_controller.*`、`src/session/viewer_session.*`
@@ -254,6 +260,8 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | 断线后文件重新开始 | 当前重试语义是整文件重传，不是断点续传；检查断线前已完成的批次统计 |
 | 最近连接为空 | 只有成功进入实况后才会记录；检查偏好是否可写，并可尝试完成一次同服务器连接 |
 | 最近连接没有显示预期服务器 | 记录按连接码和规范化后的服务器去重；确认端口及服务器输入是否一致 |
+| 第二次启动直接退出 | 这是单实例预期行为；已有窗口应被置顶。若未出现，检查同一用户会话、桌面环境和实例锁 |
+| 提示已有实例正在运行但看不到窗口 | 从托盘恢复，或结束残留的 `peerdesk-client.exe` 后重试；不要删除其他用户的实例锁 |
 | UI 测试没有摘要 | 改用 `ctest --preset windows-mingw -R peerdesk-ui -V` |
 | Viewer 截图为空 | 使用 `--page viewer --viewer-demo`，并留出首帧渲染时间 |
 
