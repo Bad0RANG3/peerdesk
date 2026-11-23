@@ -2,13 +2,18 @@
 #include "platform/windows_clipboard.h"
 #include "platform/windows_input.h"
 #include "platform/windows_screen_source.h"
+#include "platform/windows_startup_registration.h"
 
+#include <QDir>
 #include <QRandomGenerator>
+#include <QSettings>
 #include <QTest>
+#include <QUuid>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 using namespace pd;
 
@@ -54,6 +59,35 @@ QList<qint16> decodePcm16(const QByteArray &pcm)
     }
     return samples;
 }
+
+class TemporaryRegistryKey {
+public:
+    explicit TemporaryRegistryKey(QString parent)
+        : parent_(std::move(parent))
+        , name_(QStringLiteral("startup-test-%1").arg(
+              QUuid::createUuid().toString(QUuid::WithoutBraces)))
+    {
+        QSettings settings(parent_, QSettings::NativeFormat);
+        settings.remove(name_);
+        settings.sync();
+    }
+
+    ~TemporaryRegistryKey()
+    {
+        QSettings settings(parent_, QSettings::NativeFormat);
+        settings.remove(name_);
+        settings.sync();
+    }
+
+    [[nodiscard]] QString path() const
+    {
+        return parent_ + QLatin1Char('\\') + name_;
+    }
+
+private:
+    QString parent_;
+    QString name_;
+};
 
 } // namespace
 
@@ -179,6 +213,60 @@ private slots:
         const QRect desktop = input.virtualDesktop();
         QVERIFY(desktop.width() > 0);
         QVERIFY(desktop.height() > 0);
+    }
+
+    void startupCommandQuotesAbsoluteExecutable()
+    {
+        const QString executable = QDir::toNativeSeparators(
+            QStringLiteral("C:/Program Files/PeerDesk/peerdesk-client.exe"));
+        QCOMPARE(
+            WindowsStartupRegistration::commandForExecutable(executable),
+            QStringLiteral("\"%1\" --background").arg(executable));
+
+        const QString relative = QStringLiteral("peerdesk-client.exe");
+        const QString absolute = QDir::toNativeSeparators(
+            QDir::current().absoluteFilePath(relative));
+        QCOMPARE(
+            WindowsStartupRegistration::commandForExecutable(relative),
+            QStringLiteral("\"%1\" --background").arg(absolute));
+
+        QVERIFY(WindowsStartupRegistration::commandForExecutable(
+                    QString()).isEmpty());
+        QVERIFY(WindowsStartupRegistration::commandForExecutable(
+                    QStringLiteral("C:\\bad\"path\\peerdesk-client.exe"))
+                    .isEmpty());
+    }
+
+    void windowsStartupRegistrationRoundTrip()
+    {
+        TemporaryRegistryKey key(
+            QStringLiteral("HKEY_CURRENT_USER\\Software\\PeerDesk\\Tests"));
+        const QString executable = QStringLiteral(
+            "C:\\Program Files\\PeerDesk\\peerdesk-client.exe");
+        const QString valueName = QStringLiteral("PeerDeskStartupTest");
+        WindowsStartupRegistration registration(
+            executable,
+            key.path(),
+            valueName);
+
+        QVERIFY(registration.isSupported());
+        QVERIFY(!registration.isEnabled());
+        QVERIFY(registration.registeredCommand().isEmpty());
+
+        QString error = QStringLiteral("stale");
+        QVERIFY2(registration.setEnabled(true, &error), qPrintable(error));
+        QVERIFY(error.isEmpty());
+        QVERIFY(registration.isEnabled());
+        QCOMPARE(
+            registration.registeredCommand(),
+            WindowsStartupRegistration::commandForExecutable(executable));
+
+        QVERIFY2(registration.setEnabled(false, &error), qPrintable(error));
+        QVERIFY(!registration.isEnabled());
+        QVERIFY(registration.registeredCommand().isEmpty());
+
+        QSettings direct(key.path(), QSettings::NativeFormat);
+        QVERIFY(!direct.contains(valueName));
     }
 
     void clipboardRoundTrip()

@@ -12,6 +12,7 @@ class QPushButton;
 namespace pd {
 class HostController;
 class Preferences;
+class StartupRegistration;
 class ViewerController;
 } // namespace pd
 
@@ -29,6 +30,7 @@ public:
         ViewerController *viewer,
         std::shared_ptr<Preferences> preferences,
         ConnectionPage *connectionPage,
+        std::shared_ptr<StartupRegistration> startupRegistration = {},
         QWidget *parent = nullptr);
 
     [[nodiscard]] QLineEdit *serverInput() const { return serverInput_; }
@@ -44,6 +46,11 @@ public:
     {
         return closeToTrayToggle_;
     }
+    [[nodiscard]] ToggleSwitch *startupToggle() const
+    {
+        return startupToggle_;
+    }
+    [[nodiscard]] QLabel *startupNote() const { return startupNote_; }
     [[nodiscard]] QLabel *errorLabel() const { return errorLabel_; }
     [[nodiscard]] QPushButton *saveButton() const { return saveButton_; }
 
@@ -66,6 +73,7 @@ private:
     ViewerController *viewer_ = nullptr;
     std::shared_ptr<Preferences> preferences_;
     ConnectionPage *connectionPage_ = nullptr;
+    std::shared_ptr<StartupRegistration> startupRegistration_;
 
     QLineEdit *serverInput_ = nullptr;
     QLineEdit *tokenInput_ = nullptr;
@@ -74,6 +82,8 @@ private:
     QLineEdit *receiveDirectoryInput_ = nullptr;
     QPushButton *browseButton_ = nullptr;
     ToggleSwitch *closeToTrayToggle_ = nullptr;
+    ToggleSwitch *startupToggle_ = nullptr;
+    QLabel *startupNote_ = nullptr;
     QLabel *errorLabel_ = nullptr;
     QPushButton *saveButton_ = nullptr;
 };

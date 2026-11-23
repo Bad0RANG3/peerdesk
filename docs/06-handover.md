@@ -18,7 +18,7 @@ Qt 6.8、CMake 和 Ninja。
 
 - `peerdesk-server`：TCP 信令、UDP 打洞辅助、中继、STUN、令牌、连接频次限制和每会话限速。
 - `peerdesk-client`：9 位连接码、被控端控制、Viewer、键鼠与文本、剪贴板、声音、文件传输、
-  多显示器、设置、系统托盘、窗口状态持久化和单实例窗口唤回。
+  多显示器、设置、系统托盘、窗口状态持久化、单实例窗口唤回和当前用户登录启动。
 - PDTP/1：X25519 握手、HKDF 派生、AEAD 数据包、重放窗口、视频分片/FEC/NACK、
   可靠控制流和音频数据包。
 - Windows 平台层：GDI `BitBlt`/`StretchBlt` 抓屏、Win32 `SendInput`、剪贴板 API、
@@ -56,10 +56,17 @@ Viewer 已实现应用层游戏鼠标：勾选工具栏按钮后隐藏本机光�
 释放锁，异常终止后新进程也能识别并回收陈旧锁。`--screenshot`、`--capture test`、
 `--audio-test` 和 `--viewer-demo` 属于隔离模式，不参与单实例锁，可并行运行。
 
+设置对话框可维护当前 Windows 用户
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `PeerDesk` 值。启用时写入
+带引号的绝对可执行路径加 `--background`，关闭时删除该值，不需要管理员权限。
+`--background` 仍参与单实例锁，会开始本机被控并在托盘可用时隐藏窗口；托盘不可用时
+回退显示主窗口。注册表读写、UI 开关和后台启动已有回环测试，但尚未完成真实 Windows
+注销/重启验收。
+
 以下能力尚未完成，不应写入发布说明：
 
 - 真实跨机、NAT、弱网、信令长时间不可用和进程重启下的恢复验收，以及文件/媒体断点续传。
-- Windows 安装包、自动更新和可配置开机自启。
+- 真实登录/重启后的启动项、托盘驻留和窗口回退验收，以及 Windows 安装包和自动更新。
 - 两台真实 Windows 主机上的系统验收与正式性能基线。
 - 虚拟显示器、虚拟 HID、广泛游戏兼容性、拥塞控制和较长会话的稳定性证明。
 
@@ -167,6 +174,7 @@ Qt UI 测试必须通过 CTest 执行。CTest 会设置离屏平台并收集退�
 | `--token <value>` | 指定服务端令牌 |
 | `--code <9 digits>` | 预填连接码 |
 | `--page remote\|host\|viewer` | 指定启动页面 |
+| `--background` | 登录启动模式：驻留托盘并保持本机可被控；托盘不可用时显示窗口 |
 | `--viewer-demo` | 使用 Viewer 合成画面，禁止真实输入、文件与音频副作用 |
 | `--capture native\|test` | 选择真实 GDI 抓屏或合成屏幕 |
 | `--audio-test` | 使用合成测试音源 |
@@ -231,7 +239,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `src/session/` | 被控会话、Viewer 会话、音视频处理和文件传输 |
 | `src/app/` | 页面控制器、偏好、最近连接、单实例守卫、画质决策、音频播放和错误状态 |
 | `src/ui/` | 连接页、被控端页、Viewer、设置对话框、托盘与窗口壳 |
-| `src/platform/` | GDI 抓屏、WASAPI、Win32 输入和剪贴板 |
+| `src/platform/` | GDI 抓屏、WASAPI、Win32 输入、剪贴板和当前用户启动项 |
 | `apps/peerdesk-server/` | 服务端进程入口 |
 | `apps/peerdesk-client/` | Qt 客户端入口、启动参数、demo 和截图流程 |
 | `apps/peerdesk-link-harness/` | 双端 UDP 链路诊断工具 |
@@ -262,6 +270,9 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | 最近连接没有显示预期服务器 | 记录按连接码和规范化后的服务器去重；确认端口及服务器输入是否一致 |
 | 第二次启动直接退出 | 这是单实例预期行为；已有窗口应被置顶。若未出现，检查同一用户会话、桌面环境和实例锁 |
 | 提示已有实例正在运行但看不到窗口 | 从托盘恢复，或结束残留的 `peerdesk-client.exe` 后重试；不要删除其他用户的实例锁 |
+| 设置页无法启用登录启动 | 查看对话框错误文本，并检查当前用户是否有权限写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`；组策略可能限制启动项 |
+| 登录后没有看到窗口 | `--background` 在托盘可用时会隐藏窗口，从托盘恢复；若托盘不可用则本应回退显示，检查 Explorer 托盘状态和应用是否被单实例唤醒 |
+| 需要彻底关闭登录启动 | 在设置中关闭“登录时启动 PeerDesk”，或删除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下名为 `PeerDesk` 的值 |
 | UI 测试没有摘要 | 改用 `ctest --preset windows-mingw -R peerdesk-ui -V` |
 | Viewer 截图为空 | 使用 `--page viewer --viewer-demo`，并留出首帧渲染时间 |
 
@@ -287,7 +298,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 1. 用两台真实 Windows 主机验收直连、中继、弱网、断线恢复、多屏、文件传输和长会话。
 2. 建立真实网络故障注入矩阵，记录恢复期限、输入隔离、重复断线和可靠流补洞行为。
 3. 建立可复现的抓屏、编码、端到端延迟与带宽基线，再决定优化顺序。
-4. 产品化：安装包、自动更新、开机自启策略、崩溃诊断和版本升级路径。
+4. 产品化：真实登录/重启验收、安装包、自动更新、崩溃诊断和版本升级路径。
 5. 媒体升级：H.264 与 Opus 动态接入，失败时保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID、真实游戏兼容性与拥塞控制。
 7. 交互低摩擦入口：在本地历史之上评估收藏、二维码和账号云同步，明确隐私边界后再实现。
@@ -304,4 +315,5 @@ git status --short
 ```
 
 只暂存本次改动涉及的文件，确认暂存区后再提交并推送。版本号位于 `CMakeLists.txt`
-的 `project(... VERSION 0.7.0)`；安装器与自动更新尚未实现，发布说明不得提前宣称。
+的 `project(... VERSION 0.7.0)`；登录启动已完成当前用户注册表路径和回环测试，但真实
+登录/重启验收、安装器与自动更新尚未完成，发布说明不得提前宣称。

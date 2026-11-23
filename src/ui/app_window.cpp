@@ -91,6 +91,7 @@ void setNavChecked(QPushButton *button, bool checked)
 AppWindow::AppWindow(
     HostController *host,
     ViewerController *viewer,
+    std::shared_ptr<StartupRegistration> startupRegistration,
     QWidget *parent)
     : BackdropWidget(parent)
     , host_(host)
@@ -98,6 +99,7 @@ AppWindow::AppWindow(
     , preferences_(
           host_->preferences() ? host_->preferences()
                                : viewer_->preferences())
+    , startupRegistration_(std::move(startupRegistration))
 {
     Q_ASSERT(host_);
     Q_ASSERT(viewer_);
@@ -580,6 +582,13 @@ void AppWindow::showMainWindow()
     activateWindow();
 }
 
+bool AppWindow::startInBackground()
+{
+    const bool trayReady = prepareTray();
+    hostPanel_->activate();
+    return trayReady;
+}
+
 void AppWindow::showSettings()
 {
     showMainWindow();
@@ -600,6 +609,7 @@ void AppWindow::ensureSettingsDialog()
         viewer_,
         preferences_,
         connectionPage_,
+        startupRegistration_,
         this);
     connect(
         settingsDialog_,

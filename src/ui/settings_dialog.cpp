@@ -5,6 +5,7 @@
 #include "app/quality_presets.h"
 #include "app/viewer_controller.h"
 #include "core/util.h"
+#include "platform/startup_registration.h"
 #include "session/session_types.h"
 #include "ui/connection_page.h"
 #include "ui/ui_theme.h"
@@ -22,6 +23,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 
 namespace pd::ui {
 namespace {
@@ -62,12 +64,14 @@ SettingsDialog::SettingsDialog(
     ViewerController *viewer,
     std::shared_ptr<Preferences> preferences,
     ConnectionPage *connectionPage,
+    std::shared_ptr<StartupRegistration> startupRegistration,
     QWidget *parent)
     : QDialog(parent)
     , host_(host)
     , viewer_(viewer)
     , preferences_(std::move(preferences))
     , connectionPage_(connectionPage)
+    , startupRegistration_(std::move(startupRegistration))
 {
     Q_ASSERT(host_);
     Q_ASSERT(viewer_);
@@ -204,6 +208,25 @@ void SettingsDialog::buildUi()
         QStringLiteral("关闭主窗口后继续运行，可从托盘恢复或退出"),
         closeToTrayToggle_,
         content));
+
+    layout->addSpacing(2);
+    layout->addWidget(makeSectionTitle(
+        QStringLiteral("系统"),
+        content));
+    startupToggle_ = new ToggleSwitch(content);
+    startupToggle_->setObjectName(
+        QStringLiteral("settingsStartupToggle"));
+    startupToggle_->setAccessibleName(
+        QStringLiteral("登录时启动 PeerDesk"));
+    layout->addWidget(makeSwitchRow(
+        QStringLiteral("登录时启动 PeerDesk"),
+        QStringLiteral("登录后驻留系统托盘并保持本机可被控"),
+        startupToggle_,
+        content));
+    startupNote_ = makeNote(QString(), content);
+    startupNote_->setObjectName(
+        QStringLiteral("settingsStartupNote"));
+    layout->addWidget(startupNote_);
     layout->addWidget(makeNote(
         QStringLiteral("服务器和令牌会用于下一次连接，不会中断当前会话；画质和声音立即生效。"),
         content));
@@ -260,6 +283,11 @@ void SettingsDialog::buildUi()
         &QLineEdit::textChanged,
         this,
         [this]() { errorLabel_->hide(); });
+    connect(
+        startupToggle_,
+        &QAbstractButton::toggled,
+        this,
+        [this]() { errorLabel_->hide(); });
 }
 
 void SettingsDialog::reload()
@@ -286,6 +314,18 @@ void SettingsDialog::applyPreferences()
     receiveDirectoryInput_->setText(viewerPreferences.receiveDirectory);
     closeToTrayToggle_->setCheckedSilently(
         preferences_ ? preferences_->window().closeToTray : true);
+
+    const bool startupSupported =
+        startupRegistration_ && startupRegistration_->isSupported();
+    startupToggle_->setEnabled(startupSupported);
+    startupToggle_->setCursor(
+        startupSupported ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    startupToggle_->setCheckedSilently(
+        startupSupported && startupRegistration_->isEnabled());
+    startupNote_->setText(
+        startupSupported
+            ? QStringLiteral("仅对当前 Windows 用户生效，不需要管理员权限；可随时在这里关闭。")
+            : QStringLiteral("当前平台不支持登录时启动。"));
 }
 
 void SettingsDialog::showError(const QString &message)
@@ -309,10 +349,24 @@ void SettingsDialog::save()
         qualityCombo_->currentData().toString();
     const bool audio = audioToggle_->isChecked();
     const bool closeToTray = closeToTrayToggle_->isChecked();
+    const bool startupEnabled = startupToggle_->isChecked();
     QString receiveDirectory = receiveDirectoryInput_->text().trimmed();
     if (receiveDirectory.isEmpty()) {
         receiveDirectory = defaultReceiveDirectory();
         receiveDirectoryInput_->setText(receiveDirectory);
+    }
+
+    if (startupRegistration_ && startupRegistration_->isSupported()
+        && startupRegistration_->isEnabled() != startupEnabled) {
+        QString startupError;
+        if (!startupRegistration_->setEnabled(
+                startupEnabled,
+                &startupError)) {
+            showError(startupError.isEmpty()
+                    ? QStringLiteral("无法更新登录时启动设置")
+                    : startupError);
+            return;
+        }
     }
 
     host_->setServer(server);

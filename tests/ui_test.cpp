@@ -1,6 +1,7 @@
 #include "app/host_controller.h"
 #include "app/preferences.h"
 #include "app/viewer_controller.h"
+#include "platform/startup_registration.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
 #include "ui/code_input.h"
@@ -41,6 +42,48 @@ std::shared_ptr<pd::Preferences> testPreferences()
         pd::Preferences::Mode::Ephemeral);
 }
 
+class FakeStartupRegistration final : public pd::StartupRegistration {
+public:
+    [[nodiscard]] bool isSupported() const override
+    {
+        return supported;
+    }
+
+    [[nodiscard]] bool isEnabled() const override
+    {
+        return enabled;
+    }
+
+    [[nodiscard]] QString registeredCommand() const override
+    {
+        return enabled
+            ? QStringLiteral("\"C:\\PeerDesk\\peerdesk-client.exe\" --background")
+            : QString();
+    }
+
+    bool setEnabled(bool value, QString *error = nullptr) override
+    {
+        ++setCalls;
+        if (failNextSet) {
+            failNextSet = false;
+            if (error) {
+                *error = QStringLiteral("模拟启动项写入失败");
+            }
+            return false;
+        }
+        enabled = value;
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    bool supported = true;
+    bool enabled = false;
+    bool failNextSet = false;
+    int setCalls = 0;
+};
+
 } // namespace
 
 class UiTest final : public QObject {
@@ -77,6 +120,8 @@ private slots:
     void closeToTrayHidesAndExplicitQuitWorks();
     void appWindowLoadsAndClearsRecentConnections();
     void settingsUpdateControllersAndConnectionPage();
+    void settingsStartupRegistrationRoundTrip();
+    void appWindowStartsInBackgroundOnlyWithTray();
 };
 
 void UiTest::initTestCase()
@@ -1496,6 +1541,83 @@ void UiTest::settingsUpdateControllersAndConnectionPage()
     QCOMPARE(preferences->viewer().receiveDirectory, receiveDirectory.path());
     QVERIFY(!preferences->window().closeToTray);
     QVERIFY(dialog->isHidden());
+}
+
+void UiTest::settingsStartupRegistrationRoundTrip()
+{
+    const auto preferences = testPreferences();
+    auto startup = std::make_shared<FakeStartupRegistration>();
+    startup->enabled = true;
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow window(&host, &viewer, startup);
+    window.hostPanel()->setAutoStart(false);
+    window.setTrayAvailableForTesting(false);
+    window.show();
+    QTest::qWait(20);
+    window.settingsButton()->click();
+
+    auto *dialog = window.settingsDialog();
+    QVERIFY(dialog);
+    QVERIFY(dialog->startupToggle());
+    QVERIFY(dialog->startupToggle()->isEnabled());
+    QVERIFY(dialog->startupToggle()->isChecked());
+    QSignalSpy saved(dialog, &pd::ui::SettingsDialog::settingsSaved);
+
+    dialog->startupToggle()->setChecked(false);
+    dialog->saveButton()->click();
+    QCOMPARE(startup->setCalls, 1);
+    QVERIFY(!startup->enabled);
+    QCOMPARE(saved.count(), 1);
+    QVERIFY(dialog->isHidden());
+
+    window.settingsButton()->click();
+    QVERIFY(!dialog->startupToggle()->isChecked());
+    startup->failNextSet = true;
+    dialog->startupToggle()->setChecked(true);
+    dialog->saveButton()->click();
+    QCOMPARE(startup->setCalls, 2);
+    QVERIFY(!startup->enabled);
+    QVERIFY(dialog->isVisible());
+    QVERIFY(dialog->errorLabel()->isVisible());
+    QVERIFY(dialog->errorLabel()->text().contains(QStringLiteral("失败")));
+    QCOMPARE(saved.count(), 1);
+
+    dialog->saveButton()->click();
+    QCOMPARE(startup->setCalls, 3);
+    QVERIFY(startup->enabled);
+    QCOMPARE(saved.count(), 2);
+    QVERIFY(dialog->isHidden());
+
+    startup->supported = false;
+    window.settingsButton()->click();
+    QVERIFY(!dialog->startupToggle()->isEnabled());
+    QVERIFY(!dialog->startupToggle()->isChecked());
+    QVERIFY(dialog->startupNote()->text().contains(QStringLiteral("不支持")));
+}
+
+void UiTest::appWindowStartsInBackgroundOnlyWithTray()
+{
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.setTrayAvailableForTesting(true);
+    QVERIFY(window.startInBackground());
+    QVERIFY(!window.isVisible());
+
+    pd::ui::AppWindow fallback(&host, &viewer);
+    fallback.hostPanel()->setAutoStart(false);
+    fallback.setTrayAvailableForTesting(false);
+    QVERIFY(!fallback.startInBackground());
+    QVERIFY(!fallback.isVisible());
 }
 
 QTEST_MAIN(UiTest)

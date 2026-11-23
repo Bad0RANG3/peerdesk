@@ -19,6 +19,7 @@ class QTimer;
 namespace pd {
 class HostController;
 class Preferences;
+class StartupRegistration;
 class ViewerController;
 } // namespace pd
 
@@ -37,6 +38,7 @@ public:
     explicit AppWindow(
         HostController *host,
         ViewerController *viewer,
+        std::shared_ptr<StartupRegistration> startupRegistration = {},
         QWidget *parent = nullptr);
 
     [[nodiscard]] ConnectionPage *connectionPage() const
@@ -66,6 +68,7 @@ public:
     }
     [[nodiscard]] QWidget *currentPage() const;
     void setTrayAvailableForTesting(bool available);
+    [[nodiscard]] bool startInBackground();
 
 public slots:
     void showRemotePage();
@@ -107,6 +110,7 @@ private:
     HostController *host_ = nullptr;
     ViewerController *viewer_ = nullptr;
     std::shared_ptr<Preferences> preferences_;
+    std::shared_ptr<StartupRegistration> startupRegistration_;
     QStackedWidget *stack_ = nullptr;
     QWidget *header_ = nullptr;
     ConnectionPage *connectionPage_ = nullptr;

@@ -3,6 +3,7 @@
 #include "app/preferences.h"
 #include "app/single_instance.h"
 #include "app/viewer_controller.h"
+#include "platform/startup_registration.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
 #include "ui/host_panel.h"
@@ -15,6 +16,7 @@
 #include "platform/windows_clipboard.h"
 #include "platform/windows_input.h"
 #include "platform/windows_screen_source.h"
+#include "platform/windows_startup_registration.h"
 #endif
 
 #include <QApplication>
@@ -130,6 +132,9 @@ int main(int argc, char *argv[])
     parser.addHelpOption();
     parser.addVersionOption();
 
+    const QCommandLineOption backgroundOption(
+        QStringList{QStringLiteral("background")},
+        QStringLiteral("登录启动模式：驻留系统托盘并保持本机可被控"));
     const QCommandLineOption serverOption(
         QStringList{QStringLiteral("server")},
         QStringLiteral("信令服务器地址，例如 192.168.1.2:7900"),
@@ -168,6 +173,7 @@ int main(int argc, char *argv[])
         QStringLiteral("milliseconds"));
 
     parser.addOptions({
+        backgroundOption,
         serverOption,
         tokenOption,
         codeOption,
@@ -207,6 +213,8 @@ int main(int argc, char *argv[])
     const bool hasScreenshot = parser.isSet(screenshotOption);
     const bool isolated =
         hasScreenshot || syntheticCapture || syntheticAudio || viewerDemo;
+    const bool background =
+        parser.isSet(backgroundOption) && !isolated;
 
     bool delayOk = true;
     const int exitAfter = parser.isSet(exitAfterOption)
@@ -274,7 +282,12 @@ int main(int argc, char *argv[])
         syntheticCapture || viewerDemo,
         syntheticAudio || viewerDemo);
 
-    pd::ui::AppWindow window(&host, &viewer);
+    std::shared_ptr<pd::StartupRegistration> startupRegistration;
+#ifdef Q_OS_WIN
+    startupRegistration =
+        std::make_shared<pd::WindowsStartupRegistration>();
+#endif
+    pd::ui::AppWindow window(&host, &viewer, startupRegistration);
     if (instanceGuard) {
         QObject::connect(
             instanceGuard.get(),
@@ -292,7 +305,10 @@ int main(int argc, char *argv[])
     if (isolated) {
         window.hostPanel()->setAutoStart(false);
     }
-    if (viewerDemo) {
+    bool startHidden = false;
+    if (background) {
+        startHidden = window.startInBackground();
+    } else if (viewerDemo) {
         pd::SyntheticScreenSource demoSource(1600, 900, true);
         QTimer demoTimer;
         window.resize(1600, 900);
@@ -350,9 +366,11 @@ int main(int argc, char *argv[])
             host.stop();
         });
 
-    window.show();
-    window.raise();
-    window.activateWindow();
+    if (!startHidden) {
+        window.show();
+        window.raise();
+        window.activateWindow();
+    }
 
     if (hasScreenshot) {
         QTimer::singleShot(450, &window, [&window, page, screenshotPath]() {

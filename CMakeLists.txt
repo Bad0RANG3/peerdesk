@@ -133,6 +133,7 @@ if(WIN32)
     add_library(peerdesk_platform STATIC
         src/platform/pcm_resampler.cpp
         src/platform/pcm_resampler.h
+        src/platform/startup_registration.h
         src/platform/wasapi_audio.cpp
         src/platform/wasapi_audio.h
         src/platform/windows_clipboard.cpp
@@ -141,6 +142,8 @@ if(WIN32)
         src/platform/windows_input.h
         src/platform/windows_screen_source.cpp
         src/platform/windows_screen_source.h
+        src/platform/windows_startup_registration.cpp
+        src/platform/windows_startup_registration.h
     )
     target_link_libraries(peerdesk_platform
         PUBLIC peerdesk_session Qt6::Core Qt6::Gui
