@@ -739,6 +739,157 @@ private slots:
         QVERIFY(!receiver.contains(QStringLiteral("resume-new")));
     }
 
+    void fileReceiverDisambiguatesSameNameAndSizeResumes()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QByteArray firstPayload = makePayload(360000, 0xD44F2);
+        const QByteArray secondPayload = makePayload(360000, 0xE55A3);
+        QCOMPARE(firstPayload.size(), secondPayload.size());
+        QVERIFY(firstPayload != secondPayload);
+        const qsizetype split = 145000;
+
+        FileReceiver receiver(directory.path());
+        QString error;
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("same-old-a"),
+                QStringLiteral("same.bin"),
+                firstPayload.size(),
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("same-old-a"),
+                firstPayload.left(split),
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("same-old-b"),
+                QStringLiteral("same.bin"),
+                secondPayload.size(),
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("same-old-b"),
+                secondPayload.left(split),
+                &error),
+            qPrintable(error));
+
+        qint64 firstOffset = -1;
+        qint64 secondOffset = -1;
+        bool firstResumed = false;
+        bool secondResumed = false;
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("same-new-a"),
+                QStringLiteral("same.bin"),
+                firstPayload.size(),
+                &error,
+                QStringLiteral("same-old-a"),
+                &firstOffset,
+                &firstResumed),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("same-new-b"),
+                QStringLiteral("same.bin"),
+                secondPayload.size(),
+                &error,
+                QStringLiteral("same-old-b"),
+                &secondOffset,
+                &secondResumed),
+            qPrintable(error));
+        QVERIFY(firstResumed);
+        QVERIFY(secondResumed);
+        QCOMPARE(firstOffset, qint64(split));
+        QCOMPARE(secondOffset, qint64(split));
+        QVERIFY(!receiver.contains(QStringLiteral("same-old-a")));
+        QVERIFY(!receiver.contains(QStringLiteral("same-old-b")));
+        QVERIFY(receiver.contains(QStringLiteral("same-new-a")));
+        QVERIFY(receiver.contains(QStringLiteral("same-new-b")));
+
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("same-new-a"),
+                firstPayload.mid(split),
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("same-new-b"),
+                secondPayload.mid(split),
+                &error),
+            qPrintable(error));
+
+        QString firstPath;
+        QString secondPath;
+        QVERIFY2(
+            receiver.finish(
+                QStringLiteral("same-new-a"),
+                &firstPath,
+                nullptr,
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.finish(
+                QStringLiteral("same-new-b"),
+                &secondPath,
+                nullptr,
+                &error),
+            qPrintable(error));
+        QCOMPARE(
+            QFileInfo(firstPath).fileName(),
+            QStringLiteral("same.bin"));
+        QCOMPARE(
+            QFileInfo(secondPath).fileName(),
+            QStringLiteral("same (1).bin"));
+        QCOMPARE(readBytes(firstPath), firstPayload);
+        QCOMPARE(readBytes(secondPath), secondPayload);
+    }
+
+    void uniqueFileNameKeepsCollisionSuffixWithinWindowsLimit()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString stem(251, QLatin1Char('a'));
+        const QString fileName = stem + QStringLiteral(".txt");
+        QCOMPARE(fileName.size(), 255);
+        const QString occupied = directory.filePath(fileName);
+        const QSet<QString> reserved{occupied};
+
+        const QString alternative =
+            uniqueFilePath(directory.path(), fileName, reserved);
+        QVERIFY(!alternative.isEmpty());
+        QVERIFY(QFileInfo(alternative).absoluteFilePath()
+                != QFileInfo(occupied).absoluteFilePath());
+        const QString alternativeName =
+            QFileInfo(alternative).fileName();
+        QVERIFY(alternativeName.size() <= 255);
+        QVERIFY(alternativeName.endsWith(QStringLiteral(".txt")));
+        QVERIFY(alternativeName.contains(QStringLiteral(" (1)")));
+        QVERIFY(alternativeName.startsWith(
+            QString(247, QLatin1Char('a'))));
+
+        const QString surrogateName =
+            QString(246, QLatin1Char('b')) + QStringLiteral("😀.txt");
+        const QString surrogateOccupied =
+            directory.filePath(surrogateName);
+        const QSet<QString> surrogateReserved{surrogateOccupied};
+        const QString surrogateAlternative =
+            uniqueFilePath(
+                directory.path(),
+                surrogateName,
+                surrogateReserved);
+        QVERIFY(!surrogateAlternative.isEmpty());
+        QCOMPARE(
+            QFileInfo(surrogateAlternative).fileName(),
+            QString(246, QLatin1Char('b'))
+                + QStringLiteral(" (1).txt"));
+    }
+
     void fileReceiverRejectsInvalidOrExpiredResume()
     {
         QTemporaryDir directory;

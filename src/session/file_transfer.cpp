@@ -16,6 +16,8 @@ namespace pd {
 
 namespace {
 
+constexpr int kMaxBaseNameUnits = 255;
+
 QString normalizedForCompare(const QString &path)
 {
     return QDir::cleanPath(QFileInfo(path).absoluteFilePath())
@@ -34,6 +36,25 @@ QString reservedName(const QString &name)
 qint64 nowMs()
 {
     return QDateTime::currentMSecsSinceEpoch();
+}
+
+QString numberedFileName(
+    const QString &stem,
+    const QString &suffix,
+    int index)
+{
+    const QString marker = QStringLiteral(" (%1)").arg(index);
+    const int maximumStemUnits =
+        kMaxBaseNameUnits - marker.size() - suffix.size();
+    if (maximumStemUnits < 0) {
+        return {};
+    }
+    QString shortened = stem.left(maximumStemUnits);
+    if (!shortened.isEmpty()
+        && shortened.back().isHighSurrogate()) {
+        shortened.chop(1);
+    }
+    return shortened + marker + suffix;
 }
 
 } // namespace
@@ -162,14 +183,16 @@ QString uniqueFilePath(
 
     const QFileInfo info(fileName);
     const QString stem = info.completeBaseName();
-    const QString suffix = info.suffix();
+    const QString fileSuffix = info.suffix();
     const QString dotSuffix =
-        suffix.isEmpty() ? QString() : QStringLiteral(".") + suffix;
+        fileSuffix.isEmpty() ? QString() : QStringLiteral(".") + fileSuffix;
     for (int index = 1; index <= 9999; ++index) {
-        candidate = dir.filePath(QStringLiteral("%1 (%2)%3")
-                                     .arg(stem)
-                                     .arg(index)
-                                     .arg(dotSuffix));
+        const QString numbered =
+            numberedFileName(stem, dotSuffix, index);
+        if (numbered.isEmpty()) {
+            return {};
+        }
+        candidate = dir.filePath(numbered);
         if (!taken(candidate)) {
             return candidate;
         }
