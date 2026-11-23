@@ -907,11 +907,14 @@ private slots:
         AuthenticatedPacketPipeline authenticatedPackets;
         QList<quint32> keyframeSequences;
         QSet<quint32> keyframeRequests;
+        QList<QJsonObject> keyframeRequestPayloads;
         connect(
             &authenticatedPackets,
             &AuthenticatedPacketPipeline::wireCommandReady,
             this,
-            [&keyframeSequences, &keyframeRequests](
+            [&keyframeSequences,
+             &keyframeRequests,
+             &keyframeRequestPayloads](
                 const LinkWireCommand &command) {
                 if (command.type != PacketType::Data
                     || command.stream
@@ -933,6 +936,7 @@ private slots:
                            .toString()
                         == QStringLiteral("keyframe_req")) {
                     keyframeRequests.insert(sequence);
+                    keyframeRequestPayloads.append(document.object());
                 }
             });
         authenticatedPackets.start();
@@ -989,6 +993,12 @@ private slots:
         QVERIFY(waitUntil([&]() { return !keyframeRequests.isEmpty(); }));
         pumpEvents(100);
         QCOMPARE(keyframeRequests.size(), qsizetype(1));
+        QCOMPARE(keyframeRequestPayloads.size(), qsizetype(1));
+        QCOMPARE(
+            keyframeRequestPayloads.constFirst()
+                .value(QStringLiteral("loss"))
+                .toBool(),
+            true);
 
         pumpEvents(250);
         feedback.submitKeyframe(feedback.generation());

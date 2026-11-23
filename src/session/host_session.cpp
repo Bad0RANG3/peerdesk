@@ -258,6 +258,10 @@ void HostSession::startStreaming()
     }
 
     QString pipelineError;
+    adaptiveRate_.reset(settings_.quality, settings_.fps);
+    lossKeyframeRequests_ = 0;
+    adaptiveClock_.restart();
+    applyAdaptiveLimits();
     if (!videoPipeline_.start(
             settings_,
             settings_.quality,
@@ -303,6 +307,9 @@ void HostSession::stopStreaming()
     inputPipeline_.stop();
     (void)fileTransfer_.interruptSend(QStringLiteral("interrupted"));
     audioCarry_.clear();
+    lossKeyframeRequests_ = 0;
+    adaptiveRate_.reset(settings_.quality, settings_.fps);
+    applyAdaptiveLimits();
     if (wasRunning) {
         emit logMessage(QStringLiteral("会话已停止"));
     }
@@ -348,6 +355,8 @@ void HostSession::setSettings(const VideoSettings &settings)
 {
     settings_ = settings;
     settings_.clamp();
+    adaptiveRate_.setCeilings(settings_.quality, settings_.fps);
+    applyAdaptiveLimits();
     if (running_) {
         refreshMonitors();
         videoPipeline_.update(settings_, settings_.quality);
@@ -395,6 +404,13 @@ void HostSession::setRateLimit(double mbps)
          QStringLiteral("中继上限 %1 Mbps，已按此节流")
              .arg(rateLimitMbps_, 0, 'g', 3)},
     });
+}
+
+void HostSession::applyAdaptiveLimits()
+{
+    videoPipeline_.setAdaptiveLimits(
+        adaptiveRate_.qualityLimit(),
+        adaptiveRate_.fpsLimit());
 }
 
 QJsonObject HostSession::info()
@@ -558,6 +574,19 @@ void HostSession::pushStats()
         static_cast<double>(delta) * 1000.0 / static_cast<double>(elapsedMs);
 
     const LinkStats linkStats = link_ ? link_->stats() : LinkStats{};
+    AdaptiveVideoFeedback feedback;
+    feedback.timestampSeconds = adaptiveClock_.isValid()
+        ? static_cast<double>(adaptiveClock_.elapsed()) / 1000.0
+        : 0.0;
+    feedback.rttMs = linkStats.rttMs;
+    feedback.nackFrames = linkStats.nackFrames;
+    feedback.nackShards = linkStats.nackShards;
+    feedback.lossKeyframeRequests = lossKeyframeRequests_;
+    const int keyframeRequests = lossKeyframeRequests_;
+    lossKeyframeRequests_ = 0;
+    const AdaptiveVideoLimits adaptive =
+        adaptiveRate_.observe(feedback);
+    applyAdaptiveLimits();
     const double kb =
         static_cast<double>(lastFrameBytes_) / 1024.0;
     const double encodeMs =
@@ -572,6 +601,14 @@ void HostSession::pushStats()
          std::round(linkStats.mbps * 100.0) / 100.0},
         {QStringLiteral("rtt"),
          std::round(linkStats.rttMs * 10.0) / 10.0},
+        {QStringLiteral("nack"), linkStats.nackFrames},
+        {QStringLiteral("nack_shards"), linkStats.nackShards},
+        {QStringLiteral("keyreq"), keyframeRequests},
+        {QStringLiteral("aq"), adaptive.quality},
+        {QStringLiteral("afps"), adaptive.fps},
+        {QStringLiteral("health"),
+         QString::fromLatin1(
+             adaptiveLinkHealthKey(adaptive.health))},
         {QStringLiteral("mode"), linkStats.mode},
         {QStringLiteral("relay"), linkStats.usingRelay},
         {QStringLiteral("quality"), lastFrameQuality_},
@@ -609,6 +646,8 @@ void HostSession::applySettings(const QJsonObject &message)
         ? message.value(QStringLiteral("settings")).toObject()
         : message;
     settings_.update(values);
+    adaptiveRate_.setCeilings(settings_.quality, settings_.fps);
+    applyAdaptiveLimits();
     refreshMonitors();
     if (running_) {
         videoPipeline_.update(settings_, settings_.quality);
@@ -651,6 +690,9 @@ void HostSession::dispatch(const QJsonObject &message)
         return;
     }
     if (kind == QStringLiteral("keyframe_req")) {
+        if (message.value(QStringLiteral("loss")).toBool()) {
+            ++lossKeyframeRequests_;
+        }
         videoPipeline_.requestKeyframe();
         return;
     }

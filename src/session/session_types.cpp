@@ -85,8 +85,9 @@ FramePacer::FramePacer(
     , targetKb_(targetKb)
     , minQuality_(minQuality)
     , maxQuality_(maxQuality)
+    , qualityLimit_(maxQuality)
 {
-    quality_ = std::clamp(quality_, minQuality_, maxQuality_);
+    quality_ = std::clamp(quality_, minQuality_, qualityLimit_);
     targetKb_ = std::clamp(targetKb_, 4, 600);
 }
 
@@ -98,7 +99,7 @@ void FramePacer::observe(qint64 size, double elapsedMs)
     if (static_cast<double>(size) > target * 1.25) {
         quality_ = std::max(minQuality_, quality_ - 3);
     } else if (static_cast<double>(size) < target * 0.6) {
-        quality_ = std::min(maxQuality_, quality_ + 1);
+        quality_ = std::min(qualityLimit_, quality_ + 1);
     }
 }
 
@@ -111,7 +112,14 @@ void FramePacer::setBudgetKb(double kb)
 
 void FramePacer::setQuality(int quality)
 {
-    quality_ = std::clamp(quality, minQuality_, maxQuality_);
+    quality_ = std::clamp(quality, minQuality_, qualityLimit_);
+}
+
+void FramePacer::setQualityLimit(int qualityLimit)
+{
+    qualityLimit_ =
+        std::clamp(qualityLimit, minQuality_, maxQuality_);
+    quality_ = std::min(quality_, qualityLimit_);
 }
 
 QString defaultReceiveDirectory()

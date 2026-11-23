@@ -45,6 +45,8 @@ struct Candidate {
 
 struct LinkStats {
     double rttMs = 0;
+    int nackFrames = 0;
+    int nackShards = 0;
     quint64 sentBytes = 0;
     quint64 recvBytes = 0;
     quint64 sentPackets = 0;
@@ -158,6 +160,7 @@ private:
     void setState(const QString &state);
     void updateStats(double now);
     void pruneWindows(double now);
+    void recordNack(quint32 frameId, int shardCount);
     void emitLog(const QString &message);
 
     [[nodiscard]] bool hasPeer() const { return peerPort_ != 0 && !peerAddress_.isNull(); }
@@ -219,6 +222,8 @@ private:
     QList<QPair<double, int>> recvBytesWindow_;
     QList<double> sentFramesWindow_;
     QList<double> recvFramesWindow_;
+    QList<QPair<double, quint32>> nackFrameEvents_;
+    QList<QPair<double, int>> nackShardEvents_;
 };
 
 } // namespace pd

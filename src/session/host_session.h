@@ -1,5 +1,6 @@
 #pragma once
 
+#include "session/adaptive_video_rate_controller.h"
 #include "session/audio_codec.h"
 #include "session/file_transfer_pipeline.h"
 #include "session/host_input_pipeline.h"
@@ -94,6 +95,7 @@ private:
     void refreshMonitors();
     void sendInfo();
     void sendControl(const QJsonObject &message);
+    void applyAdaptiveLimits();
 
     void startAudio();
     void stopAudio();
@@ -151,11 +153,14 @@ private:
     QString audioError_;
 
     FileTransferPipeline fileTransfer_;
+    AdaptiveVideoRateController adaptiveRate_;
 
     QTimer *audioTimer_ = nullptr;
     QTimer *statsTimer_ = nullptr;
     QTimer *clipboardTimer_ = nullptr;
     QElapsedTimer statsClock_;
+    QElapsedTimer adaptiveClock_;
+    int lossKeyframeRequests_ = 0;
     qint64 sentFrames_ = 0;
     qint64 statsLastFrames_ = 0;
     double lastStatsFps_ = 0.0;

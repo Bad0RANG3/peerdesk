@@ -75,6 +75,9 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &VideoReceivePipeline::nackReady,
         this,
         [this](quint32 frameId, const QList<quint16> &missing) {
+            if (!isHost_) {
+                recordNack(frameId, missing.size());
+            }
             feedback_.submitNack(
                 feedback_.generation(),
                 frameId,
@@ -115,8 +118,13 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
     connect(
         &authenticatedPackets_,
         &AuthenticatedPacketPipeline::videoRetransmitRequested,
-        &videoSend_,
-        &VideoSendPipeline::retransmit);
+        this,
+        [this](quint32 frameId, const QList<quint16> &missing) {
+            if (isHost_) {
+                recordNack(frameId, missing.size());
+            }
+            videoSend_.retransmit(frameId, missing);
+        });
     authenticatedPackets_.setWireCommandHandler(
         [this](quint64 authGeneration, const LinkWireCommand &command) {
             feedback_.submitWireCommand(
@@ -280,6 +288,8 @@ void PeerLink::resetPeer()
     recvBytesWindow_.clear();
     sentFramesWindow_.clear();
     recvFramesWindow_.clear();
+    nackFrameEvents_.clear();
+    nackShardEvents_.clear();
     const QString reflexive = stats_.reflexive;
     stats_ = LinkStats{};
     stats_.reflexive = reflexive;
@@ -1106,6 +1116,16 @@ void PeerLink::updateStats(double now)
         sentFramesWindow_.size() + recvFramesWindow_.size());
     stats_.mode = state_;
     stats_.usingRelay = usingRelay_;
+    QSet<quint32> nackedFrames;
+    int nackedShards = 0;
+    for (const auto &event : nackFrameEvents_) {
+        nackedFrames.insert(event.second);
+    }
+    for (const auto &event : nackShardEvents_) {
+        nackedShards += event.second;
+    }
+    stats_.nackFrames = static_cast<int>(nackedFrames.size());
+    stats_.nackShards = nackedShards;
     stats_.path = hasPeer()
         ? endpointText(peerAddress_, peerPort_)
         : QString();
@@ -1135,6 +1155,21 @@ void PeerLink::pruneWindows(double now)
            && recvFramesWindow_.constFirst() < cutoff) {
         recvFramesWindow_.removeFirst();
     }
+    while (!nackFrameEvents_.isEmpty()
+           && nackFrameEvents_.constFirst().first < cutoff) {
+        nackFrameEvents_.removeFirst();
+    }
+    while (!nackShardEvents_.isEmpty()
+           && nackShardEvents_.constFirst().first < cutoff) {
+        nackShardEvents_.removeFirst();
+    }
+}
+
+void PeerLink::recordNack(quint32 frameId, int shardCount)
+{
+    const double now = ReliableStream::currentTimeSeconds();
+    nackFrameEvents_.append(qMakePair(now, frameId));
+    nackShardEvents_.append(qMakePair(now, std::max(0, shardCount)));
 }
 
 void PeerLink::emitLog(const QString &message)

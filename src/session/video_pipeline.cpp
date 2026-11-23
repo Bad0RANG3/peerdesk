@@ -96,6 +96,7 @@ public:
         settings_ = settings;
         settings_.clamp();
         pacer_ = FramePacer(quality);
+        pacer_.setQualityLimit(adaptiveQualityLimit_);
         rateLimitMbps_ = std::max(0.0, rateLimitMbps);
         updateBudget();
         currentQuality_ = pacer_.quality();
@@ -163,6 +164,14 @@ public:
         updateBudget();
     }
 
+    void setAdaptiveLimits(int qualityLimit, int fpsLimit)
+    {
+        adaptiveQualityLimit_ = std::clamp(qualityLimit, 1, 100);
+        adaptiveFpsLimit_ = std::clamp(fpsLimit, 1, 120);
+        pacer_.setQualityLimit(adaptiveQualityLimit_);
+        currentQuality_ = pacer_.quality();
+    }
+
     void requestKeyframe()
     {
         forceKeyframe_ = true;
@@ -200,7 +209,10 @@ private:
 
     [[nodiscard]] int effectiveFps() const
     {
-        double fps = std::clamp(settings_.fps, 1, 120);
+        double fps = std::clamp(
+            std::min(settings_.fps, adaptiveFpsLimit_),
+            1,
+            120);
         if (rateLimitMbps_ > 0.0 && pacer_.lastSize() > 0) {
             const double needed =
                 static_cast<double>(pacer_.lastSize()) * 8.0 * fps
@@ -339,6 +351,8 @@ private:
     bool forceKeyframe_ = true;
     int currentQuality_ = 65;
     double rateLimitMbps_ = 0.0;
+    int adaptiveQualityLimit_ = 92;
+    int adaptiveFpsLimit_ = 120;
     QByteArray lastFingerprint_;
     int lastFingerprintMonitor_ = -1;
     QString lastError_;
@@ -436,7 +450,12 @@ bool VideoPipeline::start(
          generation,
          settings,
          quality,
-         rateLimitMbps]() {
+         rateLimitMbps,
+         adaptiveQualityLimit = adaptiveQualityLimit_,
+         adaptiveFpsLimit = adaptiveFpsLimit_]() {
+            worker_->setAdaptiveLimits(
+                adaptiveQualityLimit,
+                adaptiveFpsLimit);
             worker_->start(
                 generation,
                 settings,
@@ -489,6 +508,23 @@ void VideoPipeline::setRateLimit(double mbps)
     QMetaObject::invokeMethod(
         worker_,
         [this, limit]() { worker_->setRateLimit(limit); },
+        Qt::QueuedConnection);
+}
+
+void VideoPipeline::setAdaptiveLimits(int qualityLimit, int fpsLimit)
+{
+    adaptiveQualityLimit_ = std::clamp(qualityLimit, 1, 100);
+    adaptiveFpsLimit_ = std::clamp(fpsLimit, 1, 120);
+    if (!running_ || !worker_) {
+        return;
+    }
+    const int quality = adaptiveQualityLimit_;
+    const int fps = adaptiveFpsLimit_;
+    QMetaObject::invokeMethod(
+        worker_,
+        [this, quality, fps]() {
+            worker_->setAdaptiveLimits(quality, fps);
+        },
         Qt::QueuedConnection);
 }
 

@@ -45,8 +45,10 @@ public:
     void observe(qint64 size, double elapsedMs);
     void setBudgetKb(double kb);
     void setQuality(int quality);
+    void setQualityLimit(int qualityLimit);
 
     [[nodiscard]] int quality() const { return quality_; }
+    [[nodiscard]] int qualityLimit() const { return qualityLimit_; }
     [[nodiscard]] int targetKb() const { return targetKb_; }
     [[nodiscard]] qint64 lastSize() const { return lastSize_; }
     [[nodiscard]] double lastMs() const { return lastMs_; }
@@ -56,6 +58,7 @@ private:
     int targetKb_;
     int minQuality_;
     int maxQuality_;
+    int qualityLimit_;
     qint64 lastSize_ = 0;
     double lastMs_ = 0.0;
 };

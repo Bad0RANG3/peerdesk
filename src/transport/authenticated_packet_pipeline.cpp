@@ -165,11 +165,17 @@ public:
         }
     }
 
-    void requestKeyframe(quint64 expectedGeneration)
+    void requestKeyframe(quint64 expectedGeneration, bool loss)
     {
+        QJsonObject request{
+            {QStringLiteral("t"), QStringLiteral("keyframe_req")},
+        };
+        if (loss) {
+            request.insert(QStringLiteral("loss"), true);
+        }
         sendControl(
             expectedGeneration,
-            QJsonObject{{QStringLiteral("t"), QStringLiteral("keyframe_req")}});
+            request);
     }
 
     void sendPing(quint64 generation)
@@ -554,15 +560,17 @@ void AuthenticatedPacketPipeline::sendPing()
         Qt::QueuedConnection);
 }
 
-void AuthenticatedPacketPipeline::requestKeyframe(quint64 expectedGeneration)
+void AuthenticatedPacketPipeline::requestKeyframe(
+    quint64 expectedGeneration,
+    bool loss)
 {
     if (!worker_) {
         return;
     }
     QMetaObject::invokeMethod(
         worker_,
-        [worker = worker_, expectedGeneration]() {
-            worker->requestKeyframe(expectedGeneration);
+        [worker = worker_, expectedGeneration, loss]() {
+            worker->requestKeyframe(expectedGeneration, loss);
         },
         Qt::QueuedConnection);
 }

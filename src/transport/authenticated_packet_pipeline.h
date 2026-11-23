@@ -39,7 +39,7 @@ public:
     void receive(const Header &header, const QByteArray &payload);
     void sendControl(const QJsonObject &message);
     void sendPing();
-    void requestKeyframe(quint64 expectedGeneration);
+    void requestKeyframe(quint64 expectedGeneration, bool loss = false);
     void setWireCommandHandler(WireCommandHandler handler);
 
     [[nodiscard]] bool running() const { return running_; }

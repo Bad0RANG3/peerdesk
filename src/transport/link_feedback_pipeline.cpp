@@ -81,7 +81,9 @@ public:
             return;
         }
         lastKeyframeRequestAt_ = now;
-        authenticatedPackets_->requestKeyframe(route_.authGeneration);
+        authenticatedPackets_->requestKeyframe(
+            route_.authGeneration,
+            true);
     }
 
     void sendWireCommand(

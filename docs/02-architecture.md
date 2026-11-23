@@ -133,6 +133,8 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   → queued frameReady / nackReady / keyframeRequested
   → PeerLink 主线程：统计、反馈路由快照
   → PeerDeskLinkFeedback：异步 NACK；关键帧请求经可靠控制流限频提交
+  → HostSession（每秒）：RTT/NACK/loss 关键帧 → AdaptiveVideoRateController
+  → VideoPipeline：动态质量/FPS 上限，健康恢复后逐步放宽
   → PeerDeskViewerVideo 解码（保留最新帧）
   → PeerDeskViewerPresent 等比缩放（物理像素/DPR，最新帧背压）
   → 主线程 paintEvent：最终 drawImage
@@ -145,6 +147,11 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   缓存检索。批次以排队信号回到主线程；`PeerLink` 选定路径后，把包头构造、AEAD 加密、
   发送序号和 UDP 写入排队交给 `PeerDeskUdpIo` 线程。
 - `FramePacer` 根据实际帧大小调整 JPEG 质量，带宽上限同时影响质量预算和有效发帧率。
+  `HostSession` 每秒把链路 RTT、NACK 帧/分片计数和带 `loss: true` 的自动关键帧请求
+  交给 `AdaptiveVideoRateController`。控制器以 0.9 秒为最小调整间隔，在拥塞时同时
+  收紧质量与 FPS 上限，链路持续健康 4 秒后再逐步恢复；用户画质/FPS 始终作为外部
+  上限，`--relay-mbps` 等静态限速仍可进一步压低有效发帧率。会话停止或重新开始时
+  控制器与计数归零，避免旧网络状态污染新会话。
 - 静帧可跳过发送；首帧和显式关键帧请求会提供新的编码基准。
 - `PeerDeskVideoReceive` 在独立线程中串行执行分片解析、重组、XOR FEC 缺片恢复、
   超时丢帧和 NACK 判定；结果以排队信号回到主线程。`PeerLink` 更新接收统计并发布
@@ -409,6 +416,8 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
   Pong、ACK 和控制 DATA 的发送已移至 `PeerDeskLinkFeedback` 工作线程；但窗口最终
   合成和大部分 UI 仍在主线程。
 - 声音是固定 G.711 µ-law，没有 Opus。
+- 视频速率自适应目前基于每秒 RTT、NACK 窗口和自动丢包关键帧请求，并用回环/合成反馈
+  验证了降级与恢复路径；还没有经过真实丢包、抖动、带宽突变或长时间会话的阈值校准。
 - 文件支持单文件断线续传，但断点只保留 10 分钟，跨机续传仍待真实验收；断点失效时
   回退为整文件重试。接收端同名同大小文件已通过回环测试分配独立路径并隔离断点，但
   发送端也已按源路径隔离跨目录同名同大小队列项；Viewer 与被控端的真实跨机恢复仍待验收。

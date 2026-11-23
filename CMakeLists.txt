@@ -90,6 +90,8 @@ target_link_libraries(peerdesk_client
 add_library(peerdesk_session STATIC
     src/session/session_types.cpp
     src/session/session_types.h
+    src/session/adaptive_video_rate_controller.cpp
+    src/session/adaptive_video_rate_controller.h
     src/session/media_sources.cpp
     src/session/media_sources.h
     src/session/audio_codec.cpp

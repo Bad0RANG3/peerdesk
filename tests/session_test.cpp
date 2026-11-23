@@ -1,4 +1,5 @@
 #include "server/server.h"
+#include "session/adaptive_video_rate_controller.h"
 #include "session/audio_codec.h"
 #include "session/file_transfer.h"
 #include "session/file_transfer_pipeline.h"
@@ -513,6 +514,87 @@ private slots:
         QCOMPARE(pacer.quality(), 63);
         pacer.setBudgetKb(0.0);
         QCOMPARE(pacer.targetKb(), 140);
+
+        FramePacer limitedPacer(80, 100, 32, 92);
+        limitedPacer.setQualityLimit(45);
+        QCOMPARE(limitedPacer.quality(), 45);
+        for (int index = 0; index < 12; ++index) {
+            limitedPacer.observe(1024, 4.0);
+        }
+        QCOMPARE(limitedPacer.quality(), 45);
+        limitedPacer.setQuality(90);
+        QCOMPARE(limitedPacer.quality(), 45);
+        limitedPacer.setQualityLimit(60);
+        QCOMPARE(limitedPacer.quality(), 45);
+        limitedPacer.setQuality(90);
+        QCOMPARE(limitedPacer.quality(), 60);
+        QCOMPARE(limitedPacer.qualityLimit(), 60);
+    }
+
+    void adaptiveVideoRateUsesFeedbackAndRecovers()
+    {
+        AdaptiveVideoRateController controller;
+        controller.reset(90, 60);
+        QCOMPARE(controller.qualityLimit(), 90);
+        QCOMPARE(controller.fpsLimit(), 60);
+
+        AdaptiveVideoLimits limits = controller.observe(
+            AdaptiveVideoFeedback{0.0, 20.0, 0, 0, 0});
+        QVERIFY(limits.health == AdaptiveLinkHealth::Healthy);
+        QCOMPARE(limits.quality, 90);
+        QCOMPARE(limits.fps, 60);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{1.0, 170.0, 0, 0, 0});
+        QVERIFY(limits.health == AdaptiveLinkHealth::Congested);
+        QCOMPARE(limits.quality, 86);
+        QCOMPARE(limits.fps, 57);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{1.2, 260.0, 0, 0, 0});
+        QCOMPARE(limits.quality, 86);
+        QCOMPARE(limits.fps, 57);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{2.0, 260.0, 0, 0, 0});
+        QCOMPARE(limits.quality, 78);
+        QCOMPARE(limits.fps, 51);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{2.1, 25.0, 0, 0, 0});
+        QVERIFY(limits.health == AdaptiveLinkHealth::Healthy);
+        QCOMPARE(limits.quality, 78);
+        QCOMPARE(limits.fps, 51);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{5.9, 25.0, 0, 0, 0});
+        QCOMPARE(limits.quality, 78);
+        QCOMPARE(limits.fps, 51);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{6.2, 25.0, 0, 0, 0});
+        QCOMPARE(limits.quality, 80);
+        QCOMPARE(limits.fps, 53);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{6.3, 50.0, 0, 2, 0});
+        QVERIFY(limits.health == AdaptiveLinkHealth::Guarded);
+        QCOMPARE(limits.quality, 80);
+        QCOMPARE(limits.fps, 53);
+
+        limits = controller.observe(
+            AdaptiveVideoFeedback{7.4, 250.0, 2, 12, 2});
+        QCOMPARE(limits.quality, 72);
+        QCOMPARE(limits.fps, 47);
+
+        controller.setCeilings(70, 45);
+        QCOMPARE(controller.qualityLimit(), 70);
+        QCOMPARE(controller.fpsLimit(), 45);
+
+        controller.reset(55, 24);
+        QCOMPARE(controller.qualityLimit(), 55);
+        QCOMPARE(controller.fpsLimit(), 24);
+        QVERIFY(controller.health() == AdaptiveLinkHealth::Unknown);
     }
 
     void videoPipelineRunsOffMainThread()
@@ -623,6 +705,78 @@ private slots:
         QVERIFY(waitUntil(
             [&]() { return frames.size() > afterStop; },
             4000));
+        pipeline.stop();
+    }
+
+    void videoPipelineAppliesAdaptiveQualityAndFps()
+    {
+        auto screen = std::make_shared<SyntheticScreenSource>(
+            1280,
+            720,
+            true);
+        VideoPipeline pipeline;
+        QList<EncodedVideoFrame> frames;
+        QList<QString> errors;
+        connect(
+            &pipeline,
+            &VideoPipeline::frameReady,
+            [&frames](const EncodedVideoFrame &frame) {
+                frames.append(frame);
+            });
+        connect(
+            &pipeline,
+            &VideoPipeline::failed,
+            [&errors](const QString &error) {
+                errors.append(error);
+            });
+
+        pipeline.setSource(screen);
+        pipeline.setAdaptiveLimits(40, 8);
+        VideoSettings settings;
+        settings.fps = 60;
+        settings.maxWidth = 640;
+        settings.quality = 80;
+        settings.skipStatic = false;
+        QString error;
+        QVERIFY2(
+            pipeline.start(settings, settings.quality, &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    frames.cbegin(),
+                    frames.cend(),
+                    [](const EncodedVideoFrame &frame) {
+                        return frame.quality <= 40
+                            && frame.effectiveFps <= 8;
+                    });
+            },
+            4000));
+        if (!errors.isEmpty()) {
+            QFAIL(qPrintable(errors.constFirst()));
+        }
+        const auto adaptiveFrame = std::find_if(
+            frames.cbegin(),
+            frames.cend(),
+            [](const EncodedVideoFrame &frame) {
+                return frame.quality <= 40
+                    && frame.effectiveFps <= 8;
+            });
+        QVERIFY(adaptiveFrame != frames.cend());
+        QVERIFY(adaptiveFrame->quality <= 40);
+        QCOMPARE(adaptiveFrame->effectiveFps, 8);
+
+        pipeline.setRateLimit(0.01);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    frames.cbegin(),
+                    frames.cend(),
+                    [](const EncodedVideoFrame &frame) {
+                        return frame.effectiveFps < 8;
+                    });
+            },
+            5000));
         pipeline.stop();
     }
 
@@ -2455,11 +2609,67 @@ private slots:
         QCOMPARE(
             viewerStats.constLast().value(QStringLiteral("t")).toString(),
             QStringLiteral("stats"));
+        const QJsonObject initialAdaptiveStats = viewerStats.constLast();
+        const int initialAdaptiveQuality =
+            initialAdaptiveStats.value(QStringLiteral("aq")).toInt();
+        const int initialAdaptiveFps =
+            initialAdaptiveStats.value(QStringLiteral("afps")).toInt();
+        QVERIFY(initialAdaptiveQuality > 0);
+        QVERIFY(initialAdaptiveFps > 0);
+        QVERIFY(initialAdaptiveStats.contains(QStringLiteral("nack")));
+        QVERIFY(initialAdaptiveStats.contains(QStringLiteral("nack_shards")));
+        QVERIFY(initialAdaptiveStats.contains(QStringLiteral("keyreq")));
+        QVERIFY(initialAdaptiveStats.contains(QStringLiteral("health")));
+
+        const qsizetype beforeLossStats = viewerStats.size();
+        viewerLink.sendControl(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("keyframe_req")},
+            {QStringLiteral("loss"), true},
+        });
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerStats.cbegin() + beforeLossStats,
+                    viewerStats.cend(),
+                    [](const QJsonObject &stats) {
+                        return stats.value(QStringLiteral("keyreq")).toInt()
+                            >= 1;
+                    });
+            },
+            4000));
+        const auto lossStats = std::find_if(
+            viewerStats.cbegin() + beforeLossStats,
+            viewerStats.cend(),
+            [](const QJsonObject &stats) {
+                return stats.value(QStringLiteral("keyreq")).toInt() >= 1;
+            });
+        QVERIFY(lossStats != viewerStats.cend());
+        QVERIFY(
+            lossStats->value(QStringLiteral("aq")).toInt()
+            < initialAdaptiveQuality);
+        QVERIFY(
+            lossStats->value(QStringLiteral("afps")).toInt()
+            < initialAdaptiveFps);
+        QCOMPARE(
+            lossStats->value(QStringLiteral("health")).toString(),
+            QStringLiteral("congested"));
 
         const int keyframesBefore = countKeyframes(keyframes);
         viewer.requestKeyframe();
         QVERIFY(waitUntil(
             [&]() { return countKeyframes(keyframes) > keyframesBefore; },
+            4000));
+        const qsizetype beforeManualStats = viewerStats.size();
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerStats.cbegin() + beforeManualStats,
+                    viewerStats.cend(),
+                    [](const QJsonObject &stats) {
+                        return stats.value(QStringLiteral("keyreq")).toInt()
+                            == 0;
+                    });
+            },
             4000));
 
         viewer.setQuality(47);

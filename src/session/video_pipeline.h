@@ -38,6 +38,7 @@ public:
     void stop();
     void update(const VideoSettings &settings, int quality);
     void setRateLimit(double mbps);
+    void setAdaptiveLimits(int qualityLimit, int fpsLimit);
     void requestKeyframe();
 
     [[nodiscard]] QList<MonitorInfo> monitors() const;
@@ -62,6 +63,8 @@ private:
     mutable QList<MonitorInfo> monitorsCache_;
     mutable QString backendCache_;
     double rateLimitMbps_ = 0.0;
+    int adaptiveQualityLimit_ = 92;
+    int adaptiveFpsLimit_ = 120;
     quint64 generation_ = 0;
     bool hasSource_ = false;
     bool running_ = false;
