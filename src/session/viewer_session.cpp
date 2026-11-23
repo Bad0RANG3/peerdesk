@@ -117,6 +117,7 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
 
 ViewerSession::~ViewerSession()
 {
+    blockSignals(true);
     stop();
     receiver_.abortAll();
 }

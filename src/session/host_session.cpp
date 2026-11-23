@@ -178,6 +178,7 @@ HostSession::HostSession(PeerLink *link, QObject *parent)
 
 HostSession::~HostSession()
 {
+    blockSignals(true);
     stop();
     receiver_.abortAll();
 }

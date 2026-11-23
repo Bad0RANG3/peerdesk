@@ -534,15 +534,6 @@ private slots:
         auto clipboard = std::make_shared<FakeClipboard>();
         clipboard->value = QStringLiteral("host initial clipboard");
 
-        HostSession host(&hostLink);
-        ViewerSession viewer(&viewerLink);
-        host.setScreenSource(screen);
-        host.setAudioSource(audio);
-        host.setInputSink(input);
-        host.setClipboard(clipboard);
-        host.setReceiveDirectory(hostReceive.path());
-        viewer.setReceiveDirectory(viewerReceive.path());
-
         QList<QJsonObject> hostEvents;
         QList<QJsonObject> viewerEvents;
         QList<QByteArray> encodedFrames;
@@ -552,6 +543,16 @@ private slots:
         QList<QString> hostFiles;
         QList<QString> viewerFiles;
         QList<QJsonObject> viewerStats;
+
+        HostSession host(&hostLink);
+        ViewerSession viewer(&viewerLink);
+        host.setScreenSource(screen);
+        host.setAudioSource(audio);
+        host.setInputSink(input);
+        host.setClipboard(clipboard);
+        host.setReceiveDirectory(hostReceive.path());
+        viewer.setReceiveDirectory(viewerReceive.path());
+
         connect(
             &host,
             &HostSession::eventReceived,
@@ -969,6 +970,120 @@ private slots:
             hostReceive.filePath(QStringLiteral("truncated.bin"))));
     }
 
+    void sessionTeardownDoesNotNotifyObservers()
+    {
+        int infoChanges = 0;
+        int statsChanges = 0;
+        int eventChanges = 0;
+        int infoAfterTeardown = 0;
+        int statsAfterTeardown = 0;
+        int eventsAfterTeardown = 0;
+
+        {
+            const QByteArray psk =
+                QByteArrayLiteral("session-teardown-secret");
+            PeerLink hostLink(true, psk);
+            PeerLink viewerLink(false, psk);
+            hostLink.setLabel(QStringLiteral("teardown-host"));
+            viewerLink.setLabel(QStringLiteral("teardown-viewer"));
+            hostLink.setDeviceId(QStringLiteral("teardown-host-device"));
+            viewerLink.setDeviceId(QStringLiteral("teardown-viewer-device"));
+
+            QString error;
+            QVERIFY2(
+                hostLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+                qPrintable(error));
+            QVERIFY2(
+                viewerLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+                qPrintable(error));
+
+            QTemporaryDir hostReceive;
+            QTemporaryDir viewerReceive;
+            QVERIFY(hostReceive.isValid());
+            QVERIFY(viewerReceive.isValid());
+
+            auto screen =
+                std::make_shared<SyntheticScreenSource>(960, 540, false);
+
+            HostSession host(&hostLink);
+            ViewerSession viewer(&viewerLink);
+            host.setScreenSource(screen);
+            host.setReceiveDirectory(hostReceive.path());
+            viewer.setReceiveDirectory(viewerReceive.path());
+
+            connect(
+                &viewer,
+                &ViewerSession::infoChanged,
+                [&infoChanges](const QJsonObject &) { ++infoChanges; });
+            connect(
+                &viewer,
+                &ViewerSession::statsChanged,
+                [&statsChanges](const QJsonObject &) { ++statsChanges; });
+            connect(
+                &viewer,
+                &ViewerSession::eventReceived,
+                [&eventChanges](const QJsonObject &) { ++eventChanges; });
+
+            QVERIFY(host.start());
+            viewer.start();
+            hostLink.addCandidates(viewerLink.localCandidates());
+            viewerLink.addCandidates(hostLink.localCandidates());
+            hostLink.beginHandshake();
+            viewerLink.beginHandshake();
+
+            QVERIFY(waitUntil(
+                [&]() {
+                    return hostLink.established() && viewerLink.established()
+                        && hostLink.state() == QStringLiteral("direct")
+                        && viewerLink.state() == QStringLiteral("direct");
+                },
+                9000));
+            QVERIFY(waitUntil(
+                [&]() {
+                    return host.running() && !viewer.info().isEmpty();
+                },
+                7000));
+            QVERIFY(waitUntil(
+                [&]() { return !viewer.stats().isEmpty(); },
+                7000));
+
+            const int infoBeforeStop = infoChanges;
+            const int statsBeforeStop = statsChanges;
+            const int eventsBeforeStop = eventChanges;
+            viewer.stop();
+
+            QCOMPARE(infoChanges, infoBeforeStop + 1);
+            QCOMPARE(statsChanges, statsBeforeStop + 1);
+            QCOMPARE(eventChanges, eventsBeforeStop);
+            QVERIFY(viewer.info().isEmpty());
+            QVERIFY(viewer.stats().isEmpty());
+
+            viewer.start();
+            QVERIFY(waitUntil(
+                [&]() {
+                    return !viewer.info().isEmpty()
+                        && !viewer.stats().isEmpty();
+                },
+                7000));
+
+            QString uploadError;
+            QVERIFY2(
+                viewer.beginUpload(
+                    QStringLiteral("held.bin"),
+                    8,
+                    &uploadError),
+                qPrintable(uploadError));
+
+            infoAfterTeardown = infoChanges;
+            statsAfterTeardown = statsChanges;
+            eventsAfterTeardown = eventChanges;
+        }
+
+        QCOMPARE(infoChanges, infoAfterTeardown);
+        QCOMPARE(statsChanges, statsAfterTeardown);
+        QCOMPARE(eventChanges, eventsAfterTeardown);
+    }
+
     void relaySessionTransfersFile()
     {
         SignalingServer::Options options;
@@ -1025,15 +1140,16 @@ private slots:
         QVERIFY(viewerReceive.isValid());
 
         auto screen = std::make_shared<SyntheticScreenSource>(1280, 720, false);
+        QList<QImage> frames;
+        QList<QString> receivedFiles;
+        QList<QJsonObject> viewerEvents;
+
         HostSession host(&hostLink);
         ViewerSession remote(&viewerLink);
         host.setScreenSource(screen);
         host.setReceiveDirectory(hostReceive.path());
         remote.setReceiveDirectory(viewerReceive.path());
 
-        QList<QImage> frames;
-        QList<QString> receivedFiles;
-        QList<QJsonObject> viewerEvents;
         connect(
             &remote,
             &ViewerSession::frameDecoded,
