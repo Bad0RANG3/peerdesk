@@ -4,6 +4,7 @@
 #include "session/file_transfer.h"
 #include "session/media_sources.h"
 #include "session/session_types.h"
+#include "session/video_pipeline.h"
 
 #include <QElapsedTimer>
 #include <QJsonObject>
@@ -80,6 +81,8 @@ signals:
 private:
     void connectLink();
     void onLinkStateChanged(const QString &state);
+    void onVideoFrame(const EncodedVideoFrame &frame);
+    void onVideoFailed(const QString &message);
     void startStreaming();
     void stopStreaming();
     void resumeOutgoingFile();
@@ -92,8 +95,6 @@ private:
     void broadcastAudioState();
     void pollAudio();
 
-    void scheduleNextFrame(qint64 elapsedMs);
-    void captureOnce();
     void pushStats();
     void pollClipboard();
     void applySettings(const QJsonObject &message);
@@ -107,10 +108,9 @@ private:
     void rejectFile(const QString &id, const QString &reason);
 
     [[nodiscard]] QPointF mapToVirtualDesktop(double nx, double ny) const;
-    [[nodiscard]] int effectiveFps() const;
 
     PeerLink *link_ = nullptr;
-    std::shared_ptr<IScreenSource> screenSource_;
+    VideoPipeline videoPipeline_;
     std::shared_ptr<IAudioSource> audioSource_;
     std::shared_ptr<IInputSink> inputSink_;
     std::shared_ptr<IClipboard> clipboard_;
@@ -121,10 +121,8 @@ private:
     bool wantedRunning_ = false;
     bool running_ = false;
     bool allowInput_ = true;
-    bool forceKeyframe_ = true;
     double rateLimitMbps_ = 0.0;
 
-    FramePacer pacer_;
     AudioEncoder audioEncoder_;
     QByteArray audioCarry_;
     bool audioRunning_ = false;
@@ -133,7 +131,6 @@ private:
     FileReceiver receiver_;
     FileSender *fileSender_ = nullptr;
 
-    QTimer *captureTimer_ = nullptr;
     QTimer *audioTimer_ = nullptr;
     QTimer *statsTimer_ = nullptr;
     QTimer *clipboardTimer_ = nullptr;
@@ -141,10 +138,11 @@ private:
     qint64 sentFrames_ = 0;
     qint64 statsLastFrames_ = 0;
     double lastStatsFps_ = 0.0;
-
-    QByteArray lastFingerprint_;
-    int lastFingerprintMonitor_ = -1;
-    QString lastCaptureError_;
+    qint64 lastFrameBytes_ = 0;
+    int lastFrameQuality_ = 65;
+    int lastEffectiveFps_ = 0;
+    qint64 lastCaptureMs_ = 0;
+    qint64 lastEncodeMs_ = 0;
     QString lastClipboard_;
 };
 

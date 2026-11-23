@@ -3,10 +3,8 @@
 #include "core/protocol.h"
 #include "transport/peer_link.h"
 
-#include <QBuffer>
 #include <QDir>
 #include <QFileInfo>
-#include <QImageWriter>
 #include <QJsonArray>
 #include <QPointF>
 #include <QSysInfo>
@@ -48,64 +46,6 @@ QString jsonString(
     return value.isString() ? value.toString() : fallback;
 }
 
-QByteArray fingerprint(const QImage &image, int monitor)
-{
-    const QImage probe = image
-                             .scaled(
-                                 48,
-                                 27,
-                                 Qt::IgnoreAspectRatio,
-                                 Qt::SmoothTransformation)
-                             .convertToFormat(QImage::Format_Grayscale8);
-    QByteArray result("PD1", 3);
-    result.append(static_cast<char>((monitor >> 24) & 0xFF));
-    result.append(static_cast<char>((monitor >> 16) & 0xFF));
-    result.append(static_cast<char>((monitor >> 8) & 0xFF));
-    result.append(static_cast<char>(monitor & 0xFF));
-    result.append(
-        reinterpret_cast<const char *>(probe.constBits()),
-        probe.sizeInBytes());
-    return result;
-}
-
-bool encodeJpeg(
-    const QImage &image,
-    int quality,
-    QByteArray *encoded,
-    QString *error)
-{
-    if (image.isNull() || encoded == nullptr) {
-        if (error) {
-            *error = QStringLiteral("empty image");
-        }
-        return false;
-    }
-    QByteArray output;
-    QBuffer buffer(&output);
-    if (!buffer.open(QIODevice::WriteOnly)) {
-        if (error) {
-            *error = QStringLiteral("无法打开编码缓冲区");
-        }
-        return false;
-    }
-    QImageWriter writer(&buffer, QByteArrayLiteral("jpeg"));
-    writer.setQuality(std::clamp(quality, 1, 100));
-    writer.setOptimizedWrite(false);
-    writer.setProgressiveScanWrite(false);
-    if (!writer.write(image)) {
-        if (error) {
-            *error = writer.errorString();
-        }
-        return false;
-    }
-    buffer.close();
-    *encoded = output;
-    if (error) {
-        error->clear();
-    }
-    return true;
-}
-
 } // namespace
 
 HostSession::HostSession(PeerLink *link, QObject *parent)
@@ -113,18 +53,28 @@ HostSession::HostSession(PeerLink *link, QObject *parent)
     , link_(link)
     , receiver_(defaultReceiveDirectory())
     , fileSender_(new FileSender(this))
-    , captureTimer_(new QTimer(this))
     , audioTimer_(new QTimer(this))
     , statsTimer_(new QTimer(this))
     , clipboardTimer_(new QTimer(this))
 {
-    captureTimer_->setSingleShot(true);
-    captureTimer_->setTimerType(Qt::PreciseTimer);
     connect(
-        captureTimer_,
-        &QTimer::timeout,
+        &videoPipeline_,
+        &VideoPipeline::frameReady,
         this,
-        &HostSession::captureOnce);
+        &HostSession::onVideoFrame);
+    connect(
+        &videoPipeline_,
+        &VideoPipeline::failed,
+        this,
+        &HostSession::onVideoFailed);
+    connect(
+        &videoPipeline_,
+        &VideoPipeline::started,
+        this,
+        [this](const QString &backend) {
+            emit logMessage(
+                QStringLiteral("会话已开始：%1").arg(backend));
+        });
 
     audioTimer_->setInterval(kAudioFrameMs);
     audioTimer_->setTimerType(Qt::PreciseTimer);
@@ -202,11 +152,19 @@ void HostSession::connectLink()
 
 void HostSession::setScreenSource(std::shared_ptr<IScreenSource> source)
 {
-    screenSource_ = std::move(source);
-    monitors_.clear();
+    if (running_) {
+        stopStreaming();
+    }
+    videoPipeline_.setSource(std::move(source));
+    monitors_ = videoPipeline_.monitors();
     currentMonitor_ = 0;
-    lastFingerprint_.clear();
-    lastFingerprintMonitor_ = -1;
+    if (!monitors_.isEmpty()) {
+        settings_.monitor = std::clamp(
+            settings_.monitor,
+            0,
+            static_cast<int>(monitors_.size()) - 1);
+        currentMonitor_ = settings_.monitor;
+    }
 }
 
 void HostSession::setAudioSource(std::shared_ptr<IAudioSource> source)
@@ -276,7 +234,7 @@ void HostSession::startStreaming()
     if (running_ || !link_ || !link_->established()) {
         return;
     }
-    if (!screenSource_) {
+    if (!videoPipeline_.hasSource()) {
         emit logMessage(QStringLiteral("没有可用的抓屏源，无法开始会话"));
         return;
     }
@@ -287,15 +245,28 @@ void HostSession::startStreaming()
         return;
     }
 
+    QString pipelineError;
+    if (!videoPipeline_.start(
+            settings_,
+            settings_.quality,
+            &pipelineError)) {
+        emit logMessage(
+            pipelineError.isEmpty()
+                ? QStringLiteral("视频管线启动失败")
+                : pipelineError);
+        return;
+    }
+
     running_ = true;
-    forceKeyframe_ = true;
-    pacer_.setQuality(settings_.quality);
     sentFrames_ = 0;
     statsLastFrames_ = 0;
     lastStatsFps_ = 0.0;
+    lastFrameBytes_ = 0;
+    lastFrameQuality_ = settings_.quality;
+    lastEffectiveFps_ = settings_.fps;
+    lastCaptureMs_ = 0;
+    lastEncodeMs_ = 0;
     statsClock_.restart();
-    lastFingerprint_.clear();
-    lastFingerprintMonitor_ = -1;
 
     if (clipboard_) {
         lastClipboard_ = clipboard_->text().left(kClipboardLimit);
@@ -305,17 +276,14 @@ void HostSession::startStreaming()
     startAudio();
     sendInfo();
     statsTimer_->start();
-    captureTimer_->start(0);
     resumeOutgoingFile();
-    emit logMessage(QStringLiteral("会话已开始：%1")
-                        .arg(screenSource_->backend()));
 }
 
 void HostSession::stopStreaming()
 {
     const bool wasRunning = running_;
     running_ = false;
-    captureTimer_->stop();
+    videoPipeline_.stop();
     statsTimer_->stop();
     clipboardTimer_->stop();
     stopAudio();
@@ -326,11 +294,30 @@ void HostSession::stopStreaming()
         fileSender_->interrupt(QStringLiteral("interrupted"));
     }
     audioCarry_.clear();
-    if (screenSource_) {
-        screenSource_->close();
-    }
     if (wasRunning) {
         emit logMessage(QStringLiteral("会话已停止"));
+    }
+}
+
+void HostSession::onVideoFrame(const EncodedVideoFrame &frame)
+{
+    if (!running_ || !link_ || !link_->established()
+        || frame.data.isEmpty()) {
+        return;
+    }
+    link_->sendVideo(frame.data, frame.keyframe);
+    ++sentFrames_;
+    lastFrameBytes_ = frame.data.size();
+    lastFrameQuality_ = frame.quality;
+    lastEffectiveFps_ = frame.effectiveFps;
+    lastCaptureMs_ = frame.captureMs;
+    lastEncodeMs_ = frame.encodeMs;
+}
+
+void HostSession::onVideoFailed(const QString &message)
+{
+    if (!message.isEmpty()) {
+        emit logMessage(message);
     }
 }
 
@@ -358,12 +345,9 @@ void HostSession::setSettings(const VideoSettings &settings)
 {
     settings_ = settings;
     settings_.clamp();
-    pacer_.setQuality(settings_.quality);
     if (running_) {
         refreshMonitors();
-        forceKeyframe_ = true;
-        lastFingerprint_.clear();
-        lastFingerprintMonitor_ = -1;
+        videoPipeline_.update(settings_, settings_.quality);
     }
     if (running_ && settings_.audio) {
         startAudio();
@@ -390,8 +374,8 @@ QString HostSession::receiveDirectory() const
 void HostSession::setRateLimit(double mbps)
 {
     rateLimitMbps_ = std::max(0.0, mbps);
+    videoPipeline_.setRateLimit(rateLimitMbps_);
     if (rateLimitMbps_ <= 0.0) {
-        pacer_.setBudgetKb(0.0);
         emit eventReceived(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("notice")},
             {QStringLiteral("text"), QStringLiteral("带宽限制已关闭")},
@@ -399,9 +383,6 @@ void HostSession::setRateLimit(double mbps)
         return;
     }
 
-    const double perFrameBytes =
-        rateLimitMbps_ * 125000.0 / std::max(1, settings_.fps);
-    pacer_.setBudgetKb(perFrameBytes / 1024.0 * 0.75);
     emit eventReceived(QJsonObject{
         {QStringLiteral("t"), QStringLiteral("notice")},
         {QStringLiteral("text"),
@@ -446,10 +427,7 @@ QJsonObject HostSession::audioState() const
 
 void HostSession::refreshMonitors()
 {
-    if (!screenSource_) {
-        return;
-    }
-    monitors_ = screenSource_->monitors();
+    monitors_ = videoPipeline_.monitors();
     if (monitors_.isEmpty()) {
         currentMonitor_ = 0;
         return;
@@ -562,113 +540,6 @@ void HostSession::pollAudio()
     }
 }
 
-int HostSession::effectiveFps() const
-{
-    double fps = std::clamp(settings_.fps, 1, 120);
-    if (rateLimitMbps_ > 0.0 && pacer_.lastSize() > 0) {
-        const double needed =
-            static_cast<double>(pacer_.lastSize()) * 8.0 * fps / 1'000'000.0;
-        if (needed > rateLimitMbps_) {
-            fps = std::max(
-                1.0,
-                std::floor(fps * rateLimitMbps_ / needed));
-        }
-    }
-    return std::clamp(static_cast<int>(std::lround(fps)), 1, 120);
-}
-
-void HostSession::scheduleNextFrame(qint64 elapsedMs)
-{
-    if (!running_ || !link_ || !link_->established()) {
-        return;
-    }
-    const qint64 targetMs = std::max<qint64>(1, 1000 / effectiveFps());
-    const qint64 delay = std::max<qint64>(0, targetMs - elapsedMs);
-    captureTimer_->start(static_cast<int>(std::min<qint64>(delay, 1000)));
-}
-
-void HostSession::captureOnce()
-{
-    if (!running_ || !link_ || !link_->established()) {
-        return;
-    }
-    if (!screenSource_) {
-        return;
-    }
-
-    QElapsedTimer clock;
-    clock.start();
-    CaptureRequest request;
-    request.monitor = settings_.monitor;
-    request.maxWidth = settings_.maxWidth;
-    request.pixelFormat = settings_.pixelFormat;
-
-    CaptureResult captured = screenSource_->capture(request);
-    if (!captured.ok()) {
-        const QString error = captured.error.isEmpty()
-            ? QStringLiteral("抓屏失败")
-            : captured.error;
-        if (error != lastCaptureError_) {
-            lastCaptureError_ = error;
-            emit logMessage(error);
-        }
-        scheduleNextFrame(clock.elapsed());
-        return;
-    }
-    lastCaptureError_.clear();
-
-    QImage image = captured.image;
-    if (settings_.maxWidth > 0 && image.width() > settings_.maxWidth) {
-        image = image.scaled(
-            settings_.maxWidth,
-            std::max(
-                2,
-                static_cast<int>(std::lround(
-                    static_cast<double>(image.height())
-                    * settings_.maxWidth / image.width()))),
-            Qt::IgnoreAspectRatio,
-            Qt::SmoothTransformation);
-    }
-
-    const int monitor = std::clamp(
-        settings_.monitor,
-        0,
-        std::max(0, static_cast<int>(monitors_.size()) - 1));
-    const QByteArray currentFingerprint =
-        fingerprint(image, monitor);
-    const bool unchanged = settings_.skipStatic
-        && !forceKeyframe_
-        && currentFingerprint == lastFingerprint_
-        && monitor == lastFingerprintMonitor_;
-    lastFingerprint_ = currentFingerprint;
-    lastFingerprintMonitor_ = monitor;
-    if (unchanged) {
-        scheduleNextFrame(clock.elapsed());
-        return;
-    }
-
-    QByteArray jpeg;
-    QString encodeError;
-    if (!encodeJpeg(image, pacer_.quality(), &jpeg, &encodeError)) {
-        if (encodeError != lastCaptureError_) {
-            lastCaptureError_ = encodeError;
-            emit logMessage(
-                QStringLiteral("JPEG 编码失败：%1").arg(encodeError));
-        }
-        scheduleNextFrame(clock.elapsed());
-        return;
-    }
-
-    const bool keyframe = forceKeyframe_;
-    pacer_.observe(
-        jpeg.size(),
-        static_cast<double>(clock.elapsed()));
-    link_->sendVideo(jpeg, keyframe);
-    forceKeyframe_ = false;
-    ++sentFrames_;
-    scheduleNextFrame(clock.elapsed());
-}
-
 void HostSession::pushStats()
 {
     if (!running_) {
@@ -682,7 +553,11 @@ void HostSession::pushStats()
 
     const LinkStats linkStats = link_ ? link_->stats() : LinkStats{};
     const double kb =
-        static_cast<double>(pacer_.lastSize()) / 1024.0;
+        static_cast<double>(lastFrameBytes_) / 1024.0;
+    const double encodeMs =
+        static_cast<double>(lastCaptureMs_ + lastEncodeMs_);
+    const int streamFps =
+        lastEffectiveFps_ > 0 ? lastEffectiveFps_ : settings_.fps;
     QJsonObject stats{
         {QStringLiteral("t"), QStringLiteral("stats")},
         {QStringLiteral("fps"),
@@ -693,13 +568,13 @@ void HostSession::pushStats()
          std::round(linkStats.rttMs * 10.0) / 10.0},
         {QStringLiteral("mode"), linkStats.mode},
         {QStringLiteral("relay"), linkStats.usingRelay},
-        {QStringLiteral("quality"), pacer_.quality()},
+        {QStringLiteral("quality"), lastFrameQuality_},
         {QStringLiteral("kb"), std::round(kb * 10.0) / 10.0},
         {QStringLiteral("enc_ms"),
-         std::round(pacer_.lastMs() * 10.0) / 10.0},
+         std::round(encodeMs * 10.0) / 10.0},
         {QStringLiteral("cap"),
          std::round(rateLimitMbps_ * 10.0) / 10.0},
-        {QStringLiteral("sfps"), effectiveFps()},
+        {QStringLiteral("sfps"), streamFps},
     };
     sendControl(stats);
     emit statsChanged(stats);
@@ -729,10 +604,9 @@ void HostSession::applySettings(const QJsonObject &message)
         : message;
     settings_.update(values);
     refreshMonitors();
-    pacer_.setQuality(settings_.quality);
-    forceKeyframe_ = true;
-    lastFingerprint_.clear();
-    lastFingerprintMonitor_ = -1;
+    if (running_) {
+        videoPipeline_.update(settings_, settings_.quality);
+    }
 
     if (running_ && settings_.audio) {
         startAudio();
@@ -771,7 +645,7 @@ void HostSession::dispatch(const QJsonObject &message)
         return;
     }
     if (kind == QStringLiteral("keyframe_req")) {
-        forceKeyframe_ = true;
+        videoPipeline_.requestKeyframe();
         return;
     }
     if (kind == QStringLiteral("audio")) {

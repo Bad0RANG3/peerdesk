@@ -118,7 +118,9 @@ Viewer 实况中断 ──▶ Reconnecting ──同码重新配对/握手──
 ### 3.3 视频数据流
 
 ```text
-抓屏/缩放 → JPEG → VideoSender
+PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePacer
+  → queued frameReady
+  → HostSession/VideoSender
   → 视频分片 DATA + XOR PARITY
   → 包头 + AEAD
   → UDP 直连或 RLY1 中继
@@ -126,11 +128,14 @@ Viewer 实况中断 ──▶ Reconnecting ──同码重新配对/握手──
   → ViewerPage 解码、缩放和绘制
 ```
 
-- 抓屏由 Qt 主线程上的采集定时器驱动。
-- `HostSession` 根据画质、目标帧率和带宽上限调整 JPEG 质量与发送节奏。
-- 静帧可跳过发送；仍会周期提供关键帧基准。
+- `VideoPipeline` 在独立的 `PeerDeskVideo` 线程中执行抓屏、缩放、静帧指纹和 JPEG
+  编码，并用单次定时器在每帧编码完成后串行调度下一帧。
+- `HostSession` 在主线程接收编码完成的帧并交给 `PeerLink` 发送；画质、显示器和带宽
+  设置通过排队调用同步到媒体线程。
+- `FramePacer` 根据实际帧大小调整 JPEG 质量，带宽上限同时影响质量预算和有效发帧率。
+- 静帧可跳过发送；首帧和显式关键帧请求会提供新的编码基准。
 - 丢片由 NACK 请求重传；关键帧丢失会请求新的关键帧。
-- 解码后的 `QImage` 交给 Viewer 画布，坐标按实际画面矩形归一化。
+- Viewer 仍在主线程解码 JPEG，随后把 `QImage` 交给画布，坐标按实际画面矩形归一化。
 
 ### 3.4 音频数据流
 
@@ -219,16 +224,21 @@ Qt 事件循环是主执行体。以下工作都在主线程完成：
 
 - Qt 窗口、画布绘制、菜单、托盘和偏好读写。
 - TCP 信令和 UDP socket 回调。
-- GDI 抓屏、缩放和整帧 JPEG 编码。
 - 视频发送、Viewer JPEG 解码和画布更新。
 - `QAudioSink` 播放。
 - 文件分块、剪贴板和大部分会话控制。
 
-当前唯一明确的额外采集线程是 `WasapiLoopbackSource` 内部的 `std::thread`。
-它负责从 WASAPI loopback 读取 PCM，随后把数据交回会话路径。
+`VideoPipeline` 创建一个名为 `PeerDeskVideo` 的 `QThread`。GDI 抓屏、缩放、静帧检测、
+JPEG 编码和 `FramePacer` 都在该线程串行执行；启动、停止和设置更新通过 Qt 排队/阻塞
+调用进入 worker，编码结果再以排队信号交回主线程。停止或重启会递增 generation，
+丢弃旧线程路径尚未交付的帧。
 
-代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准。文档不得把主线程上的定时采集
-描述成多线程流水线，也不得宣称已达到某个性能指标。
+`WasapiLoopbackSource` 内部另有一个 `std::thread`，负责读取 WASAPI loopback PCM，
+随后把数据交回会话路径。
+
+代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；视频发送和 Viewer 解码仍在
+主线程。当前只证明抓屏、缩放、静帧检测和 JPEG 编码已脱离 UI 线程，不能据此宣称完整
+多线程媒体管线或已达到某个性能指标。
 
 ## 6. 配置、日志与运行边界
 
@@ -287,7 +297,8 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 ## 8. 当前架构限制
 
 - 视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码。
-- 抓屏只有 GDI，每帧需要完整抓取和缩放。
+- 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测和 JPEG 编码已移至独立
+  媒体线程，但视频发送和 Viewer 解码仍在主线程。
 - 声音是固定 G.711 µ-law，没有 Opus。
 - 文件支持单文件断线续传，但断点只保留 10 分钟，跨机续传仍待真实验收；断点失效时
   回退为整文件重试。接收端同名同大小文件已通过回环测试分配独立路径并隔离断点，但

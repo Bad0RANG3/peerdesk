@@ -21,6 +21,7 @@
 #include <QtTest>
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -261,6 +262,54 @@ public:
     int writes = 0;
 };
 
+class ThreadAwareScreenSource final : public IScreenSource {
+public:
+    ThreadAwareScreenSource(
+        int width = 1280,
+        int height = 720,
+        bool twoMonitors = false)
+        : source_(width, height, twoMonitors)
+    {
+    }
+
+    [[nodiscard]] QString backend() const override
+    {
+        return source_.backend();
+    }
+
+    [[nodiscard]] QList<MonitorInfo> monitors() const override
+    {
+        return source_.monitors();
+    }
+
+    CaptureResult capture(const CaptureRequest &request) override
+    {
+        lastCaptureThread_.store(QThread::currentThreadId());
+        captureCount_.fetch_add(1);
+        return source_.capture(request);
+    }
+
+    void close() override
+    {
+        source_.close();
+    }
+
+    [[nodiscard]] Qt::HANDLE lastCaptureThread() const
+    {
+        return lastCaptureThread_.load();
+    }
+
+    [[nodiscard]] int captureCount() const
+    {
+        return captureCount_.load();
+    }
+
+private:
+    SyntheticScreenSource source_;
+    std::atomic<Qt::HANDLE> lastCaptureThread_{nullptr};
+    std::atomic<int> captureCount_{0};
+};
+
 QByteArray makePayload(qsizetype size, quint32 seed)
 {
     QByteArray payload(size, '\0');
@@ -358,6 +407,117 @@ private slots:
         QCOMPARE(pacer.quality(), 63);
         pacer.setBudgetKb(0.0);
         QCOMPARE(pacer.targetKb(), 140);
+    }
+
+    void videoPipelineRunsOffMainThread()
+    {
+        auto screen = std::make_shared<ThreadAwareScreenSource>(
+            1280,
+            720,
+            true);
+        VideoPipeline pipeline;
+        QList<EncodedVideoFrame> frames;
+        QList<QString> errors;
+        connect(
+            &pipeline,
+            &VideoPipeline::frameReady,
+            [&frames](const EncodedVideoFrame &frame) {
+                frames.append(frame);
+            });
+        connect(
+            &pipeline,
+            &VideoPipeline::failed,
+            [&errors](const QString &error) { errors.append(error); });
+
+        pipeline.setSource(screen);
+        QCOMPARE(pipeline.monitors().size(), qsizetype(2));
+        QCOMPARE(pipeline.backend(), QStringLiteral("synthetic"));
+
+        VideoSettings settings;
+        settings.fps = 20;
+        settings.maxWidth = 640;
+        settings.quality = 71;
+        settings.skipStatic = false;
+        QString error;
+        QVERIFY2(
+            pipeline.start(settings, settings.quality, &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() { return !frames.isEmpty(); },
+            4000));
+        if (!errors.isEmpty()) {
+            QFAIL(qPrintable(errors.constFirst()));
+        }
+        QVERIFY(screen->captureCount() > 0);
+        QVERIFY(
+            screen->lastCaptureThread()
+            != QThread::currentThreadId());
+
+        const EncodedVideoFrame first = frames.constLast();
+        QVERIFY(first.keyframe);
+        QVERIFY(!first.data.isEmpty());
+        QVERIFY(first.quality > 0);
+        QVERIFY(first.effectiveFps > 0);
+        const QImage firstImage =
+            QImage::fromData(first.data, "jpeg");
+        QVERIFY(!firstImage.isNull());
+        QCOMPARE(firstImage.size(), QSize(640, 360));
+
+        const qsizetype beforeKeyframe = frames.size();
+        pipeline.requestKeyframe();
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    frames.cbegin() + beforeKeyframe,
+                    frames.cend(),
+                    [](const EncodedVideoFrame &frame) {
+                        return frame.keyframe;
+                    });
+            },
+            3000));
+
+        VideoSettings updated = settings;
+        updated.maxWidth = 320;
+        updated.monitor = 1;
+        updated.quality = 48;
+        pipeline.update(updated, updated.quality);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    frames.cbegin(),
+                    frames.cend(),
+                    [](const EncodedVideoFrame &frame) {
+                        const QImage image =
+                            QImage::fromData(frame.data, "jpeg");
+                        return image.size() == QSize(320, 240);
+                    });
+            },
+            4000));
+
+        pipeline.setRateLimit(2.0);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    frames.cbegin(),
+                    frames.cend(),
+                    [](const EncodedVideoFrame &frame) {
+                        return frame.quality != 0;
+                    });
+            },
+            3000));
+
+        pipeline.stop();
+        const qsizetype afterStop = frames.size();
+        pumpEvents(200);
+        QCOMPARE(frames.size(), afterStop);
+
+        QVERIFY2(
+            pipeline.start(updated, updated.quality, &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() { return frames.size() > afterStop; },
+            4000));
+        pipeline.stop();
     }
 
     void audioCodecPreservesFramesAndSuppressesSilence()

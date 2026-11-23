@@ -86,6 +86,8 @@ add_library(peerdesk_session STATIC
     src/session/audio_codec.h
     src/session/file_transfer.cpp
     src/session/file_transfer.h
+    src/session/video_pipeline.cpp
+    src/session/video_pipeline.h
     src/session/host_session.cpp
     src/session/host_session.h
     src/session/viewer_session.cpp
