@@ -14,6 +14,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QFile>
 #include <QGraphicsOpacityEffect>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -111,8 +112,11 @@ private slots:
     void outgoingFileQueueRetriesAndContinues();
     void outgoingFileQueuePausesAndResumes();
     void outgoingFileQueueIgnoresStaleCallbacks();
+    void outgoingFileQueueAdoptsResumedTransfer();
     void viewerFileTransferCancelState();
     void hostFileTransferCancelState();
+    void hostFileQueueFiltersAndRetries();
+    void hostFileQueuePausesAndResumes();
     void appWindowKeepsViewerDuringLiveSession();
     void windowGeometryRoundTrip();
     void windowGeometryFallsBackWhenOffscreen();
@@ -1148,6 +1152,70 @@ void UiTest::outgoingFileQueueIgnoresStaleCallbacks()
     QCOMPARE(queue.succeededCount(), 2);
 }
 
+void UiTest::outgoingFileQueueAdoptsResumedTransfer()
+{
+    pd::ui::OutgoingFileQueue queue;
+    QCOMPARE(queue.enqueue({QStringLiteral("C:/tmp/resume.bin")}), 1);
+    const auto sender = [](const QString &, QString *error) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    };
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(
+        QStringLiteral("resume-1"),
+        QStringLiteral("resume.bin"),
+        1000));
+    QVERIFY(queue.markProgress(QStringLiteral("resume-1"), 600, 1000));
+    QVERIFY(queue.interruptActive(QStringLiteral("network")));
+    QVERIFY(!queue.active());
+    QVERIFY(queue.hasRetryable());
+
+    QVERIFY(queue.markStarted(
+        QStringLiteral("resume-2"),
+        QStringLiteral("resume.bin"),
+        1000));
+    QCOMPARE(queue.size(), 1);
+    QVERIFY(queue.active());
+    QCOMPARE(
+        queue.activeTask()->id,
+        QStringLiteral("resume-2"));
+    QCOMPARE(queue.activeTask()->sent, 600);
+    QCOMPARE(queue.activeTask()->attempts, 1);
+
+    QVERIFY(!queue.markProgress(
+        QStringLiteral("resume-1"),
+        700,
+        1000));
+    QVERIFY(!queue.markFinished(
+        QStringLiteral("resume-1"),
+        QStringLiteral("resume.bin"),
+        1000));
+    QVERIFY(!queue.markFailed(
+        QStringLiteral("resume-1"),
+        QStringLiteral("stale")));
+    QVERIFY(!queue.markCancelled(
+        QStringLiteral("resume-1"),
+        QStringLiteral("stale")));
+    QVERIFY(!queue.markInterrupted(
+        QStringLiteral("resume-1"),
+        QStringLiteral("stale")));
+
+    QVERIFY(queue.markProgress(QStringLiteral("resume-2"), 800, 1000));
+    QCOMPARE(queue.activeTask()->sent, 800);
+    QVERIFY(queue.markFinished(
+        QStringLiteral("resume-2"),
+        QStringLiteral("resume.bin"),
+        1000));
+    QCOMPARE(queue.succeededCount(), 1);
+    QCOMPARE(queue.succeededBytes(), 1000);
+    QCOMPARE(queue.size(), 1);
+}
+
 void UiTest::viewerFileTransferCancelState()
 {
     const auto preferences = testPreferences();
@@ -1252,11 +1320,21 @@ void UiTest::hostFileTransferCancelState()
 
     panel.sendFileButton()->click();
     QTest::qWait(10);
-    QVERIFY(!panel.fileBusy());
-    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
+    QVERIFY(panel.fileBusy());
+    QVERIFY(panel.sendFileButton()->isEnabled());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("取消发送"));
     QCOMPARE(
         panel.fileStatus()->text(),
         QStringLiteral("取消传输失败"));
+
+    host.outgoingFileCancelled(
+        QStringLiteral("host-file"),
+        QStringLiteral("cancelled"));
+    QTest::qWait(10);
+    QVERIFY(!panel.fileBusy());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
+    QVERIFY(panel.fileStatus()->text().contains(
+        QStringLiteral("传输已取消")));
 
     host.outgoingFileStarted(
         QStringLiteral("host-file-2"),
@@ -1270,9 +1348,8 @@ void UiTest::hostFileTransferCancelState()
     QTest::qWait(10);
     QVERIFY(!panel.fileBusy());
     QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
-    QCOMPARE(
-        panel.fileStatus()->text(),
-        QStringLiteral("传输已取消"));
+    QVERIFY(panel.fileStatus()->text().contains(
+        QStringLiteral("传输已取消")));
 
     host.outgoingFileStarted(
         QStringLiteral("host-file-3"),
@@ -1288,6 +1365,166 @@ void UiTest::hostFileTransferCancelState()
     QCOMPARE(
         panel.fileStatus()->text(),
         QStringLiteral("传输已中断，恢复后自动续传"));
+}
+
+void UiTest::hostFileQueueFiltersAndRetries()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString alphaPath = directory.filePath(QStringLiteral("alpha.bin"));
+    const QString betaPath = directory.filePath(QStringLiteral("beta.txt"));
+    const QString emptyPath = directory.filePath(QStringLiteral("empty.bin"));
+    const QString missingPath =
+        directory.filePath(QStringLiteral("missing.bin"));
+
+    QFile alpha(alphaPath);
+    QVERIFY(alpha.open(QIODevice::WriteOnly));
+    QCOMPARE(alpha.write("alpha"), qint64(5));
+    alpha.close();
+    QFile beta(betaPath);
+    QVERIFY(beta.open(QIODevice::WriteOnly));
+    QCOMPARE(beta.write("beta"), qint64(4));
+    beta.close();
+    QFile empty(emptyPath);
+    QVERIFY(empty.open(QIODevice::WriteOnly));
+    empty.close();
+
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    host.setPreferences(preferences);
+    pd::ui::HostPanel panel(&host, false);
+    panel.resize(800, 900);
+    panel.show();
+    QTest::qWait(20);
+
+    QSignalSpy toasts(&panel, &pd::ui::HostPanel::toastRequested);
+    panel.filePathInput()->setText(alphaPath);
+    panel.sendFiles({
+        alphaPath,
+        betaPath,
+        alphaPath,
+        emptyPath,
+        missingPath,
+    });
+    QTest::qWait(10);
+
+    QCOMPARE(panel.fileQueueSize(), 2);
+    QVERIFY(panel.filePathInput()->text().isEmpty());
+    QCOMPARE(toasts.count(), 2);
+    QVERIFY(
+        toasts.at(0).constFirst().toString().contains(
+            QStringLiteral("2 个文件")));
+    QVERIFY(
+        toasts.at(1).constFirst().toString().contains(
+            QStringLiteral("2 个文件不可读或为空")));
+
+    host.outgoingFileStarted(
+        QStringLiteral("alpha-1"),
+        QStringLiteral("alpha.bin"),
+        alpha.size());
+    QTest::qWait(10);
+    QVERIFY(panel.fileBusy());
+    QVERIFY(panel.fileRetryButton()->isHidden());
+    host.outgoingFileFailed(
+        QStringLiteral("alpha-1"),
+        QStringLiteral("io"));
+    QTest::qWait(10);
+    QVERIFY(!panel.fileBusy());
+    QVERIFY(panel.fileStatus()->text().contains(
+        QStringLiteral("文件读写失败")));
+
+    host.outgoingFileStarted(
+        QStringLiteral("beta-1"),
+        QStringLiteral("beta.txt"),
+        beta.size());
+    host.outgoingFileFailed(
+        QStringLiteral("beta-1"),
+        QStringLiteral("io"));
+    QTest::qWait(10);
+    QTRY_VERIFY_WITH_TIMEOUT(panel.fileRetryButton()->isVisible(), 500);
+    QVERIFY(panel.fileStatus()->text().contains(
+        QStringLiteral("发送失败")));
+    QCOMPARE(panel.fileQueueSize(), 2);
+
+    panel.fileRetryButton()->click();
+    QTest::qWait(10);
+    QVERIFY(panel.fileRetryButton()->isHidden());
+    QVERIFY(!panel.fileBusy());
+    QVERIFY(panel.fileStatus()->text().contains(
+        QStringLiteral("等待发送")));
+    QCOMPARE(panel.fileQueueSize(), 2);
+}
+
+void UiTest::hostFileQueuePausesAndResumes()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("resume.bin"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write(QByteArray(4096, 'r')), qint64(4096));
+    file.close();
+
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    host.setPreferences(preferences);
+    pd::ui::HostPanel panel(&host, false);
+    panel.resize(800, 900);
+    panel.show();
+    QTest::qWait(20);
+
+    panel.sendFiles({path});
+    QTest::qWait(10);
+    QCOMPARE(panel.fileQueueSize(), 1);
+    host.outgoingFileStarted(
+        QStringLiteral("resume-1"),
+        QStringLiteral("resume.bin"),
+        4096);
+    host.outgoingFileProgress(
+        QStringLiteral("resume-1"),
+        1024,
+        4096);
+    QTest::qWait(10);
+    QVERIFY(panel.fileBusy());
+    QVERIFY(panel.fileStatus()->text().contains(QStringLiteral("25%")));
+
+    host.stateChanged(pd::HostController::State::Waiting);
+    QTest::qWait(10);
+    QVERIFY(panel.fileQueuePaused());
+    QVERIFY(!panel.fileBusy());
+    QVERIFY(panel.fileStatus()->text().contains(QStringLiteral("暂停")));
+
+    host.outgoingFileStarted(
+        QStringLiteral("resume-2"),
+        QStringLiteral("resume.bin"),
+        4096);
+    QTest::qWait(10);
+    QCOMPARE(panel.fileQueueSize(), 1);
+    QVERIFY(panel.fileQueuePaused());
+    QVERIFY(panel.fileBusy());
+
+    host.stateChanged(pd::HostController::State::Streaming);
+    QTest::qWait(10);
+    QVERIFY(!panel.fileQueuePaused());
+    QCOMPARE(panel.fileQueueSize(), 1);
+    QVERIFY(panel.fileBusy());
+    QVERIFY(panel.fileStatus()->text().contains(
+        QStringLiteral("resume.bin")));
+    QVERIFY(panel.fileStatus()->text().contains(QStringLiteral("25%")));
+
+    host.outgoingFileProgress(
+        QStringLiteral("resume-2"),
+        2048,
+        4096);
+    QTest::qWait(10);
+    QVERIFY(panel.fileStatus()->text().contains(QStringLiteral("50%")));
+    host.outgoingFileFinished(
+        QStringLiteral("resume-2"),
+        QStringLiteral("resume.bin"),
+        4096);
+    QTest::qWait(10);
+    QVERIFY(!panel.fileBusy());
+    QCOMPARE(panel.fileQueueSize(), 1);
 }
 
 void UiTest::appWindowKeepsViewerDuringLiveSession()

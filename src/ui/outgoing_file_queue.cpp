@@ -146,11 +146,11 @@ bool OutgoingFileQueue::markStarted(
     if (id.isEmpty() || seenIds_.contains(id)) {
         return false;
     }
-    seenIds_.insert(id);
     if (Task *task = mutableActiveTask()) {
         if (!task->id.isEmpty() && task->id != id) {
             return false;
         }
+        seenIds_.insert(id);
         task->id = id;
         if (!name.isEmpty()) {
             task->name = name;
@@ -162,12 +162,65 @@ bool OutgoingFileQueue::markStarted(
         return true;
     }
 
+    const auto matches = [&name, size](const Task &task) {
+        if (name.isEmpty() || task.name != name) {
+            return false;
+        }
+        return size <= 0 || task.size <= 0 || task.size == size;
+    };
+    const auto reusable = [&matches](const Task &task) {
+        return task.state == TaskState::Interrupted && matches(task);
+    };
+    auto candidate = std::find_if(
+        tasks_.rbegin(),
+        tasks_.rend(),
+        reusable);
+    if (candidate != tasks_.rend()) {
+        const int index = static_cast<int>(
+            std::distance(tasks_.begin(), candidate.base()) - 1);
+        Task &task = tasks_[static_cast<std::size_t>(index)];
+        seenIds_.insert(id);
+        task.id = id;
+        task.error.clear();
+        if (size > 0) {
+            task.size = size;
+        }
+        task.state = TaskState::Sending;
+        activeIndex_ = index;
+        return true;
+    }
+
+    const auto waiting = std::find_if(
+        tasks_.begin(),
+        tasks_.end(),
+        [&matches](const Task &task) {
+            return task.state == TaskState::Waiting && matches(task);
+        });
+    if (waiting != tasks_.end()) {
+        const int index = static_cast<int>(
+            std::distance(tasks_.begin(), waiting));
+        Task &task = *waiting;
+        seenIds_.insert(id);
+        task.id = id;
+        task.error.clear();
+        if (size > 0) {
+            task.size = size;
+        }
+        if (task.attempts == 0) {
+            task.attempts = 1;
+        }
+        task.state = TaskState::Sending;
+        activeIndex_ = index;
+        return true;
+    }
+
     Task task;
     task.name = name;
     task.id = id;
     task.size = std::max<qint64>(size, 0);
     task.attempts = 1;
     task.state = TaskState::Sending;
+    seenIds_.insert(id);
     tasks_.push_back(std::move(task));
     activeIndex_ = static_cast<int>(tasks_.size()) - 1;
     return true;

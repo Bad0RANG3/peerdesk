@@ -25,6 +25,7 @@
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QTextCursor>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -83,6 +84,48 @@ QFrame *makeRail(QWidget *parent)
         "  border-radius: 10px;"
         "}"));
     return rail;
+}
+
+QString formatTransferSize(qint64 bytes)
+{
+    if (bytes < 1024) {
+        return QStringLiteral("%1 B").arg(bytes);
+    }
+    if (bytes < 1024 * 1024) {
+        return QStringLiteral("%1 KB")
+            .arg(static_cast<double>(bytes) / 1024.0, 0, 'f', 1);
+    }
+    return QStringLiteral("%1 MB")
+        .arg(static_cast<double>(bytes) / (1024.0 * 1024.0), 0, 'f', 1);
+}
+
+QString fileFailureText(const QString &reason)
+{
+    if (reason == QStringLiteral("offline")) {
+        return QStringLiteral("传输通道尚未建立");
+    }
+    if (reason == QStringLiteral("missing")) {
+        return QStringLiteral("文件不存在");
+    }
+    if (reason == QStringLiteral("size")) {
+        return QStringLiteral("文件为空或超过 512 MB");
+    }
+    if (reason == QStringLiteral("busy")) {
+        return QStringLiteral("另一个文件仍在发送");
+    }
+    if (reason == QStringLiteral("cancelled")) {
+        return QStringLiteral("传输已取消");
+    }
+    if (reason == QStringLiteral("interrupted")) {
+        return QStringLiteral("传输已中断");
+    }
+    if (reason == QStringLiteral("io")) {
+        return QStringLiteral("文件读写失败");
+    }
+    if (reason == QStringLiteral("data")) {
+        return QStringLiteral("文件数据校验失败");
+    }
+    return reason.isEmpty() ? QStringLiteral("文件传输失败") : reason;
 }
 
 } // namespace
@@ -378,6 +421,12 @@ void HostPanel::buildUi()
     sendFileButton_->setCursor(Qt::PointingHandCursor);
     sendFileButton_->setMinimumHeight(41);
     fileRow->addWidget(sendFileButton_);
+    fileRetryButton_ = new QPushButton(QStringLiteral("重试"), card);
+    fileRetryButton_->setObjectName(QStringLiteral("retryFileButton"));
+    fileRetryButton_->setCursor(Qt::PointingHandCursor);
+    fileRetryButton_->setMinimumHeight(41);
+    fileRetryButton_->hide();
+    fileRow->addWidget(fileRetryButton_);
     layout->addLayout(fileRow);
     fileStatus_ = new QLabel(card);
     fileStatus_->setObjectName(QStringLiteral("fileStatus"));
@@ -423,11 +472,13 @@ void HostPanel::buildUi()
     scroll->setWidget(content);
 
     connect(browseButton, &QPushButton::clicked, this, [this]() {
-        const QString path = QFileDialog::getOpenFileName(
+        const QStringList paths = QFileDialog::getOpenFileNames(
             this,
             QStringLiteral("选择要发送的文件"));
-        if (!path.isEmpty()) {
-            filePathInput_->setText(path);
+        if (!paths.isEmpty()) {
+            filePathInput_->setText(
+                paths.size() == 1 ? paths.constFirst() : QString());
+            sendFiles(paths);
         }
     });
     connect(clearButton, &QPushButton::clicked, logView_, &QPlainTextEdit::clear);
@@ -465,12 +516,16 @@ void HostPanel::connectSignals()
     connect(sendFileButton_, &QPushButton::clicked, this, [this]() {
         if (fileBusy_) {
             if (!controller_->cancelFile()) {
-                setFileBusy(false);
-                fileStatus_->setText(QStringLiteral("取消传输失败"));
-                fileStatus_->setStyleSheet(
-                    QStringLiteral("color: #f2555a;"));
-                fileStatus_->show();
+                cancelPending_ = false;
+                updateFileTransferUi(
+                    QStringLiteral("取消传输失败"),
+                    QStringLiteral("#f2555a"));
+                appendLog(QStringLiteral("取消传输失败"));
+                emit toastRequested(QStringLiteral("取消传输失败"));
+                return;
             }
+            cancelPending_ = true;
+            updateFileTransferUi();
             return;
         }
         const QString path = filePathInput_->text().trimmed();
@@ -485,12 +540,55 @@ void HostPanel::connectSignals()
             sendFile(filePathInput_->text().trimmed());
         }
     });
+    connect(
+        fileRetryButton_,
+        &QPushButton::clicked,
+        this,
+        [this]() {
+            if (fileQueue_.active() || fileQueue_.hasPending()
+                || !fileQueue_.hasFailed()) {
+                return;
+            }
+            if (!fileQueue_.retryFailed()) {
+                return;
+            }
+            lastFilePercent_ = -1;
+            updateFileTransferUi();
+            flushFileQueue();
+        });
 
     connect(
         controller_,
         &HostController::stateChanged,
         this,
-        [this](HostController::State) {
+        [this](HostController::State state) {
+            if (state == HostController::State::Streaming) {
+                if (!fileQueue_.empty()) {
+                    const auto *task = fileQueue_.activeTask();
+                    lastFilePercent_ =
+                        task && task->size > 0
+                        ? static_cast<int>(
+                            (task->sent * 100) / task->size)
+                        : -1;
+                    fileQueue_.resume();
+                    updateFileTransferUi();
+                    if (!fileQueue_.active()
+                        && fileQueue_.hasPending()) {
+                        QTimer::singleShot(
+                            0,
+                            this,
+                            &HostPanel::flushFileQueue);
+                    }
+                }
+            } else if (!fileQueue_.empty()) {
+                cancelPending_ = false;
+                if (fileQueue_.active()) {
+                    fileQueue_.interruptActive(
+                        QStringLiteral("interrupted"));
+                }
+                fileQueue_.pause();
+                updateFileTransferUi();
+            }
             updateState();
         });
     connect(
@@ -555,72 +653,127 @@ void HostPanel::connectSignals()
         controller_,
         &HostController::outgoingFileStarted,
         this,
-        [this](const QString &, const QString &name, qint64 size) {
-            setFileBusy(true);
-            fileStatus_->setText(
-                QStringLiteral("正在发送 %1 · %2 KB")
-                    .arg(name)
-                    .arg(size / 1024));
-            fileStatus_->setStyleSheet(QStringLiteral("color: #69728a;"));
-            fileStatus_->show();
-            appendLog(QStringLiteral("开始发送文件 %1").arg(name));
+        [this](const QString &id, const QString &name, qint64 size) {
+            if (!fileQueue_.markStarted(id, name, size)) {
+                return;
+            }
+            const auto *task = fileQueue_.activeTask();
+            cancelPending_ = false;
+            lastFilePercent_ =
+                task && task->size > 0
+                ? std::clamp(
+                    static_cast<int>((task->sent * 100) / task->size),
+                    0,
+                    100)
+                : -1;
+            updateFileTransferUi();
+            const QString displayName =
+                task && !task->name.isEmpty() ? task->name : name;
+            appendLog(
+                task && task->sent > 0
+                ? QStringLiteral("继续发送文件 %1").arg(displayName)
+                : QStringLiteral("开始发送文件 %1").arg(displayName));
         });
     connect(
         controller_,
         &HostController::outgoingFileProgress,
         this,
-        [this](const QString &, qint64 sent, qint64 total) {
-            const int percent = total > 0
-                ? static_cast<int>((sent * 100) / total)
-                : 0;
-            fileStatus_->setText(
-                QStringLiteral("文件发送中 · %1%").arg(percent));
-            fileStatus_->setStyleSheet(QStringLiteral("color: #69728a;"));
-            fileStatus_->show();
+        [this](const QString &id, qint64 sent, qint64 total) {
+            if (!fileQueue_.markProgress(id, sent, total)
+                || total <= 0) {
+                return;
+            }
+            const int percent = std::clamp(
+                static_cast<int>((sent * 100) / total),
+                0,
+                100);
+            if (percent == lastFilePercent_) {
+                return;
+            }
+            lastFilePercent_ = percent;
+            updateFileTransferUi();
         });
     connect(
         controller_,
         &HostController::outgoingFileFinished,
         this,
-        [this](const QString &, const QString &name, qint64) {
-            setFileBusy(false);
-            fileStatus_->setText(QStringLiteral("已发送 %1").arg(name));
-            fileStatus_->setStyleSheet(QStringLiteral("color: #35d07f;"));
-            fileStatus_->show();
+        [this](const QString &id, const QString &name, qint64 size) {
+            if (!fileQueue_.markFinished(id, name, size)) {
+                return;
+            }
+            cancelPending_ = false;
+            lastFilePercent_ = -1;
             appendLog(QStringLiteral("文件发送完成 %1").arg(name));
+            emit toastRequested(QStringLiteral("文件已发送：%1").arg(name));
+            updateFileTransferUi();
+            if (fileQueue_.hasPending()) {
+                QTimer::singleShot(
+                    0,
+                    this,
+                    &HostPanel::flushFileQueue);
+            }
         });
     connect(
         controller_,
         &HostController::outgoingFileFailed,
         this,
-        [this](const QString &, const QString &reason) {
-            setFileBusy(false);
-            fileStatus_->setText(QStringLiteral("发送失败：%1").arg(reason));
-            fileStatus_->setStyleSheet(QStringLiteral("color: #f2555a;"));
-            fileStatus_->show();
-            appendLog(QStringLiteral("文件发送失败：%1").arg(reason));
+        [this](const QString &id, const QString &reason) {
+            if (!fileQueue_.markFailed(id, reason)) {
+                return;
+            }
+            cancelPending_ = false;
+            lastFilePercent_ = -1;
+            const QString text = QStringLiteral("发送失败：%1")
+                .arg(fileFailureText(reason));
+            appendLog(text);
+            emit toastRequested(text);
+            updateFileTransferUi(text, QStringLiteral("#f2555a"));
+            if (fileQueue_.hasPending()) {
+                QTimer::singleShot(
+                    0,
+                    this,
+                    &HostPanel::flushFileQueue);
+            }
         });
     connect(
         controller_,
         &HostController::outgoingFileCancelled,
         this,
-        [this](const QString &, const QString &) {
-            setFileBusy(false);
-            fileStatus_->setText(QStringLiteral("传输已取消"));
-            fileStatus_->setStyleSheet(QStringLiteral("color: #ffd9a3;"));
-            fileStatus_->show();
-            appendLog(QStringLiteral("文件传输已取消"));
+        [this](const QString &id, const QString &reason) {
+            const auto *active = fileQueue_.activeTask();
+            const QString name = active ? active->name : QString();
+            if (!fileQueue_.markCancelled(id, reason)) {
+                return;
+            }
+            cancelPending_ = false;
+            lastFilePercent_ = -1;
+            const QString text = name.isEmpty()
+                ? QStringLiteral("传输已取消")
+                : QStringLiteral("传输已取消：%1").arg(name);
+            appendLog(text);
+            emit toastRequested(text);
+            updateFileTransferUi(text, QStringLiteral("#ffd9a3"));
+            if (fileQueue_.hasPending()) {
+                QTimer::singleShot(
+                    0,
+                    this,
+                    &HostPanel::flushFileQueue);
+            }
         });
     connect(
         controller_,
         &HostController::outgoingFileInterrupted,
         this,
-        [this](const QString &, const QString &) {
-            setFileBusy(false);
-            fileStatus_->setText(
-                QStringLiteral("传输已中断，恢复后自动续传"));
-            fileStatus_->setStyleSheet(QStringLiteral("color: #ffb38a;"));
-            fileStatus_->show();
+        [this](const QString &id, const QString &reason) {
+            if (!fileQueue_.markInterrupted(id, reason)) {
+                return;
+            }
+            cancelPending_ = false;
+            lastFilePercent_ = -1;
+            fileQueue_.pause();
+            updateFileTransferUi(
+                QStringLiteral("传输已中断，恢复后自动续传"),
+                QStringLiteral("#ffb38a"));
             appendLog(QStringLiteral("文件传输已中断"));
         });
 
@@ -719,6 +872,7 @@ void HostPanel::stopHosting()
         return;
     }
     controller_->stop();
+    clearFileTransferState();
     appendLog(QStringLiteral("被控端已停止"));
     updateState();
 }
@@ -886,45 +1040,215 @@ void HostPanel::updateLinkState(const QString &state)
 
 void HostPanel::chooseAndSendFile()
 {
-    const QString path = QFileDialog::getOpenFileName(
+    const QStringList paths = QFileDialog::getOpenFileNames(
         this,
         QStringLiteral("选择要发送的文件"));
-    if (!path.isEmpty()) {
-        filePathInput_->setText(path);
-        sendFile(path);
+    if (!paths.isEmpty()) {
+        filePathInput_->setText(
+            paths.size() == 1 ? paths.constFirst() : QString());
+        sendFiles(paths);
     }
 }
 
 void HostPanel::sendFile(const QString &pathValue)
 {
-    if (fileBusy_) {
-        return;
-    }
     const QString path = pathValue.trimmed();
     if (path.isEmpty()) {
         return;
     }
-    const QFileInfo info(path);
-    if (!info.isFile()) {
-        fileStatus_->setText(QStringLiteral("文件不存在或不可读"));
-        fileStatus_->setStyleSheet(QStringLiteral("color: #f2555a;"));
-        fileStatus_->show();
+    sendFiles({path});
+}
+
+void HostPanel::sendFiles(const QStringList &paths)
+{
+    if (paths.isEmpty()) {
         return;
     }
-    QString error;
-    if (!controller_->sendFile(path, &error)) {
-        fileStatus_->setText(
-            error.isEmpty() ? QStringLiteral("发送失败") : error);
-        fileStatus_->setStyleSheet(QStringLiteral("color: #f2555a;"));
-        fileStatus_->show();
-        appendLog(fileStatus_->text());
-        emit toastRequested(fileStatus_->text());
+    QStringList validPaths;
+    int unavailable = 0;
+    for (const QString &path : paths) {
+        const QString trimmed = path.trimmed();
+        if (trimmed.isEmpty()) {
+            continue;
+        }
+        const QFileInfo info(trimmed);
+        if (!info.isFile() || !info.isReadable() || info.size() <= 0) {
+            ++unavailable;
+            continue;
+        }
+        validPaths.append(info.absoluteFilePath());
+    }
+    if (!validPaths.isEmpty()) {
+        const int added = fileQueue_.enqueue(validPaths);
+        lastFilePercent_ = -1;
+        cancelPending_ = false;
+        if (added > 0) {
+            filePathInput_->clear();
+            const QString text = added == 1
+                ? QStringLiteral("已加入发送队列：%1")
+                    .arg(QFileInfo(validPaths.constFirst()).fileName())
+                : QStringLiteral("已加入 %1 个文件到发送队列")
+                    .arg(added);
+            appendLog(text);
+            emit toastRequested(text);
+            updateFileTransferUi();
+            flushFileQueue();
+        } else if (!fileQueue_.active()) {
+            const QString text = QStringLiteral("文件已在发送队列中");
+            appendLog(text);
+            updateFileTransferUi(text, QStringLiteral("#ffd9a3"));
+        }
+    }
+    if (unavailable > 0) {
+        const QString text = QStringLiteral("%1 个文件不可读或为空")
+            .arg(unavailable);
+        appendLog(text);
+        emit toastRequested(text);
+        if (validPaths.isEmpty()) {
+            updateFileTransferUi(text, QStringLiteral("#f2555a"));
+        }
+    }
+}
+
+void HostPanel::flushFileQueue()
+{
+    if (fileQueue_.active() || fileQueue_.paused()
+        || !controller_->active()
+        || controller_->state() != HostController::State::Streaming) {
         return;
     }
-    fileStatus_->setText(
-        QStringLiteral("正在发送 %1…").arg(info.fileName()));
-    fileStatus_->setStyleSheet(QStringLiteral("color: #9aa5b8;"));
+
+    QString rejectedText;
+    while (true) {
+        QString error;
+        const OutgoingFileQueue::StartResult result =
+            fileQueue_.startNext(
+                [this](const QString &path, QString *sendError) {
+                    return controller_->sendFile(path, sendError);
+                },
+                &error);
+        if (result == OutgoingFileQueue::StartResult::Started) {
+            const auto *task = fileQueue_.activeTask();
+            cancelPending_ = false;
+            lastFilePercent_ =
+                task && task->size > 0
+                ? std::clamp(
+                    static_cast<int>((task->sent * 100) / task->size),
+                    0,
+                    100)
+                : -1;
+            updateFileTransferUi();
+            return;
+        }
+        if (result == OutgoingFileQueue::StartResult::NoTask) {
+            break;
+        }
+        rejectedText = QStringLiteral("发送失败：%1")
+            .arg(fileFailureText(error));
+    }
+    lastFilePercent_ = -1;
+    if (!rejectedText.isEmpty()) {
+        appendLog(rejectedText);
+        emit toastRequested(rejectedText);
+        updateFileTransferUi(rejectedText, QStringLiteral("#f2555a"));
+    } else {
+        updateFileTransferUi();
+    }
+}
+
+void HostPanel::updateFileTransferUi(
+    const QString &message,
+    const QString &color)
+{
+    const auto *task = fileQueue_.activeTask();
+    QString text = message;
+    QString effectiveColor = color;
+    if (text.isEmpty()) {
+        if (task && !fileQueue_.paused()) {
+            const int percent = task->size > 0
+                ? std::clamp(
+                    static_cast<int>((task->sent * 100) / task->size),
+                    0,
+                    100)
+                : 0;
+            text = QStringLiteral("正在发送 %1/%2 · %3 · %4%")
+                .arg(fileQueue_.activePosition())
+                .arg(fileQueue_.size())
+                .arg(
+                    task->name.isEmpty()
+                        ? QStringLiteral("文件")
+                        : task->name)
+                .arg(percent);
+            effectiveColor = QStringLiteral("#9aa5b8");
+        } else if (fileQueue_.hasPending()) {
+            text = fileQueue_.paused()
+                ? QStringLiteral("发送队列已暂停 · 等待连接恢复")
+                : QStringLiteral("等待发送 · %1 个文件")
+                    .arg(fileQueue_.size());
+            effectiveColor = QStringLiteral("#ffd9a3");
+        } else if (!fileQueue_.empty()) {
+            const int succeeded = fileQueue_.succeededCount();
+            const int failed = fileQueue_.failedCount();
+            const int cancelled = fileQueue_.cancelledCount();
+            if (failed > 0) {
+                text = QStringLiteral("发送完成 · 成功 %1 · 失败 %2")
+                    .arg(succeeded)
+                    .arg(failed);
+                if (cancelled > 0) {
+                    text += QStringLiteral(" · 取消 %1").arg(cancelled);
+                }
+                effectiveColor = QStringLiteral("#f2555a");
+            } else if (succeeded > 0) {
+                text = QStringLiteral("已发送 %1 个文件 · %2")
+                    .arg(succeeded)
+                    .arg(formatTransferSize(fileQueue_.succeededBytes()));
+                if (cancelled > 0) {
+                    text += QStringLiteral(" · 取消 %1").arg(cancelled);
+                }
+                effectiveColor = QStringLiteral("#35d07f");
+            } else if (cancelled > 0) {
+                text = QStringLiteral("已取消 %1 个文件").arg(cancelled);
+                effectiveColor = QStringLiteral("#ffd9a3");
+            } else {
+                text = fileQueue_.paused()
+                    ? QStringLiteral("发送队列已暂停 · 恢复后继续")
+                    : QStringLiteral("等待发送 · %1 个文件")
+                        .arg(fileQueue_.size());
+                effectiveColor = QStringLiteral("#ffd9a3");
+            }
+        }
+    }
+
+    setFileBusy(fileQueue_.active());
+    sendFileButton_->setEnabled(!cancelPending_);
+
+    const bool retryVisible =
+        !fileQueue_.active() && !fileQueue_.hasPending()
+        && fileQueue_.hasFailed();
+    fileRetryButton_->setVisible(retryVisible);
+    fileRetryButton_->setEnabled(retryVisible);
+
+    if (text.isEmpty()) {
+        fileStatus_->hide();
+        return;
+    }
+    fileStatus_->setText(text);
+    if (!effectiveColor.isEmpty()) {
+        fileStatus_->setStyleSheet(
+            QStringLiteral("color: %1;").arg(effectiveColor));
+    }
     fileStatus_->show();
+}
+
+void HostPanel::clearFileTransferState()
+{
+    fileQueue_.clear();
+    cancelPending_ = false;
+    lastFilePercent_ = -1;
+    setFileBusy(false);
+    sendFileButton_->setEnabled(true);
+    fileRetryButton_->hide();
+    fileStatus_->hide();
 }
 
 void HostPanel::setFileBusy(bool busy)
@@ -997,12 +1321,18 @@ void HostPanel::dragEnterEvent(QDragEnterEvent *event)
 void HostPanel::dropEvent(QDropEvent *event)
 {
     const QList<QUrl> urls = event->mimeData()->urls();
-    if (urls.isEmpty() || !urls.first().isLocalFile()) {
+    QStringList paths;
+    for (const QUrl &url : urls) {
+        if (url.isLocalFile()) {
+            paths.append(url.toLocalFile());
+        }
+    }
+    if (paths.isEmpty()) {
         return;
     }
-    const QString path = urls.first().toLocalFile();
-    filePathInput_->setText(path);
-    sendFile(path);
+    filePathInput_->setText(
+        paths.size() == 1 ? paths.constFirst() : QString());
+    sendFiles(paths);
     event->acceptProposedAction();
 }
 
