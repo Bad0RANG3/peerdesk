@@ -1,5 +1,6 @@
 #include "transport/peer_link.h"
 #include "transport/udp_io_pipeline.h"
+#include "transport/video_receive_pipeline.h"
 
 #include "server/server.h"
 
@@ -249,6 +250,12 @@ private slots:
             host.videoPacketizerThreadName()
             != QThread::currentThread()->objectName());
         QCOMPARE(
+            client.videoReassemblerThreadName(),
+            QStringLiteral("PeerDeskVideoReceive"));
+        QVERIFY(
+            client.videoReassemblerThreadName()
+            != QThread::currentThread()->objectName());
+        QCOMPARE(
             host.udpIoThreadName(),
             QStringLiteral("PeerDeskUdpIo"));
         QVERIFY(
@@ -322,6 +329,137 @@ private slots:
         QCOMPARE(retry.packets.size(), qsizetype(2));
         QCOMPARE(retry.packets.at(0).payload, fragments.at(0).payload);
         QCOMPARE(retry.packets.at(1).payload, fragments.at(2).payload);
+    }
+
+    void videoReceiverReassemblesAndRecoversOffThread()
+    {
+        VideoReceivePipeline pipeline;
+        QList<QByteArray> frames;
+        QList<bool> keyframes;
+        QList<VideoNack> nacks;
+        int keyframeRequests = 0;
+        connect(
+            &pipeline,
+            &VideoReceivePipeline::frameReady,
+            [&frames, &keyframes](
+                const QByteArray &frame,
+                bool keyframe) {
+                frames.append(frame);
+                keyframes.append(keyframe);
+            });
+        connect(
+            &pipeline,
+            &VideoReceivePipeline::nackReady,
+            [&nacks](quint32 frameId, const QList<quint16> &missing) {
+                nacks.append(VideoNack{frameId, missing});
+            });
+        connect(
+            &pipeline,
+            &VideoReceivePipeline::keyframeRequested,
+            [&keyframeRequests]() { ++keyframeRequests; });
+        pipeline.start();
+        QVERIFY(pipeline.running());
+
+        VideoSender sender;
+        QByteArray jpeg(24000, '\0');
+        for (qsizetype index = 0; index < jpeg.size(); ++index) {
+            jpeg[index] = static_cast<char>((index * 17) & 0xFF);
+        }
+        const QList<WirePacket> packets = sender.build(jpeg, true);
+        QList<WirePacket> parity;
+        for (const WirePacket &packet : packets) {
+            if (packet.type == PacketType::Parity) {
+                parity.append(packet);
+                continue;
+            }
+            const auto fragment = unpackVideoFragment(packet.payload);
+            QVERIFY(fragment.has_value());
+            if (fragment->index != 3) {
+                pipeline.submitData(
+                    packet.payload,
+                    (packet.flags & FlagKeyframe) != 0);
+            }
+        }
+        QVERIFY(!parity.isEmpty());
+        pipeline.submitParity(parity.constFirst().payload);
+
+        QVERIFY(waitUntil([&]() { return !frames.isEmpty(); }));
+        QCOMPARE(frames.constFirst(), jpeg);
+        QCOMPARE(keyframes.constFirst(), true);
+        QCOMPARE(
+            pipeline.reassemblerThreadName(),
+            QStringLiteral("PeerDeskVideoReceive"));
+        QVERIFY(
+            pipeline.reassemblerThreadName()
+            != QThread::currentThread()->objectName());
+
+        const QList<WirePacket> partial = sender.build(
+            QByteArray(9000, 'm'),
+            false);
+        QVERIFY(
+            partial.constFirst().type == PacketType::Data);
+        pipeline.submitData(partial.constFirst().payload, false);
+        QVERIFY(waitUntil([&]() { return !nacks.isEmpty(); }, 1500));
+        QCOMPARE(nacks.constFirst().frameId, sender.frameId());
+        QVERIFY(nacks.constFirst().missing.contains(1));
+
+        const QList<WirePacket> incompleteKeyframe = sender.build(
+            QByteArray(9000, 'k'),
+            true);
+        pipeline.submitData(
+            incompleteKeyframe.constFirst().payload,
+            true);
+        QVERIFY(waitUntil(
+            [&]() { return keyframeRequests == 1; },
+            1800));
+        QCOMPARE(keyframeRequests, 1);
+
+        const quint64 beforeStop = pipeline.sessionGeneration();
+        const QByteArray stoppedFrame(12000, 'x');
+        const QList<WirePacket> stopped = sender.build(stoppedFrame, false);
+        for (const WirePacket &packet : stopped) {
+            if (packet.type == PacketType::Data) {
+                pipeline.submitData(packet.payload, false);
+            } else {
+                pipeline.submitParity(packet.payload);
+            }
+        }
+        frames.clear();
+        pipeline.stop();
+        QVERIFY(!pipeline.running());
+        QVERIFY(pipeline.sessionGeneration() > beforeStop);
+        pumpEvents(200);
+        QVERIFY(frames.isEmpty());
+        pipeline.start();
+        QVERIFY(pipeline.running());
+
+        const quint64 beforeReset = pipeline.sessionGeneration();
+        const QByteArray staleFrame(12000, 's');
+        const QList<WirePacket> stale = sender.build(staleFrame, false);
+        for (const WirePacket &packet : stale) {
+            if (packet.type == PacketType::Data) {
+                pipeline.submitData(packet.payload, false);
+            } else {
+                pipeline.submitParity(packet.payload);
+            }
+        }
+        pipeline.resetSession();
+        QVERIFY(pipeline.sessionGeneration() > beforeReset);
+        frames.clear();
+        pumpEvents(200);
+        QVERIFY(frames.isEmpty());
+
+        const QByteArray freshFrame(12000, 'f');
+        const QList<WirePacket> fresh = sender.build(freshFrame, false);
+        for (const WirePacket &packet : fresh) {
+            if (packet.type == PacketType::Data) {
+                pipeline.submitData(packet.payload, false);
+            } else {
+                pipeline.submitParity(packet.payload);
+            }
+        }
+        QVERIFY(waitUntil([&]() { return !frames.isEmpty(); }));
+        QCOMPARE(frames.constFirst(), freshFrame);
     }
 
     void udpIoReceivesAndWritesOffThread()

@@ -5,6 +5,7 @@
 #include "core/reliable.h"
 #include "core/video.h"
 #include "transport/udp_io_pipeline.h"
+#include "transport/video_receive_pipeline.h"
 #include "transport/video_send_pipeline.h"
 
 #include <QByteArray>
@@ -100,6 +101,7 @@ public:
     [[nodiscard]] QString localAddressText() const;
     [[nodiscard]] quint16 localPort() const;
     [[nodiscard]] QString videoPacketizerThreadName() const;
+    [[nodiscard]] QString videoReassemblerThreadName() const;
     [[nodiscard]] QString udpIoThreadName() const;
     [[nodiscard]] QList<Candidate> localCandidates() const;
     [[nodiscard]] QList<Candidate> peerCandidates() const;
@@ -151,6 +153,8 @@ private:
     void sendPing();
     void handlePong(const QByteArray &payload);
     void requestKeyframe();
+    void onVideoFrameReady(const QByteArray &frame, bool keyframe);
+    void onVideoNackReady(quint32 frameId, const QList<quint16> &missing);
     void onVideoPacketsReady(const VideoPacketBatch &batch);
 
     void setState(const QString &state);
@@ -207,7 +211,7 @@ private:
     QString remoteDeviceId_;
 
     VideoSendPipeline videoSend_;
-    VideoReceiver videoReceiver_;
+    VideoReceivePipeline videoReceive_;
     ControlFragments controlFragments_;
     ReliableStream controlStream_;
     quint16 pingSequence_ = 0;

@@ -58,13 +58,6 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
     , psk_(psk)
     , timer_(new QTimer(this))
     , keyPair_(KeyPair::generate())
-    , videoReceiver_(
-          [this](const QByteArray &frame, bool keyframe) {
-              recvFramesWindow_.append(ReliableStream::currentTimeSeconds());
-              emit videoFrameReceived(frame, keyframe);
-          },
-          [this]() { requestKeyframe(); },
-          VideoSender::kFecK)
     , controlStream_(
           [this](const QByteArray &message) { deliverControl(message); },
           [this](quint32 sequence, const QByteArray &payload, quint8 flags) {
@@ -83,6 +76,21 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &VideoSendPipeline::packetizationFailed,
         this,
         &PeerLink::emitLog);
+    connect(
+        &videoReceive_,
+        &VideoReceivePipeline::frameReady,
+        this,
+        &PeerLink::onVideoFrameReady);
+    connect(
+        &videoReceive_,
+        &VideoReceivePipeline::nackReady,
+        this,
+        &PeerLink::onVideoNackReady);
+    connect(
+        &videoReceive_,
+        &VideoReceivePipeline::keyframeRequested,
+        this,
+        &PeerLink::requestKeyframe);
     connect(
         &udpIo_,
         &UdpIoPipeline::packetReceived,
@@ -141,6 +149,7 @@ bool PeerLink::start(const QString &bindAddress, quint16 port, QString *error)
     lastStatsAt_ = ReliableStream::currentTimeSeconds();
     timer_->start();
     videoSend_.start();
+    videoReceive_.start();
     emitLog(QStringLiteral("bound udp %1").arg(endpointText(localAddress_, localPort_)));
     return true;
 }
@@ -152,6 +161,7 @@ void PeerLink::close()
     }
     closing_ = true;
     videoSend_.stop();
+    videoReceive_.stop();
     if (sessionReady_ && udpIo_.running()) {
         (void)sendPacket(PacketType::Bye, 0, 0, {});
     }
@@ -205,7 +215,7 @@ void PeerLink::resetPeer()
     remoteSessionId_.clear();
     remoteDeviceId_.clear();
 
-    videoReceiver_.reset();
+    videoReceive_.resetSession();
     controlFragments_.reset();
     controlStream_.reset();
     pingSequence_ = 0;
@@ -391,6 +401,11 @@ QString PeerLink::videoPacketizerThreadName() const
     return videoSend_.packetizerThreadName();
 }
 
+QString PeerLink::videoReassemblerThreadName() const
+{
+    return videoReceive_.reassemblerThreadName();
+}
+
 QString PeerLink::udpIoThreadName() const
 {
     return udpIo_.ioThreadName();
@@ -443,14 +458,6 @@ void PeerLink::tick()
 
     const double now = ReliableStream::currentTimeSeconds();
     controlStream_.tick(now);
-    const QList<VideoNack> nacks = videoReceiver_.tick(now);
-    for (const VideoNack &nack : nacks) {
-        (void)sendPacket(
-            PacketType::Nack,
-            static_cast<quint8>(StreamKind::Video),
-            0,
-            packNack(nack.frameId, nack.missing));
-    }
 
     if (stunPending_ && now >= stunDeadline_) {
         stunPending_ = false;
@@ -762,16 +769,9 @@ void PeerLink::handleAuthenticated(
 
     if (header.type == PacketType::Data) {
         if (header.stream == static_cast<quint8>(StreamKind::Video)) {
-            const auto fragment = unpackVideoFragment(payload);
-            if (fragment) {
-                videoReceiver_.onFragment(
-                    fragment->frameId,
-                    fragment->index,
-                    fragment->count,
-                    fragment->data,
-                    (header.flags & FlagKeyframe) != 0,
-                    ReliableStream::currentTimeSeconds());
-            }
+            videoReceive_.submitData(
+                payload,
+                (header.flags & FlagKeyframe) != 0);
         } else if (header.stream == static_cast<quint8>(StreamKind::Control)
                    && payload.size() >= 4) {
             const quint32 messageSequence =
@@ -780,14 +780,7 @@ void PeerLink::handleAuthenticated(
             maybeAck();
         }
     } else if (header.type == PacketType::Parity) {
-        const auto parity = unpackParityFragment(payload);
-        if (parity) {
-            videoReceiver_.onParity(
-                parity->frameId,
-                parity->groupIndex,
-                parity->shards,
-                parity->data);
-        }
+        videoReceive_.submitParity(payload);
     } else if (header.type == PacketType::Audio) {
         emit audioReceived(payload);
     } else if (header.type == PacketType::Ack) {
@@ -809,6 +802,31 @@ void PeerLink::handleAuthenticated(
         established_ = false;
         setState(QStringLiteral("closed"));
     }
+}
+
+void PeerLink::onVideoFrameReady(
+    const QByteArray &frame,
+    bool keyframe)
+{
+    if (closing_ || !sessionReady_ || !established_) {
+        return;
+    }
+    recvFramesWindow_.append(ReliableStream::currentTimeSeconds());
+    emit videoFrameReceived(frame, keyframe);
+}
+
+void PeerLink::onVideoNackReady(
+    quint32 frameId,
+    const QList<quint16> &missing)
+{
+    if (closing_ || !sessionReady_ || !established_ || missing.isEmpty()) {
+        return;
+    }
+    (void)sendPacket(
+        PacketType::Nack,
+        static_cast<quint8>(StreamKind::Video),
+        0,
+        packNack(frameId, missing));
 }
 
 void PeerLink::onVideoPacketsReady(const VideoPacketBatch &batch)

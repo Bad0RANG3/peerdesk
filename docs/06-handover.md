@@ -37,7 +37,9 @@ Qt 6.8、CMake 和 Ninja。
 `PeerDeskViewerAudio` 工作线程，按 FIFO 处理，不做最新帧覆盖；PCM16 随后进入
 `PeerDeskAudio` 工作线程，由该线程独占最长 360 ms 待播队列、10 ms 泵和 `QAudioSink`。
 视频分片、XOR FEC 生成和 NACK 重传缓存检索运行在 `PeerDeskVideoSend` 工作线程，
-待发送帧同样采用最新值覆盖并保护待处理关键帧。`PeerDeskUdpIo` 工作线程独占 UDP
+待发送帧同样采用最新值覆盖并保护待处理关键帧；入站分片解析、重组、XOR FEC 缺片恢复、
+超时丢帧和 NACK 判定运行在 `PeerDeskVideoReceive` 工作线程，结果排队回主线程后由
+`PeerLink` 更新统计并实际发送 NACK/关键帧请求。`PeerDeskUdpIo` 工作线程独占 UDP
 socket 和唯一加密上下文，完成绑定/关闭、入站类型识别、RLY1 解包、包头解析、接收侧
 AEAD/重放检查、发送侧 AEAD、发送序号、RLY1 封装、实际收写和原子发送统计。只有已认证
 包会回到主线程，由 `PeerLink` 执行协议分发、ACK 和重传决策；会话设置/重置递增接收
@@ -328,7 +330,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | 路径 | 职责 |
 | --- | --- |
 | `src/core/` | PDTP/1 协议、加密、可靠流、视频、STUN 与通用工具 |
-| `src/transport/` | `PeerLink` 握手、打洞、直连/中继、UDP I/O、链路统计和视频发送流水线 |
+| `src/transport/` | `PeerLink` 握手、打洞、直连/中继、UDP I/O、链路统计和视频发送/接收流水线 |
 | `src/server/` | TCP 信令、UDP 中继、STUN、令牌、频次限制与中继限速 |
 | `src/client/` | TCP JSON Lines 信令客户端 |
 | `src/session/` | 被控/Viewer 会话、`VideoPipeline` 媒体线程、音视频处理和文件传输 |
@@ -423,7 +425,8 @@ git status --short
 
 只暂存本次改动涉及的文件，确认暂存区后再提交并推送。版本号位于 `CMakeLists.txt`
 的 `project(... VERSION 0.9.0)`；被控端媒体线程、Viewer 音视频解码线程、音频播放线程、
-视频发送流水线和 UDP I/O 工作线程（含接收认证、重放拒绝和接收代际隔离）已有回环测试，
+视频发送/接收流水线和 UDP I/O 工作线程（含接收认证、重放拒绝和接收代际隔离）已有
+回环测试，
 登录启动、双向文件队列、文件断点续传与日志诊断也已完成回环测试，接收端
 同名同大小文件路径消歧和发送端跨目录同名同大小队列匹配同样覆盖；Windows 安装/卸载
 已通过本机静默安装冒烟。真实登录/重启、跨机续传、安装包签名、自动更新、失败回滚和

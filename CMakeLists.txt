@@ -66,6 +66,8 @@ add_library(peerdesk_transport STATIC
     src/transport/peer_link.h
     src/transport/udp_io_pipeline.cpp
     src/transport/udp_io_pipeline.h
+    src/transport/video_receive_pipeline.cpp
+    src/transport/video_receive_pipeline.h
     src/transport/video_send_pipeline.cpp
     src/transport/video_send_pipeline.h
 )
