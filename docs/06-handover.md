@@ -31,11 +31,12 @@ Qt 6.8、CMake 和 Ninja。
 当前媒体管线是整帧 JPEG。抓屏、缩放、静帧检测和 JPEG 编码运行在 `PeerDeskVideo`
 媒体线程，Viewer JPEG 解码运行在 `PeerDeskViewerVideo` 媒体线程；后者用最新帧覆盖
 旧待解码帧，并保留尚未交付的关键帧。Viewer 音频包校验和 G.711 µ-law 解码运行在
-`PeerDeskViewerAudio` 工作线程，按 FIFO 处理，不做最新帧覆盖。视频分片、XOR FEC 生成
-和 NACK 重传缓存检索运行在 `PeerDeskVideoSend` 工作线程，待发送帧同样采用最新值覆盖并
-保护待处理关键帧；UDP 写入、AEAD 加密、发送统计、`QAudioSink` 播放、文件传输和大部分
-UI 仍在主线程，WASAPI loopback 另有采集线程。尚未接入 GPU 抓屏、脏矩形、硬件编码、
-H.264 或 Opus。
+`PeerDeskViewerAudio` 工作线程，按 FIFO 处理，不做最新帧覆盖；PCM16 随后进入
+`PeerDeskAudio` 工作线程，由该线程独占最长 360 ms 待播队列、10 ms 泵和 `QAudioSink`。
+视频分片、XOR FEC 生成和 NACK 重传缓存检索运行在 `PeerDeskVideoSend` 工作线程，
+待发送帧同样采用最新值覆盖并保护待处理关键帧；UDP 写入、AEAD 加密、发送统计、文件
+传输和大部分 UI 仍在主线程，WASAPI loopback 另有采集线程。尚未接入 GPU 抓屏、脏矩形、
+硬件编码、H.264 或 Opus。
 
 文件发送支持主动取消：发送端最多发出一次 `file_cancel`，接收端回滚临时文件并回执
 `file_cancelled`。接收失败、本地读写失败与断链中断使用不同事件；断链只清理本机状态，
@@ -123,7 +124,7 @@ CMake 预设中的 Qt 路径若与你的安装位置不同，请在本机预设�
 
 ### 2.2 CTest
 
-测试共 13 个套件：
+测试共 14 个套件：
 
 ```text
 peerdesk-core
@@ -135,6 +136,7 @@ peerdesk-peer-link
 peerdesk-session
 peerdesk-signaling-client
 peerdesk-app-controller
+peerdesk-audio-output
 peerdesk-single-instance
 peerdesk-ui
 peerdesk-logging
@@ -332,7 +334,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `apps/peerdesk-client/` | Qt 客户端入口、启动参数、demo 和截图流程 |
 | `apps/peerdesk-link-harness/` | 双端 UDP 链路诊断工具 |
 | `packaging/windows/` | Windows 版本资源、Inno Setup 模板、打包脚本、安装冒烟和用户说明 |
-| `tests/` | 13 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
+| `tests/` | 14 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
 
 修改链路问题时，先从 `src/transport/peer_link.*` 和 `src/core/protocol.*` 开始；
 修改界面与会话状态时，从 `src/app/viewer_controller.*`、`src/session/viewer_session.*`
@@ -395,7 +397,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 1. 用两台真实 Windows 主机验收直连、中继、弱网、断线恢复、多屏、文件传输和长会话。
 2. 建立真实网络故障注入矩阵，记录恢复期限、输入隔离、重复断线和可靠流补洞行为。
 3. 建立可复现的抓屏、编码、分片、发送、解码和端到端延迟与带宽基线，再决定优化顺序；
-   评估 UDP/AEAD 发送路径、`QAudioSink` 播放和画面绘制移出主线程的收益与队列边界。
+   评估 UDP/AEAD 发送路径和画面绘制移出主线程的收益与队列边界。
 4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证，以及在现有
    诊断包之上评估 minidump 与远程诊断。
 5. 媒体升级：H.264 与 Opus 动态接入，失败时保留整帧 JPEG 与 G.711 回退。
@@ -414,8 +416,8 @@ git status --short
 ```
 
 只暂存本次改动涉及的文件，确认暂存区后再提交并推送。版本号位于 `CMakeLists.txt`
-的 `project(... VERSION 0.9.0)`；被控端媒体线程、Viewer 音视频解码线程和视频发送
-流水线已有回环测试，登录启动、双向文件队列、文件断点续传与日志诊断也已完成回环测试，接收端
+的 `project(... VERSION 0.9.0)`；被控端媒体线程、Viewer 音视频解码线程、音频播放线程
+和视频发送流水线已有回环测试，登录启动、双向文件队列、文件断点续传与日志诊断也已完成回环测试，接收端
 同名同大小文件路径消歧和发送端跨目录同名同大小队列匹配同样覆盖；Windows 安装/卸载
 已通过本机静默安装冒烟。真实登录/重启、跨机续传、安装包签名、自动更新、失败回滚和
 跨版本升级尚未完成，发布说明不得提前宣称。

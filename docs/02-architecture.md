@@ -152,14 +152,17 @@ WASAPI loopback 采集线程
   → 当前帧 + 上一帧冗余
   → TYPE_AUDIO，不可靠发送
   → PeerDeskViewerAudio：长度校验 + µ-law 解码（FIFO）
-  → queued PCM16 → 主线程抖动缓冲 → QAudioSink
+  → queued PCM16 → PeerDeskAudio：360 ms 待播队列 + 10 ms 泵
+  → QAudioSink（160 ms 配置缓冲）
 ```
 
 声音不进入视频 FEC 组，也不使用可靠重传。连续静音后会降低发帧频率；控制端关闭声音时，
 会通知被控端停止采集，而不是只在本机静音。被控端通过带 `t: "audio"` 的状态消息回报
 采集开关、编码参数、音源和错误；Viewer 以该状态更新 HUD，并在重连后重新同步。
 Viewer 不丢音频包，也不做“最新帧覆盖”：`PeerDeskViewerAudio` 按到达顺序串行执行包
-校验和 G.711 µ-law 解码，解码后的 PCM16 再排队回主线程进入播放缓冲。
+校验和 G.711 µ-law 解码。解码后的 PCM16 再排队到 `PeerDeskAudio` 工作线程；该线程
+独占待播 FIFO、精确计时器和 `QAudioSink`。待播队列最多保留 360 ms，设备空间不足时
+按 10 ms 周期继续排空；静音、重置和停止会丢弃待播音频并停止设备。
 
 ### 3.5 控制、文件与剪贴板
 
@@ -234,7 +237,6 @@ Qt 事件循环是主执行体。以下工作都在主线程完成：
 - Qt 窗口、画布绘制、菜单、托盘和偏好读写。
 - TCP 信令和 UDP socket 回调。
 - UDP socket 写入、包头与 AEAD、视频发送统计和画布更新。
-- `QAudioSink` 播放。
 - 文件分块、剪贴板和大部分会话控制。
 
 `VideoPipeline` 创建一个名为 `PeerDeskVideo` 的 `QThread`。GDI 抓屏、缩放、静帧检测、
@@ -248,8 +250,9 @@ JPEG 解码。输入帧使用最新值覆盖策略限制积压，并保留尚未
 
 `ViewerAudioPipeline` 创建一个名为 `PeerDeskViewerAudio` 的 `QThread`，串行执行音频
 包长度校验和 G.711 µ-law 解码。输入使用 FIFO 队列，不丢弃尚未处理的音频包；停止或
-重启通过 generation 丢弃旧结果。PCM16 以排队信号回到主线程，抖动缓冲和 `QAudioSink`
-播放仍由主线程负责。
+重启通过 generation 丢弃旧结果。PCM16 以排队调用进入 `PcmAudioPlayer` 门面，由内部
+名为 `PeerDeskAudio` 的 `QThread` 独占 360 ms 待播队列、10 ms 泵、错误状态和
+`QAudioSink`；主线程不执行播放设备 I/O。
 
 `VideoSendPipeline` 创建一个名为 `PeerDeskVideoSend` 的 `QThread`，由 worker 独占
 唯一的 `VideoSender`，串行执行 JPEG 分片、XOR FEC 生成和 NACK 重传缓存检索。待发送
@@ -261,7 +264,7 @@ JPEG 解码。输入帧使用最新值覆盖策略限制积压，并保留尚未
 随后把数据交回会话路径。
 
 代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；UDP 写入、AEAD 加密、发送统计、
-`QAudioSink` 播放和画面绘制仍在主线程，不能据此宣称完整异步媒体管线或已达到某个性能指标。
+画面绘制和大部分 UI 仍在主线程，不能据此宣称完整异步媒体管线或已达到某个性能指标。
 
 ## 6. 配置、日志与运行边界
 
@@ -322,8 +325,8 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 - 视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码。
 - 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、JPEG 编码、Viewer
   解码以及视频分片/FEC/NACK 重传缓存检索已移至独立线程，音频包校验和 µ-law 解码也已
-  移至 FIFO 工作线程，但 UDP 写入、AEAD 加密、发送统计、画面绘制和 `QAudioSink`
-  播放仍在主线程。
+  移至 FIFO 工作线程，抖动缓冲和 `QAudioSink` 播放已移至 `PeerDeskAudio` 工作线程；
+  但 UDP 写入、AEAD 加密、发送统计、画面绘制和大部分 UI 仍在主线程。
 - 声音是固定 G.711 µ-law，没有 Opus。
 - 文件支持单文件断线续传，但断点只保留 10 分钟，跨机续传仍待真实验收；断点失效时
   回退为整文件重试。接收端同名同大小文件已通过回环测试分配独立路径并隔离断点，但

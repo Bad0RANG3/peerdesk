@@ -22,7 +22,8 @@ PeerDesk 以逆向分析得到的 UU远程 交互为参照，持续补齐连接�
 Qt 应用壳均已切换到同一套 C++ 实现，主连接路径可用；真实跨机、弱网和长时间会话
 仍需单独验收。被控端的抓屏、缩放、静帧检测和 JPEG 编码已迁入独立媒体线程，Viewer
 JPEG 解码也已迁入独立解码线程并按最新帧背压，音频包校验与 G.711 µ-law 解码已迁入
-FIFO 工作线程，视频分片、XOR FEC 生成和 NACK 重传缓存检索已迁入独立发送工作线程；
+FIFO 工作线程，抖动缓冲和 `QAudioSink` 播放已迁入 `PeerDeskAudio` 工作线程；视频分片、
+XOR FEC 生成和 NACK 重传缓存检索已迁入独立发送工作线程；
 Viewer 在同一连接码下的断线恢复已经接入并通过回环测试，中断的文件可在重新握手后按接收端
 确认的偏移继续传输；Viewer 与被控端都支持可重试的多文件发送队列；
 连接页会保留最近 4 个成功连接的本地记录，支持一键回填连接码与服务器；
@@ -71,8 +72,9 @@ CI 只依赖原生工具链。
 - **视频**：GDI 抓屏、多显示器、独立媒体线程内的缩放/静帧检测/JPEG 编码、质量自适应、
   独立发送工作线程内的分片与 XOR FEC、缺片 NACK 缓存检索、关键帧请求。
 - **声音**：WASAPI loopback、16 kHz 单声道、20 ms G.711 µ-law 帧、上一帧冗余和静音抑制；
-  Viewer 在 `PeerDeskViewerAudio` 工作线程按 FIFO 校验并解码音频包，`QAudioSink`
-  播放仍在主线程。
+  Viewer 在 `PeerDeskViewerAudio` 工作线程按 FIFO 校验并解码音频包，PCM16 再排队到
+  `PeerDeskAudio` 工作线程，由 10 ms 泵、最长 360 ms 待播队列和配置为 160 ms 的
+  `QAudioSink` 缓冲完成播放。
 - **桌面控制**：绝对坐标键鼠、滚轮、文本/IME、剪贴板文本、`Ctrl+Alt+Del`、
   相对鼠标输入和按键释放。
 - **游戏鼠标**：Viewer 捕获并每 16 ms 合并相对位移，左右键使用独立按下/释放语义；`Esc`、
@@ -176,10 +178,11 @@ PeerDesk，并会恢复测试前的同名启动项。
 ctest --preset windows-mingw --output-on-failure
 ```
 
-当前有 13 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
+当前有 14 个 CTest 套件：`peerdesk-core`、`peerdesk-crypto`、`peerdesk-transport`、
 `peerdesk-stun`、`peerdesk-server`、`peerdesk-peer-link`、`peerdesk-session`、
 `peerdesk-signaling-client`、`peerdesk-app-controller`、`peerdesk-single-instance`、
-`peerdesk-ui`、`peerdesk-logging`、`peerdesk-platform`。Windows CI 会配置、编译并执行
+`peerdesk-audio-output`、`peerdesk-ui`、`peerdesk-logging`、`peerdesk-platform`。
+Windows CI 会配置、编译并执行
 全部套件，并在独立打包任务中生成 Release 安装包，执行静默安装、离屏启动截图和静默卸载
 冒烟。
 
@@ -285,8 +288,9 @@ ctest --preset windows-mingw --output-on-failure
 - 抓屏仅有 GDI 路径，每帧完整抓取/缩放/编码；被控端媒体线程、Viewer 解码线程和
   `PeerDeskVideoSend` 分片线程已拆分，但 UDP 写入、AEAD 加密、发送统计和画面绘制仍在
   主线程，也没有脏矩形、GPU 纹理或增量编码。
-- 声音仍是 G.711 µ-law，适合语音，不适合音乐；Viewer 音频包校验和 µ-law 解码已移出
-  主线程，但抖动缓冲、`QAudioSink` 播放和设备 I/O 仍在主线程，也还没有 Opus 双栈。
+- 声音仍是 G.711 µ-law，适合语音，不适合音乐；Viewer 音频包校验、µ-law 解码和
+  `PeerDeskAudio` 播放线程已拆分，但还没有 Opus 双栈、默认输出设备热切换或真实跨机
+  音质验收。
 - 输入使用 Win32 `SendInput`；游戏鼠标是应用层相对输入，没有虚拟 HID，个别游戏或
   受保护界面仍可能无法注入。回环测试已覆盖捕获、合帧和按键释放，真实游戏兼容性仍需
   跨机验收。
@@ -307,8 +311,8 @@ ctest --preset windows-mingw --output-on-failure
 2. 完成真实注销/重启下的登录启动验收，并补齐安装包签名、升级验证和更新机制。
 3. 引入 H.264 与 Opus，并在不可用时回退到 JPEG / G.711。
 4. 评估虚拟显示器、虚拟 HID，并完成真实游戏输入兼容性验收。
-5. 建立正式性能基线后，继续评估 UDP/AEAD 发送路径、`QAudioSink` 播放和画面绘制的
-   线程边界，并扩展真实跨机验收、媒体质量、队列诊断和输入兼容性；旧技术栈清理已经完成。
+5. 建立正式性能基线后，继续评估 UDP/AEAD 发送路径和画面绘制的线程边界，并扩展
+   真实跨机验收、媒体质量、队列诊断和输入兼容性；旧技术栈清理已经完成。
 
 更细的优先级见 [路线图](docs/05-roadmap.md)。
 

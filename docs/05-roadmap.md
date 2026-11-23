@@ -53,7 +53,7 @@
 
 ## 2. 测试基线
 
-当前 CTest 注册 13 个套件：
+当前 CTest 注册 14 个套件：
 
 | 套件 | 覆盖重点 |
 | --- | --- |
@@ -66,6 +66,7 @@
 | `peerdesk-session` | 被控/控制会话、独立音视频编解码线程、设置、音频、文件和输入事件 |
 | `peerdesk-signaling-client` | TCP JSON Lines、重连策略和消息映射 |
 | `peerdesk-app-controller` | 控制器生命周期、偏好、最近连接持久化、错误和 UI 门面 |
+| `peerdesk-audio-output` | PCM 播放线程、FIFO、静音、复位、失败重试、部分写入续泵和析构清理 |
 | `peerdesk-single-instance` | 锁互斥、跨进程唤醒、重复实例拒绝和异常退出后重获锁 |
 | `peerdesk-ui` | 连接码、校验、最近连接回填/清除、页面切换、Viewer 输入、双向文件队列、托盘语义和登录启动开关 |
 | `peerdesk-logging` | 日志轮转、敏感值/端点/路径脱敏、诊断包内容与大小限制、异常退出标记 |
@@ -79,7 +80,7 @@ cmake --build --preset windows-mingw
 ctest --preset windows-mingw --output-on-failure
 ```
 
-CI 命令使用对应 preset，并要求全部 13 个套件通过。回环测试和合成画面只能证明代码路径，
+CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试和合成画面只能证明代码路径，
 不能替代真实跨机网络和长时间稳定性验收。
 
 ## 3. 优先级路线
@@ -141,10 +142,11 @@ CI 命令使用对应 preset，并要求全部 13 个套件通过。回环测试
 - `[待开始]` Opus 音频，保留 G.711 兼容回退。
 - `[进行中]` 媒体线程与流水线拆解：抓屏、缩放、静帧检测和 JPEG 编码已迁入
   `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，音频包校验与
-  G.711 µ-law 解码已迁入 FIFO 的 `PeerDeskViewerAudio`，视频分片、XOR FEC 生成和
-  NACK 重传缓存检索已迁入 `PeerDeskVideoSend`；回环测试覆盖跨线程输出、最新帧背压、
-  待解码关键帧保护、音频顺序、热更新、分片重传和停止隔离。UDP 写入、AEAD 发送统计、
-  `QAudioSink` 播放与线程池仍待继续拆解。
+  G.711 µ-law 解码已迁入 FIFO 的 `PeerDeskViewerAudio`，PCM16 再进入
+  `PeerDeskAudio` 线程，由其独占最长 360 ms 待播队列、10 ms 泵和 `QAudioSink`；
+  视频分片、XOR FEC 生成和 NACK 重传缓存检索已迁入 `PeerDeskVideoSend`。回环测试
+  覆盖跨线程输出、最新帧背压、待解码关键帧保护、音频顺序、播放线程、部分写入续泵、
+  热更新、分片重传和停止隔离。UDP 写入、AEAD 发送统计与线程池仍待继续拆解。
 - `[待开始]` GPU 抓屏、脏矩形、硬件编码和帧间压缩评估。
 - `[待开始]` 虚拟显示器能力评估。
 - `[已完成]` 应用层游戏鼠标：相对捕获、16 ms 合帧、`reldown`/`relup` 按键语义、
@@ -153,9 +155,9 @@ CI 命令使用对应 preset，并要求全部 13 个套件通过。回环测试
 - `[待开始]` 更细的自适应码率策略、拥塞信号和弱网恢复。
 
 当前视频是 GDI + 整帧 JPEG，音频是 G.711。抓屏、缩放、静帧检测、JPEG 编码、Viewer
-视频/音频解码以及视频分片/FEC/NACK 重传缓存检索已在独立线程执行；UDP 写入、AEAD
-加密、发送统计、`QAudioSink` 播放、画面绘制和大部分 UI 仍在主线程。没有线程池、GPU
-编码、硬件编码、正式吞吐基准或性能报告。
+视频/音频解码、音频播放以及视频分片/FEC/NACK 重传缓存检索已在独立线程执行；UDP
+写入、AEAD 加密、发送统计、画面绘制和大部分 UI 仍在主线程。没有线程池、GPU 编码、
+硬件编码、正式吞吐基准或性能报告。
 
 ### P2：交互与文件
 

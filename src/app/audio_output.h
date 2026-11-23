@@ -5,11 +5,10 @@
 #include <QObject>
 #include <QString>
 
+#include <functional>
 #include <memory>
 
-class QAudioSink;
-class QIODevice;
-class QTimer;
+class QThread;
 
 namespace pd {
 
@@ -24,32 +23,43 @@ public:
     [[nodiscard]] virtual QString errorString() const = 0;
 };
 
+class AudioSinkBackend {
+public:
+    virtual ~AudioSinkBackend() = default;
+
+    virtual bool start(const QAudioFormat &format, QString *error) = 0;
+    [[nodiscard]] virtual bool hasStopped() const = 0;
+    [[nodiscard]] virtual qint64 bytesFree() const = 0;
+    virtual qint64 write(const char *data, qint64 size) = 0;
+    virtual void stop() = 0;
+};
+
+using AudioSinkFactory = std::function<std::unique_ptr<AudioSinkBackend>()>;
+
+struct AudioPlaybackState;
+class AudioWorker;
+
 class PcmAudioPlayer final : public QObject, public IAudioPlayback {
     Q_OBJECT
 
 public:
     explicit PcmAudioPlayer(QObject *parent = nullptr);
+    PcmAudioPlayer(AudioSinkFactory sinkFactory, QObject *parent = nullptr);
     ~PcmAudioPlayer() override;
 
     void setEnabled(bool enabled) override;
-    [[nodiscard]] bool enabled() const override { return enabled_; }
+    [[nodiscard]] bool enabled() const override;
     void pushPcm16(const QByteArray &pcm) override;
     void reset() override;
-    [[nodiscard]] QString errorString() const override { return error_; }
+    [[nodiscard]] QString errorString() const override;
 
 private:
-    void ensureSink();
-    void pump();
-    void fail(const QString &message);
+    void shutdown();
 
-    QAudioFormat format_;
-    QAudioSink *sink_ = nullptr;
-    QIODevice *device_ = nullptr;
-    QTimer *pumpTimer_ = nullptr;
-    QByteArray pending_;
-    QString error_;
-    bool enabled_ = true;
-    bool failed_ = false;
+    std::shared_ptr<AudioPlaybackState> state_;
+    AudioSinkFactory sinkFactory_;
+    QThread *audioThread_ = nullptr;
+    AudioWorker *worker_ = nullptr;
 };
 
 } // namespace pd

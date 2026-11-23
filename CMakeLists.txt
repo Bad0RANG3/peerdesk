@@ -325,6 +325,13 @@ target_link_libraries(peerdesk-app-controller-tests
     PRIVATE peerdesk_app peerdesk_server Qt6::Test
 )
 
+add_executable(peerdesk-audio-output-tests
+    tests/audio_output_test.cpp
+)
+target_link_libraries(peerdesk-audio-output-tests
+    PRIVATE peerdesk_app Qt6::Test
+)
+
 add_executable(peerdesk-single-instance-tests
     tests/single_instance_test.cpp
 )
@@ -373,6 +380,7 @@ add_test(NAME peerdesk-peer-link COMMAND peerdesk-peer-link-tests)
 add_test(NAME peerdesk-session COMMAND peerdesk-session-tests)
 add_test(NAME peerdesk-signaling-client COMMAND peerdesk-signaling-client-tests)
 add_test(NAME peerdesk-app-controller COMMAND peerdesk-app-controller-tests)
+add_test(NAME peerdesk-audio-output COMMAND peerdesk-audio-output-tests)
 add_test(NAME peerdesk-single-instance COMMAND peerdesk-single-instance-tests)
 add_test(NAME peerdesk-ui COMMAND peerdesk-ui-tests)
 add_test(NAME peerdesk-logging COMMAND peerdesk-logging-tests)
