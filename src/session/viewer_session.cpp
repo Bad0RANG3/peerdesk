@@ -1,7 +1,6 @@
 #include "session/viewer_session.h"
 
 #include "core/protocol.h"
-#include "session/audio_codec.h"
 #include "transport/peer_link.h"
 
 #include <QFileInfo>
@@ -118,6 +117,24 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
         &ViewerVideoPipeline::decodeFailed,
         this,
         &ViewerSession::logMessage);
+    connect(
+        &audio_,
+        &ViewerAudioPipeline::audioDecoded,
+        this,
+        [this](
+            const QByteArray &pcm16,
+            quint32 sequence,
+            quint32 timestampMs) {
+            if (started_) {
+                ++audioFrames_;
+                emit audioReceived(pcm16, sequence, timestampMs);
+            }
+        });
+    connect(
+        &audio_,
+        &ViewerAudioPipeline::decodeFailed,
+        this,
+        &ViewerSession::logMessage);
 }
 
 ViewerSession::~ViewerSession()
@@ -134,6 +151,7 @@ void ViewerSession::start()
     }
     started_ = true;
     video_.start();
+    audio_.start();
     if (link_ && link_->established()) {
         sendControlNoReply(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("hello")},
@@ -147,6 +165,7 @@ void ViewerSession::suspend()
 {
     started_ = false;
     video_.stop();
+    audio_.stop();
     if (fileSender_->active()) {
         fileSender_->interrupt(QStringLiteral("interrupted"));
     }
@@ -570,24 +589,7 @@ void ViewerSession::onAudioPacket(const QByteArray &payload)
     if (!started_) {
         return;
     }
-    const auto packet = unpackAudio(payload);
-    if (!packet.has_value()) {
-        emit logMessage(QStringLiteral("收到损坏的音频包"));
-        return;
-    }
-    if (packet->samples == 0
-        || packet->samples > kAudioRate
-        || packet->current.size() != packet->samples
-        || (!packet->previous.isEmpty()
-            && packet->previous.size() != packet->samples)) {
-        emit logMessage(QStringLiteral("音频包长度校验失败"));
-        return;
-    }
-    ++audioFrames_;
-    emit audioReceived(
-        ulawDecode(packet->current),
-        packet->sequence,
-        packet->timestampMs);
+    audio_.submit(payload);
 }
 
 void ViewerSession::dispatch(const QJsonObject &message)

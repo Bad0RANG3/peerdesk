@@ -2,6 +2,7 @@
 
 #include "session/file_transfer.h"
 #include "session/session_types.h"
+#include "session/viewer_audio_pipeline.h"
 #include "session/viewer_video_pipeline.h"
 
 #include <QByteArray>
@@ -38,6 +39,10 @@ public:
     [[nodiscard]] QString videoDecoderThreadName() const
     {
         return video_.decoderThreadName();
+    }
+    [[nodiscard]] QString audioDecoderThreadName() const
+    {
+        return audio_.decoderThreadName();
     }
 
     [[nodiscard]] bool sendControl(const QJsonObject &message);
@@ -138,6 +143,7 @@ private:
     FileReceiver receiver_;
     FileSender *fileSender_ = nullptr;
     ViewerVideoPipeline video_;
+    ViewerAudioPipeline audio_;
 
     bool uploadActive_ = false;
     QString uploadId_;

@@ -63,7 +63,7 @@
 | `peerdesk-stun` | Binding Request/Success、地址解析和 XOR 地址 |
 | `peerdesk-server` | 信令、注册、配对、令牌、限流、STUN、中继 |
 | `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态和视频发送流水线 |
-| `peerdesk-session` | 被控/控制会话、双向独立媒体线程、JPEG 编解码、设置、音频、文件和输入事件 |
+| `peerdesk-session` | 被控/控制会话、独立音视频编解码线程、设置、音频、文件和输入事件 |
 | `peerdesk-signaling-client` | TCP JSON Lines、重连策略和消息映射 |
 | `peerdesk-app-controller` | 控制器生命周期、偏好、最近连接持久化、错误和 UI 门面 |
 | `peerdesk-single-instance` | 锁互斥、跨进程唤醒、重复实例拒绝和异常退出后重获锁 |
@@ -140,10 +140,11 @@ CI 命令使用对应 preset，并要求全部 13 个套件通过。回环测试
 - `[待开始]` H.264 编码和解码，保留 JPEG 回退路径。
 - `[待开始]` Opus 音频，保留 G.711 兼容回退。
 - `[进行中]` 媒体线程与流水线拆解：抓屏、缩放、静帧检测和 JPEG 编码已迁入
-  `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，视频分片、XOR FEC
-  生成和 NACK 重传缓存检索已迁入 `PeerDeskVideoSend`；回环测试覆盖跨线程输出、
-  最新帧背压、待解码关键帧保护、热更新、分片重传和停止隔离。UDP 写入、AEAD 发送统计、
-  音频播放与线程池仍待继续拆解。
+  `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，音频包校验与
+  G.711 µ-law 解码已迁入 FIFO 的 `PeerDeskViewerAudio`，视频分片、XOR FEC 生成和
+  NACK 重传缓存检索已迁入 `PeerDeskVideoSend`；回环测试覆盖跨线程输出、最新帧背压、
+  待解码关键帧保护、音频顺序、热更新、分片重传和停止隔离。UDP 写入、AEAD 发送统计、
+  `QAudioSink` 播放与线程池仍待继续拆解。
 - `[待开始]` GPU 抓屏、脏矩形、硬件编码和帧间压缩评估。
 - `[待开始]` 虚拟显示器能力评估。
 - `[已完成]` 应用层游戏鼠标：相对捕获、16 ms 合帧、`reldown`/`relup` 按键语义、
@@ -152,9 +153,9 @@ CI 命令使用对应 preset，并要求全部 13 个套件通过。回环测试
 - `[待开始]` 更细的自适应码率策略、拥塞信号和弱网恢复。
 
 当前视频是 GDI + 整帧 JPEG，音频是 G.711。抓屏、缩放、静帧检测、JPEG 编码、Viewer
-解码以及视频分片/FEC/NACK 重传缓存检索已在独立线程执行；UDP 写入、AEAD 加密、发送
-统计、音频播放、画面绘制和大部分 UI 仍在主线程。没有线程池、GPU 编码、硬件编码、
-正式吞吐基准或性能报告。
+视频/音频解码以及视频分片/FEC/NACK 重传缓存检索已在独立线程执行；UDP 写入、AEAD
+加密、发送统计、`QAudioSink` 播放、画面绘制和大部分 UI 仍在主线程。没有线程池、GPU
+编码、硬件编码、正式吞吐基准或性能报告。
 
 ### P2：交互与文件
 

@@ -593,6 +593,111 @@ private slots:
         pipeline.stop();
     }
 
+    void viewerAudioPipelineDecodesInOrderOffMainThread()
+    {
+        auto makePacket = [](quint32 sequence, quint8 seed) {
+            QByteArray pcm(kAudioPcmBytes, '\0');
+            for (qsizetype index = 0; index < pcm.size(); index += 2) {
+                const qint16 sample = static_cast<qint16>(
+                    (index * 37 + seed * 101) % 12000 - 6000);
+                pcm[index] = static_cast<char>(sample & 0xFF);
+                pcm[index + 1] =
+                    static_cast<char>((sample >> 8) & 0xFF);
+            }
+            AudioPacket packet;
+            packet.sequence = sequence;
+            packet.timestampMs = sequence * kAudioFrameMs;
+            packet.samples = static_cast<quint16>(kAudioSamples);
+            packet.current = ulawEncode(pcm);
+            return qMakePair(packAudio(packet), ulawDecode(packet.current));
+        };
+
+        ViewerAudioPipeline pipeline;
+        QList<quint32> sequences;
+        QList<quint32> timestamps;
+        QList<QByteArray> frames;
+        QList<QString> errors;
+        connect(
+            &pipeline,
+            &ViewerAudioPipeline::audioDecoded,
+            [&sequences, &timestamps, &frames](
+                const QByteArray &pcm,
+                quint32 sequence,
+                quint32 timestampMs) {
+                sequences.append(sequence);
+                timestamps.append(timestampMs);
+                frames.append(pcm);
+            });
+        connect(
+            &pipeline,
+            &ViewerAudioPipeline::decodeFailed,
+            [&errors](const QString &error) { errors.append(error); });
+
+        QList<QPair<QByteArray, QByteArray>> packets;
+        for (quint32 index = 0; index < 24; ++index) {
+            packets.append(makePacket(100 + index, static_cast<quint8>(index)));
+        }
+
+        pipeline.start();
+        for (const auto &packet : packets) {
+            pipeline.submit(packet.first);
+        }
+        QVERIFY(waitUntil(
+            [&]() { return frames.size() == packets.size(); },
+            4000));
+        for (qsizetype index = 0; index < packets.size(); ++index) {
+            QCOMPARE(sequences.at(index), quint32(100 + index));
+            QCOMPARE(
+                timestamps.at(index),
+                quint32((100 + index) * kAudioFrameMs));
+            QCOMPARE(frames.at(index), packets.at(index).second);
+        }
+        QCOMPARE(
+            pipeline.decoderThreadName(),
+            QStringLiteral("PeerDeskViewerAudio"));
+
+        pipeline.submit(QByteArrayLiteral("truncated"));
+        QVERIFY(waitUntil(
+            [&]() { return errors.size() == 1; },
+            3000));
+        QCOMPARE(errors.constLast(), QStringLiteral("收到损坏的音频包"));
+
+        AudioPacket shortFrame;
+        shortFrame.sequence = 999;
+        shortFrame.samples = 1;
+        shortFrame.current = QByteArray(kAudioSamples, '\0');
+        pipeline.submit(packAudio(shortFrame));
+        QVERIFY(waitUntil(
+            [&]() { return errors.size() == 2; },
+            3000));
+        QCOMPARE(
+            errors.constLast(),
+            QStringLiteral("音频包长度校验失败"));
+
+        pipeline.submit(QByteArray{});
+        QVERIFY(waitUntil(
+            [&]() { return errors.size() == 3; },
+            3000));
+        QCOMPARE(errors.constLast(), QStringLiteral("收到损坏的音频包"));
+
+        pipeline.stop();
+        const qsizetype stoppedCount = frames.size();
+        pipeline.submit(makePacket(200, 7).first);
+        pumpEvents(150);
+        QCOMPARE(frames.size(), stoppedCount);
+
+        pipeline.start();
+        pipeline.submit(makePacket(201, 9).first);
+        QVERIFY(waitUntil(
+            [&]() {
+                return !sequences.isEmpty()
+                    && sequences.constLast() == 201;
+            },
+            3000));
+        QCOMPARE(frames.constLast().size(), qsizetype(kAudioPcmBytes));
+        pipeline.stop();
+    }
+
     void audioCodecPreservesFramesAndSuppressesSilence()
     {
         ToneAudioSource tone(440.0);
@@ -1867,6 +1972,9 @@ private slots:
             [&]() { return !audioFrames.isEmpty(); },
             5000));
         QCOMPARE(audioFrames.constFirst().size(), qsizetype(kAudioPcmBytes));
+        QCOMPARE(
+            viewer.audioDecoderThreadName(),
+            QStringLiteral("PeerDeskViewerAudio"));
         QVERIFY(host.audioState().value(QStringLiteral("on")).toBool());
         QCOMPARE(
             host.audioState().value(QStringLiteral("t")).toString(),
