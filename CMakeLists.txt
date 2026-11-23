@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(PeerDesk
-    VERSION 0.7.0
+    VERSION 0.8.0
     DESCRIPTION "PeerDesk remote desktop"
     LANGUAGES C CXX
 )
@@ -12,6 +12,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
+
+if(WIN32)
+    enable_language(RC)
+endif()
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Multimedia Test)
 qt_standard_project_setup()
@@ -180,8 +184,33 @@ else()
     endif()
 endif()
 
+if(WIN32)
+    set(PEERDESK_RC_DESCRIPTION "PeerDesk signaling and relay server")
+    set(PEERDESK_RC_INTERNAL_NAME "peerdesk-server")
+    set(PEERDESK_RC_ORIGINAL_FILENAME "peerdesk-server.exe")
+    configure_file(
+        packaging/windows/version.rc.in
+        "${CMAKE_CURRENT_BINARY_DIR}/peerdesk-server.rc"
+        @ONLY
+    )
+    set(PEERDESK_SERVER_RC
+        "${CMAKE_CURRENT_BINARY_DIR}/peerdesk-server.rc")
+
+    set(PEERDESK_RC_DESCRIPTION "PeerDesk remote desktop client")
+    set(PEERDESK_RC_INTERNAL_NAME "peerdesk-client")
+    set(PEERDESK_RC_ORIGINAL_FILENAME "peerdesk-client.exe")
+    configure_file(
+        packaging/windows/version.rc.in
+        "${CMAKE_CURRENT_BINARY_DIR}/peerdesk-client.rc"
+        @ONLY
+    )
+    set(PEERDESK_CLIENT_RC
+        "${CMAKE_CURRENT_BINARY_DIR}/peerdesk-client.rc")
+endif()
+
 add_executable(peerdesk-server
     apps/peerdesk-server/main.cpp
+    ${PEERDESK_SERVER_RC}
 )
 target_compile_definitions(peerdesk-server PRIVATE
     PEERDESK_VERSION="${PROJECT_VERSION}"
@@ -191,6 +220,7 @@ target_link_libraries(peerdesk-server PRIVATE peerdesk_server)
 if(WIN32)
     add_executable(peerdesk-client WIN32
         apps/peerdesk-client/main.cpp
+        ${PEERDESK_CLIENT_RC}
     )
 else()
     add_executable(peerdesk-client
@@ -323,19 +353,10 @@ endif()
 install(TARGETS
     peerdesk-client
     peerdesk-server
-    peerdesk-tests
-    peerdesk-crypto-tests
-    peerdesk-transport-tests
-    peerdesk-stun-tests
-    peerdesk-server-tests
-    peerdesk-peer-link-tests
-    peerdesk-session-tests
-    peerdesk-signaling-client-tests
-    peerdesk-app-controller-tests
-    peerdesk-single-instance-tests
-    peerdesk-ui-tests
-    RUNTIME DESTINATION bin)
+    RUNTIME DESTINATION ".")
 
-if(WIN32)
-    install(TARGETS peerdesk-platform-tests RUNTIME DESTINATION bin)
-endif()
+install(FILES
+    LICENSE
+    README.md
+    packaging/windows/USER-GUIDE.txt
+    DESTINATION ".")

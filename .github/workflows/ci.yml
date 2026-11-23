@@ -66,3 +66,85 @@ jobs:
           name: ctest-logs
           path: build/cpp/Testing
           if-no-files-found: ignore
+
+  package:
+    name: Windows installer
+    needs: build-and-test
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: "windows"
+          target: "desktop"
+          arch: "win64_mingw"
+          modules: "qtmultimedia"
+          tools: "tools_mingw1310"
+          cache: true
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            throw "Inno Setup compiler was not installed: $iscc"
+          }
+
+      - name: Configure release
+        shell: pwsh
+        run: cmake --preset windows-mingw-ci-release
+
+      - name: Build release applications
+        shell: pwsh
+        run: |
+          cmake --build --preset windows-mingw-ci-release `
+            --target peerdesk-client peerdesk-server
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;" +
+            "$env:IQTA_TOOLS\mingw1310_64\bin;$env:PATH"
+          .\packaging\windows\build-installer.ps1 `
+            -BuildDir build\cpp-ci-release `
+            -DistDir dist
+
+      - name: Smoke test installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem `
+            -LiteralPath dist -Filter "PeerDesk-*-setup.exe" -File |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "Packaged installer was not found."
+          }
+          .\packaging\windows\test-installer.ps1 `
+            -InstallerPath $installer.FullName
+
+      - name: Upload installer
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PeerDesk-windows-installer
+          path: |
+            dist/PeerDesk-*-setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Upload installer diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-diagnostics
+          path: |
+            dist/installer-test/install.log
+            dist/installer-test/uninstall.log
+            dist/installer-test/*.png
+          if-no-files-found: ignore

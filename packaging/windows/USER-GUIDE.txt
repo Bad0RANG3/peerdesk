@@ -1,0 +1,50 @@
+PeerDesk 0.8.0 安装版说明
+==========================
+
+PeerDesk 是自托管的 Windows 远程桌面客户端。本安装包面向当前 Windows 用户安装，
+默认目录为：
+
+    %LOCALAPPDATA%\Programs\PeerDesk
+
+安装内容包含 Qt 6 客户端、信令/中继服务端和所需运行库。安装不需要管理员权限，
+会在开始菜单创建 PeerDesk 快捷方式；桌面快捷方式可在安装时勾选。
+
+快速开始
+--------
+
+1. 从开始菜单启动 PeerDesk。
+2. 在“本机被控”页确认连接码、信令服务器和权限，然后开始被控。
+3. 在另一台运行 PeerDesk 的设备上输入 9 位连接码并连接。
+
+如果使用自建服务端，可在安装目录手动运行：
+
+    & "$env:LOCALAPPDATA\Programs\PeerDesk\peerdesk-server.exe" `
+        --port 7900 --udp-port 7901
+
+跨机使用时需要放行 TCP 7900 和 UDP 7901，或在服务端和客户端中配置其他可达端口。
+公开部署时建议设置共享令牌和中继带宽上限，并阅读安装目录中的 README.md。
+
+登录启动
+--------
+
+设置页可启用“登录时启动 PeerDesk”。该选项只写入当前用户的
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run 启动项，不需要管理员权限。
+真实 Windows 注销/重启下的启动项验收尚未完成。
+
+卸载与数据保留
+--------------
+
+可从“设置 > 应用 > 已安装的应用 > PeerDesk > 卸载”移除，或运行安装目录中的
+unins000.exe。静默卸载参数：
+
+    unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+
+卸载会删除 PeerDesk 程序文件、开始菜单/桌面快捷方式和 PeerDesk 登录启动项。
+以下用户数据会保留，便于重新安装后继续使用：
+
+    %APPDATA%\PeerDesk
+    系统 Downloads\PeerDesk 接收目录中的文件
+
+当前安装包尚未做代码签名，Windows SmartScreen 可能显示未知发布者提示。安装包也不
+包含自动更新；升级时需要下载并运行新版本安装包。H.264、Opus、GPU 编码、虚拟 HID
+和真实跨机验收仍未完成，具体边界以安装目录 README.md 和 docs 为准。

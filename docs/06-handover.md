@@ -3,7 +3,7 @@
 > 面向第一次接手仓库的人：先用 10 分钟完成构建和测试，再用 1 小时看清代码边界，
 > 最后按优先级继续开发。本文只描述当前仓库真实具备的能力，不把规划项写成已完成。
 
-最后更新：2026-11-23 · 版本 `0.7.0` · 技术栈：C++20、Qt 6.8 Widgets、CMake、Ninja
+最后更新：2026-11-23 · 版本 `0.8.0` · 技术栈：C++20、Qt 6.8 Widgets、CMake、Ninja
 
 ## 1. 当前状态
 
@@ -23,6 +23,8 @@ Qt 6.8、CMake 和 Ninja。
   可靠控制流和音频数据包。
 - Windows 平台层：GDI `BitBlt`/`StretchBlt` 抓屏、Win32 `SendInput`、剪贴板 API、
   WASAPI loopback、16 kHz 单声道 PCM16 与 G.711 µ-law。
+- Windows 安装器：Inno Setup 每用户安装，部署客户端、服务端、Qt/MinGW 运行库和文档；
+  提供中文关键向导文案、开始菜单快捷方式、可选桌面快捷方式和可验证的卸载清理。
 
 当前媒体管线是整帧 JPEG。抓屏、编码、发包、音频播放、文件传输和大部分 UI 都在主线程；
 唯一额外采集线程是 WASAPI loopback。尚未接入 GPU 抓屏、脏矩形、硬件编码、H.264 或 Opus。
@@ -72,7 +74,8 @@ Viewer 已实现应用层游戏鼠标：勾选工具栏按钮后隐藏本机光�
 
 - 真实跨机、NAT、弱网、信令长时间不可用和进程重启下的恢复验收，以及跨机文件续传和
   媒体断点续传。
-- 真实登录/重启后的启动项、托盘驻留和窗口回退验收，以及 Windows 安装包和自动更新。
+- 真实登录/重启后的启动项、托盘驻留和窗口回退验收。
+- 安装包代码签名、自动更新、失败回滚、跨版本升级和正式发布渠道。
 - 两台真实 Windows 主机上的系统验收与正式性能基线。
 - 虚拟显示器、虚拟 HID、广泛游戏兼容性、拥塞控制和较长会话的稳定性证明。
 
@@ -87,6 +90,7 @@ Viewer 已实现应用层游戏鼠标：勾选工具栏按钮后隐藏本机光�
 | 编译器 | MinGW 13.1，`mingw1310_64` |
 | CMake | 3.24 或更新 |
 | 构建器 | Ninja |
+| 安装器 | Inno Setup 6（仅打包时需要） |
 
 把 Qt 和 MinGW 的 `bin` 放到 `PATH` 最前面，然后使用仓库预设：
 
@@ -134,6 +138,47 @@ ctest --preset windows-mingw -R peerdesk-ui --output-on-failure -V
 
 Qt UI 测试必须通过 CTest 执行。CTest 会设置离屏平台并收集退出码；直接启动 GUI 测试
 程序时，QtTest 摘要不一定会显示在当前 PowerShell 中。
+
+### 2.3 Windows 安装包
+
+安装链路位于 `packaging/windows/`。构建 Release 客户端和服务端后运行：
+
+```powershell
+$env:PATH = "C:\Qt\6.8.3\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;$env:PATH"
+cmake --preset windows-mingw-release
+cmake --build --preset windows-mingw-release `
+  --target peerdesk-client peerdesk-server
+.\packaging\windows\build-installer.ps1
+```
+
+脚本会：
+
+1. 从 `CMakeLists.txt` 读取版本，并清理 `dist/stage`。
+2. 执行 `cmake --install`，只安装 `peerdesk-client.exe`、`peerdesk-server.exe`、
+   `LICENSE`、`README.md` 和 `USER-GUIDE.txt`。
+3. 用 `windeployqt` 部署 Qt DLL、平台插件（含安装冒烟使用的离屏插件）、图像格式、
+   多媒体和 TLS 插件，并补齐 MinGW 运行库。
+4. 拒绝测试程序、PDB、ILK 等开发文件进入载荷。
+5. 生成带 BOM 的 Inno Setup 脚本并输出 `dist/PeerDesk-<version>-setup.exe` 与
+   `dist/SHA256SUMS.txt`。
+
+验证实际安装包：
+
+```powershell
+.\packaging\windows\test-installer.ps1 `
+  -InstallerPath .\dist\PeerDesk-0.8.0-setup.exe
+```
+
+该脚本会静默安装到 `dist/installer-test/app`，验证客户端、服务端、卸载器、Qt 平台
+插件、用户指南和开始菜单快捷方式；运行服务端 `--version`；使用
+`QT_QPA_PLATFORM=offscreen` 启动安装版客户端并保存 PNG 截图；随后写入测试启动项，
+静默卸载并检查程序、快捷方式、卸载注册表项和启动项已清除，同时确认
+`%APPDATA%\PeerDesk` 标记文件仍存在。测试前不能已有同 `AppId` 的每用户安装。
+
+本机 Inno Setup 常见路径为
+`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` 或
+`%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe`；脚本也接受 `-IsccPath`。产物未签名，
+不能把本机冒烟结果描述成已发布或已通过真实升级验收。
 
 ## 3. 运行方式
 
@@ -194,11 +239,11 @@ Qt UI 测试必须通过 CTest 执行。CTest 会设置离屏平台并收集退�
 
 `.github/workflows/ci.yml` 在 `windows-latest` 上执行完整原生检查和测试：
 
-1. 安装 Qt 6.8.3、`qtmultimedia` 和 MinGW 13.1。
-2. 校验 CMake、Ninja 与 MinGW。
-3. 使用 `windows-mingw-ci` 预设配置。
-4. 使用同一预设构建并运行 CTest。
-5. 失败时上传 `build/cpp/Testing` 日志。
+1. `build-and-test` 安装 Qt 6.8.3、`qtmultimedia` 和 MinGW 13.1，校验工具链。
+2. 使用 `windows-mingw-ci` 预设配置、构建并运行全部 CTest。
+3. `package` 安装 Qt 与 Inno Setup，使用 `windows-mingw-ci-release` 构建客户端和服务端。
+4. 生成 Release 安装包并执行静默安装、安装版客户端离屏截图和静默卸载。
+5. 成功后上传安装包与 SHA-256 清单；失败时上传 CTest、安装和卸载诊断日志。
 
 CI 会在推送到 `main`、Pull Request 和手动触发时运行。推送后本地可检查：
 
@@ -249,6 +294,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `apps/peerdesk-server/` | 服务端进程入口 |
 | `apps/peerdesk-client/` | Qt 客户端入口、启动参数、demo 和截图流程 |
 | `apps/peerdesk-link-harness/` | 双端 UDP 链路诊断工具 |
+| `packaging/windows/` | Windows 版本资源、Inno Setup 模板、打包脚本、安装冒烟和用户说明 |
 | `tests/` | 12 个 CTest 套件、跨进程单实例宿主与共享测试支持 |
 
 修改链路问题时，先从 `src/transport/peer_link.*` 和 `src/core/protocol.*` 开始；
@@ -279,6 +325,10 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | 设置页无法启用登录启动 | 查看对话框错误文本，并检查当前用户是否有权限写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`；组策略可能限制启动项 |
 | 登录后没有看到窗口 | `--background` 在托盘可用时会隐藏窗口，从托盘恢复；若托盘不可用则本应回退显示，检查 Explorer 托盘状态和应用是否被单实例唤醒 |
 | 需要彻底关闭登录启动 | 在设置中关闭“登录时启动 PeerDesk”，或删除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下名为 `PeerDesk` 的值 |
+| 安装时提示缺少 Inno Setup | 安装 Inno Setup 6，或给 `build-installer.ps1` 传 `-IsccPath` 指向 `ISCC.exe` |
+| 安装包启动时提示缺少 Qt 插件 | 重新运行 `build-installer.ps1`，并检查 `dist/stage/platforms/qwindows.dll` 与 `qoffscreen.dll` 是否存在 |
+| 安装冒烟提示已安装 | 先从“应用和功能”卸载同一用户的 PeerDesk；测试脚本不会覆盖已有安装 |
+| SmartScreen 提示未知发布者 | 当前安装包未做代码签名，这是已知发布限制；仅运行可信构建产物并核对 SHA-256 |
 | UI 测试没有摘要 | 改用 `ctest --preset windows-mingw -R peerdesk-ui -V` |
 | Viewer 截图为空 | 使用 `--page viewer --viewer-demo`，并留出首帧渲染时间 |
 
@@ -304,7 +354,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 1. 用两台真实 Windows 主机验收直连、中继、弱网、断线恢复、多屏、文件传输和长会话。
 2. 建立真实网络故障注入矩阵，记录恢复期限、输入隔离、重复断线和可靠流补洞行为。
 3. 建立可复现的抓屏、编码、端到端延迟与带宽基线，再决定优化顺序。
-4. 产品化：真实登录/重启验收、安装包、自动更新、崩溃诊断和版本升级路径。
+4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证和崩溃诊断。
 5. 媒体升级：H.264 与 Opus 动态接入，失败时保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID、真实游戏兼容性与拥塞控制。
 7. 交互低摩擦入口：在本地历史之上评估收藏、二维码和账号云同步，明确隐私边界后再实现。
@@ -321,6 +371,6 @@ git status --short
 ```
 
 只暂存本次改动涉及的文件，确认暂存区后再提交并推送。版本号位于 `CMakeLists.txt`
-的 `project(... VERSION 0.7.0)`；登录启动、双向文件队列与文件断点续传已完成回环测试，
-但真实登录/重启、跨机续传、同名同大小文件消歧、安装器与自动更新尚未完成，发布说明
-不得提前宣称。
+的 `project(... VERSION 0.8.0)`；登录启动、双向文件队列与文件断点续传已完成回环测试，
+Windows 安装/卸载已通过本机静默安装冒烟。真实登录/重启、跨机续传、同名同大小文件
+消歧、安装包签名、自动更新、失败回滚和跨版本升级尚未完成，发布说明不得提前宣称。

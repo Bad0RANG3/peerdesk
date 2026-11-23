@@ -27,6 +27,24 @@
         "CMAKE_C_COMPILER": "$env{IQTA_TOOLS}/mingw1310_64/bin/gcc.exe",
         "CMAKE_CXX_COMPILER": "$env{IQTA_TOOLS}/mingw1310_64/bin/g++.exe"
       }
+    },
+    {
+      "name": "windows-mingw-release",
+      "displayName": "Windows / Qt 6.8 / MinGW / Release",
+      "inherits": "windows-mingw",
+      "binaryDir": "${sourceDir}/build/cpp-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "windows-mingw-ci-release",
+      "displayName": "Windows / Qt 6.8 / MinGW / Release (CI)",
+      "inherits": "windows-mingw-ci",
+      "binaryDir": "${sourceDir}/build/cpp-ci-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
@@ -38,6 +56,16 @@
     {
       "name": "windows-mingw-ci",
       "configurePreset": "windows-mingw-ci",
+      "jobs": 4
+    },
+    {
+      "name": "windows-mingw-release",
+      "configurePreset": "windows-mingw-release",
+      "jobs": 8
+    },
+    {
+      "name": "windows-mingw-ci-release",
+      "configurePreset": "windows-mingw-ci-release",
       "jobs": 4
     }
   ],

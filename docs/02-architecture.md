@@ -1,6 +1,6 @@
 # PeerDesk 架构
 
-PeerDesk 0.7 是 **C++20 + Qt 6.8** 的 Windows 远程桌面。服务端、传输、会话、
+PeerDesk 0.8 是 **C++20 + Qt 6.8** 的 Windows 远程桌面。服务端、传输、会话、
 平台层和客户端界面共用同一套原生代码；媒体通过自研 **PDTP/1** UDP 协议传输，
 信令使用 TCP JSON Lines。
 
@@ -20,6 +20,8 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 - **单实例**：普通启动用本机锁与命名管道保证只有一个客户端；再次启动只唤醒现有窗口。
 - **可关闭的登录启动**：当前 Windows 用户可选择登录后以后台模式驻留托盘并保持可被控。
 - **可自托管**：一个服务端进程同时提供信令、STUN 和中继，便于自有网络部署。
+- **每用户交付**：安装器不需要管理员权限，同时部署客户端、服务端、Qt 与 MinGW 运行库，
+  并提供可验证的卸载与用户数据保留边界。
 
 ## 2. 进程与模块
 
@@ -30,6 +32,9 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 | `peerdesk-server.exe` | TCP 信令、连接码注册与配对、UDP STUN、UDP 中继、令牌和限速 |
 | `peerdesk-client.exe` | Qt 控制端和被控端，内含连接页、被控端面板、Viewer、设置和托盘 |
 | `peerdesk-link-harness.exe` | 链路联调工具，用于构造和观察 `PeerLink` 行为 |
+
+正式安装包只包含 `peerdesk-server.exe`、`peerdesk-client.exe`、运行库、许可与用户文档，
+不会携带测试程序、链路联调工具、PDB 或中间构建文件。
 
 ### 2.2 静态库
 
@@ -233,6 +238,28 @@ Qt 事件循环是主执行体。以下工作都在主线程完成：
 - 被控端默认接收目录是系统 Downloads 下的 `PeerDesk`。
 - 服务端可选共享令牌、连接频次限制和每会话中继上限。
 
+### 6.1 Windows 安装与卸载
+
+`packaging/windows/` 提供 Inno Setup 安装链路：
+
+- `version.rc.in` 为客户端和服务端生成 Windows 文件版本资源。
+- `build-installer.ps1` 从 CMake 读取版本，安装 Release 载荷到 `dist/stage`，用
+  `windeployqt` 部署 Qt 运行库与插件，并检查客户端、服务端、平台插件、图像/多媒体插件、
+  文档和 MinGW 运行库。
+- `PeerDesk.iss` 使用固定的每用户 `AppId`、`PrivilegesRequired=lowest` 和默认目录
+  `%LOCALAPPDATA%\Programs\PeerDesk`；关键向导文案为简体中文。
+- `test-installer.ps1` 执行静默安装、安装内容校验、服务端 `--version`、离屏客户端启动
+  截图、启动项清理、静默卸载和用户数据保留检查。
+
+安装器创建当前用户开始菜单快捷方式，桌面快捷方式为可选任务。卸载由 Inno Setup 的
+每用户卸载器完成，删除程序文件和快捷方式，并在卸载阶段删除
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\PeerDesk`。应用自身创建的用户偏好
+`%APPDATA%\PeerDesk` 以及接收目录中的文件不属于安装载荷，卸载时保留。
+
+CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清单，再对实际安装包
+执行同一套静默安装/启动/卸载冒烟。当前安装包未签名，没有自动更新、失败回滚或已验收的
+跨版本升级路径。
+
 ## 7. 安全边界
 
 - 9 位连接码是会话预共享密钥的一部分；知道码且网络可达的人可以发起配对。
@@ -251,4 +278,6 @@ Qt 事件循环是主执行体。以下工作都在主线程完成：
   文件的路径消歧仍待验收。
 - 游戏鼠标已在应用层实现并通过回环测试，但仍缺虚拟显示器、虚拟 HID 和真实游戏
   兼容性验收。
+- Windows 安装与卸载仅完成本机冒烟和自动化链路验证；未做代码签名、真实跨机分发、
+  自动更新、失败回滚和跨版本升级验收。
 - 真实跨机、弱网和长会话仍需验收；回环测试与合成画面不能代替。
