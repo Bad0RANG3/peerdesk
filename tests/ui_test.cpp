@@ -6,6 +6,7 @@
 #include "ui/code_input.h"
 #include "ui/connection_page.h"
 #include "ui/host_panel.h"
+#include "ui/outgoing_file_queue.h"
 #include "ui/settings_dialog.h"
 #include "ui/ui_theme.h"
 #include "ui/viewer_page.h"
@@ -63,6 +64,9 @@ private slots:
     void viewerToolbarFadesAndRevealsOnActivity();
     void viewerReconnectKeepsFrameAndIsolatesInput();
     void viewerPageGameMouseLifecycle();
+    void outgoingFileQueueRetriesAndContinues();
+    void outgoingFileQueuePausesAndResumes();
+    void outgoingFileQueueIgnoresStaleCallbacks();
     void viewerFileTransferCancelState();
     void hostFileTransferCancelState();
     void appWindowKeepsViewerDuringLiveSession();
@@ -717,11 +721,22 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QVERIFY(page.dropOverlay()->isHidden());
     QVERIFY(page.transferLabel()->isHidden());
     QVERIFY(page.fileCancelButton()->isHidden());
+    QVERIFY(page.fileRetryButton()->isHidden());
+    QCOMPARE(page.fileQueueSize(), 1);
+
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTest::qWait(10);
+    QVERIFY(page.transferLabel()->isVisible());
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("等待发送")));
+    QVERIFY(page.fileCancelButton()->isHidden());
+    QCOMPARE(page.fileQueueSize(), 1);
 
     page.showEnded(QStringLiteral("恢复超时"));
     QVERIFY(!page.sessionLive());
     QVERIFY(!page.canvas()->hasFrame());
     QVERIFY(page.backButton()->isVisible());
+    QCOMPARE(page.fileQueueSize(), 0);
 }
 
 void UiTest::viewerPageGameMouseLifecycle()
@@ -834,6 +849,160 @@ void UiTest::viewerPageGameMouseLifecycle()
     QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
 }
 
+void UiTest::outgoingFileQueueRetriesAndContinues()
+{
+    pd::ui::OutgoingFileQueue queue;
+    QCOMPARE(
+        queue.enqueue({
+            QStringLiteral("C:/tmp/alpha.bin"),
+            QStringLiteral("C:/tmp/beta.bin"),
+            QStringLiteral("C:/tmp/gamma.bin"),
+        }),
+        3);
+    QCOMPARE(
+        queue.enqueue({QStringLiteral("C:/tmp/alpha.bin")}),
+        0);
+
+    QStringList sent;
+    const auto sender = [&sent](const QString &path, QString *error) {
+        sent.append(path);
+        if (error) {
+            error->clear();
+        }
+        return true;
+    };
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QCOMPARE(queue.activePosition(), 1);
+    QVERIFY(queue.markStarted(QStringLiteral("alpha-1"), {}, 100));
+    QVERIFY(queue.markProgress(QStringLiteral("alpha-1"), 40, 100));
+    QCOMPARE(queue.activeTask()->sent, 40);
+    QVERIFY(queue.markFinished(QStringLiteral("alpha-1"), {}, 100));
+    QVERIFY(!queue.active());
+    QVERIFY(queue.hasPending());
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(QStringLiteral("beta-1"), {}, 200));
+    QVERIFY(queue.markFailed(QStringLiteral("beta-1"), QStringLiteral("io")));
+    QCOMPARE(queue.failedCount(), 1);
+    QVERIFY(queue.hasFailed());
+    QVERIFY(queue.retryFailed());
+    QVERIFY(!queue.hasFailed());
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(QStringLiteral("beta-2"), {}, 200));
+    QVERIFY(queue.markCancelled(
+        QStringLiteral("beta-2"),
+        QStringLiteral("cancelled")));
+    QCOMPARE(queue.cancelledCount(), 1);
+    QVERIFY(queue.hasPending());
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(QStringLiteral("gamma-1"), {}, 300));
+    QVERIFY(queue.markFinished(QStringLiteral("gamma-1"), {}, 300));
+    QVERIFY(!queue.active());
+    QVERIFY(!queue.hasPending());
+    QCOMPARE(queue.succeededCount(), 2);
+    QCOMPARE(queue.cancelledCount(), 1);
+    QCOMPARE(queue.succeededBytes(), 400);
+    QCOMPARE(sent.size(), 4);
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::NoTask);
+}
+
+void UiTest::outgoingFileQueuePausesAndResumes()
+{
+    pd::ui::OutgoingFileQueue queue;
+    QCOMPARE(queue.enqueue({QStringLiteral("C:/tmp/paused.bin")}), 1);
+
+    int starts = 0;
+    const auto sender = [&starts](const QString &, QString *error) {
+        ++starts;
+        if (error) {
+            error->clear();
+        }
+        return true;
+    };
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(QStringLiteral("paused-1"), {}, 512));
+    queue.pause();
+    QVERIFY(queue.interruptActive(QStringLiteral("interrupted")));
+    QVERIFY(queue.paused());
+    QVERIFY(!queue.active());
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::NoTask);
+    QCOMPARE(starts, 1);
+
+    queue.resume();
+    QVERIFY(!queue.paused());
+    QVERIFY(queue.hasPending());
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QCOMPARE(starts, 2);
+    QVERIFY(queue.markStarted(QStringLiteral("paused-2"), {}, 512));
+    QVERIFY(queue.markFinished(QStringLiteral("paused-2"), {}, 512));
+    QCOMPARE(queue.succeededCount(), 1);
+}
+
+void UiTest::outgoingFileQueueIgnoresStaleCallbacks()
+{
+    pd::ui::OutgoingFileQueue queue;
+    QCOMPARE(
+        queue.enqueue({
+            QStringLiteral("C:/tmp/first.bin"),
+            QStringLiteral("C:/tmp/second.bin"),
+        }),
+        2);
+    const auto sender = [](const QString &, QString *error) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    };
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(QStringLiteral("first-1"), {}, 128));
+    QVERIFY(!queue.markStarted(QStringLiteral("first-1"), {}, 128));
+    QVERIFY(queue.markFinished(QStringLiteral("first-1"), {}, 128));
+
+    QCOMPARE(
+        queue.startNext(sender),
+        pd::ui::OutgoingFileQueue::StartResult::Started);
+    QVERIFY(queue.markStarted(QStringLiteral("second-1"), {}, 256));
+    QVERIFY(!queue.markProgress(QStringLiteral("first-1"), 64, 128));
+    QVERIFY(!queue.markFinished(QStringLiteral("first-1"), {}, 128));
+    QVERIFY(!queue.markFailed(
+        QStringLiteral("first-1"),
+        QStringLiteral("stale")));
+    QVERIFY(!queue.markCancelled(
+        QStringLiteral("first-1"),
+        QStringLiteral("stale")));
+    QVERIFY(!queue.markInterrupted(
+        QStringLiteral("first-1"),
+        QStringLiteral("stale")));
+    QVERIFY(queue.active());
+    QVERIFY(queue.markProgress(QStringLiteral("second-1"), 64, 256));
+    QVERIFY(queue.markFinished(QStringLiteral("second-1"), {}, 256));
+    QVERIFY(!queue.markStarted(QStringLiteral("first-1"), {}, 128));
+    QCOMPARE(queue.succeededCount(), 2);
+}
+
 void UiTest::viewerFileTransferCancelState()
 {
     const auto preferences = testPreferences();
@@ -872,6 +1041,18 @@ void UiTest::viewerFileTransferCancelState()
     QVERIFY(page.canvas()->hasFrame());
 
     controller.outgoingFileStarted(
+        QStringLiteral("retry-file"),
+        QStringLiteral("retry.bin"),
+        2048);
+    controller.outgoingFileFailed(
+        QStringLiteral("retry-file"),
+        QStringLiteral("io"));
+    QTest::qWait(10);
+    QVERIFY(page.fileRetryButton()->isVisible());
+    QCOMPARE(page.fileRetryButton()->x(), page.fileCancelButton()->x());
+    QCOMPARE(page.fileRetryButton()->y(), page.fileCancelButton()->y());
+
+    controller.outgoingFileStarted(
         QStringLiteral("interrupt-file"),
         QStringLiteral("interrupt.bin"),
         4096);
@@ -882,9 +1063,9 @@ void UiTest::viewerFileTransferCancelState()
         QStringLiteral("network"));
     QTest::qWait(10);
     QVERIFY(page.fileCancelButton()->isHidden());
-    QCOMPARE(
-        page.transferLabel()->text(),
-        QStringLiteral("传输已中断"));
+    QVERIFY(page.fileRetryButton()->isHidden());
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("传输已中断")));
     QVERIFY(page.canvas()->hasFrame());
 }
 

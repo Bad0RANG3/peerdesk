@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/outgoing_file_queue.h"
+
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -211,6 +213,14 @@ public:
     {
         return fileCancelButton_;
     }
+    [[nodiscard]] QPushButton *fileRetryButton() const
+    {
+        return fileRetryButton_;
+    }
+    [[nodiscard]] int fileQueueSize() const
+    {
+        return fileQueue_.size();
+    }
     [[nodiscard]] QLabel *demoBadge() const { return demoBadge_; }
     [[nodiscard]] QWidget *textOverlay() const { return textOverlay_; }
     [[nodiscard]] QWidget *dropOverlay() const { return dropOverlay_; }
@@ -261,7 +271,10 @@ private:
     void hideToolbarImmediately();
     void setMenuPinned(bool pinned);
     void flushFileQueue();
-    void setFileBusy(bool busy);
+    void updateFileTransferUi(
+        const QString &message = {},
+        const QString &color = {});
+    void clearFileTransferState();
     void installMenuPin(QMenu *menu);
     void layoutFloatingWidgets();
 
@@ -307,12 +320,13 @@ private:
     QPushButton *textSendButton_ = nullptr;
     QLabel *transferLabel_ = nullptr;
     QPushButton *fileCancelButton_ = nullptr;
+    QPushButton *fileRetryButton_ = nullptr;
     QLabel *demoBadge_ = nullptr;
 
     QString peerName_;
     QString sessionCode_;
     QString linkState_;
-    QStringList pendingFiles_;
+    OutgoingFileQueue fileQueue_;
     QJsonObject info_;
     QJsonObject statistics_;
     QJsonObject audioState_;
@@ -321,7 +335,6 @@ private:
     int toolbarAutoHideMs_ = 3000;
     bool live_ = false;
     bool demoMode_ = false;
-    bool fileBusy_ = false;
     bool hudVisible_ = true;
     bool menuPinned_ = false;
     bool lastAudioEnabled_ = true;
