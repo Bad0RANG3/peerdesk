@@ -15,6 +15,7 @@ class QDragLeaveEvent;
 class QDragMoveEvent;
 class QDropEvent;
 class QFocusEvent;
+class QGraphicsOpacityEffect;
 class QInputMethodEvent;
 class QKeyEvent;
 class QLabel;
@@ -22,6 +23,7 @@ class QMenu;
 class QMouseEvent;
 class QPaintEvent;
 class QPlainTextEdit;
+class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
 class QShowEvent;
@@ -159,6 +161,14 @@ public:
     [[nodiscard]] QMenu *qualityMenu() const { return qualityMenu_; }
     [[nodiscard]] QMenu *monitorMenu() const { return monitorMenu_; }
     [[nodiscard]] QTimer *toolbarTimer() const { return toolbarTimer_; }
+    [[nodiscard]] QGraphicsOpacityEffect *toolbarOpacityEffect() const
+    {
+        return toolbarOpacity_;
+    }
+    [[nodiscard]] QPropertyAnimation *toolbarAnimation() const
+    {
+        return toolbarAnimation_;
+    }
     [[nodiscard]] QLabel *overlayTitle() const { return overlayTitle_; }
     [[nodiscard]] QLabel *overlayNote() const { return overlayNote_; }
     [[nodiscard]] QLabel *peerLabel() const { return peerLabel_; }
@@ -220,6 +230,9 @@ private:
     void hideOverlay();
     void wakeToolbar();
     void scheduleToolbarHide();
+    void revealToolbar();
+    void fadeToolbar();
+    void hideToolbarImmediately();
     void setMenuPinned(bool pinned);
     void flushFileQueue();
     void setFileBusy(bool busy);
@@ -248,6 +261,8 @@ private:
     QMenu *qualityMenu_ = nullptr;
     QMenu *monitorMenu_ = nullptr;
     QTimer *toolbarTimer_ = nullptr;
+    QGraphicsOpacityEffect *toolbarOpacity_ = nullptr;
+    QPropertyAnimation *toolbarAnimation_ = nullptr;
 
     QWidget *hud_ = nullptr;
     QLabel *peerLabel_ = nullptr;

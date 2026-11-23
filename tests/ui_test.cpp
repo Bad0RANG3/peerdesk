@@ -12,6 +12,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QGraphicsOpacityEffect>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -58,6 +59,7 @@ private slots:
     void viewerCanvasIgnoresInputWhenDisabled();
     void viewerDemoRendersNativeSession();
     void viewerEndedClearsFrameAndShowsBack();
+    void viewerToolbarFadesAndRevealsOnActivity();
     void viewerReconnectKeepsFrameAndIsolatesInput();
     void viewerFileTransferCancelState();
     void hostFileTransferCancelState();
@@ -487,6 +489,48 @@ void UiTest::viewerEndedClearsFrameAndShowsBack()
     QVERIFY(page.backButton()->isVisible());
     QVERIFY(page.overlayTitle()->text().contains(QStringLiteral("会话已结束")));
     QCOMPARE(page.overlayNote()->text(), QStringLiteral("对端主动结束会话"));
+}
+
+void UiTest::viewerToolbarFadesAndRevealsOnActivity()
+{
+    const auto preferences = testPreferences();
+    pd::ViewerController controller;
+    controller.setPreferences(preferences);
+    pd::ui::ViewerPage page(&controller);
+    page.resize(960, 600);
+    page.show();
+    QTest::qWait(20);
+
+    QImage frame(640, 360, QImage::Format_RGB32);
+    frame.fill(QColor(QStringLiteral("#203a54")));
+    page.beginSession(QStringLiteral("DESKTOP"), QStringLiteral("123456789"));
+    page.canvas()->setFrame(frame);
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTRY_VERIFY_WITH_TIMEOUT(page.toolbar()->isVisible(), 500);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        page.toolbarOpacityEffect()->opacity() > 0.95,
+        1000);
+
+    page.setToolbarAutoHideInterval(30);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        page.toolbarAnimation()->state() == QAbstractAnimation::Running,
+        500);
+    QTRY_VERIFY_WITH_TIMEOUT(page.toolbar()->isHidden(), 1000);
+    QCOMPARE(page.toolbarOpacityEffect()->opacity(), 0.0);
+
+    page.setToolbarAutoHideInterval(3000);
+    QEvent enter(QEvent::Enter);
+    QApplication::sendEvent(page.canvas(), &enter);
+    QTRY_VERIFY_WITH_TIMEOUT(page.toolbar()->isVisible(), 500);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        page.toolbarOpacityEffect()->opacity() > 0.95,
+        1000);
+
+    page.showReconnecting();
+    QTest::qWait(10);
+    QVERIFY(page.toolbar()->isHidden());
+    QCOMPARE(page.toolbarOpacityEffect()->opacity(), 0.0);
+    QVERIFY(page.canvas()->hasFrame());
 }
 
 void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()

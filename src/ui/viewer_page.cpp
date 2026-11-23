@@ -16,6 +16,7 @@
 #include <QFileInfo>
 #include <QFocusEvent>
 #include <QFont>
+#include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputMethodEvent>
@@ -28,6 +29,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -46,6 +48,7 @@ namespace {
 
 constexpr int kMouseMoveIntervalMs = 16;
 constexpr int kWheelStep = 120;
+constexpr int kToolbarFadeMs = 160;
 
 QString jsonString(const QJsonObject &object, const char *key)
 {
@@ -1066,6 +1069,27 @@ QMenu::indicator:checked {
     toolbarTimer_ = new QTimer(this);
     toolbarTimer_->setSingleShot(true);
     toolbarTimer_->setInterval(toolbarAutoHideMs_);
+    toolbarOpacity_ = new QGraphicsOpacityEffect(toolbar_);
+    toolbarOpacity_->setOpacity(0.0);
+    toolbar_->setGraphicsEffect(toolbarOpacity_);
+    toolbarAnimation_ = new QPropertyAnimation(
+        toolbarOpacity_,
+        "opacity",
+        this);
+    toolbarAnimation_->setDuration(kToolbarFadeMs);
+    toolbarAnimation_->setEasingCurve(QEasingCurve::OutCubic);
+    connect(
+        toolbarAnimation_,
+        &QPropertyAnimation::finished,
+        this,
+        [this]() {
+            if (toolbarAnimation_->endValue().toDouble() <= 0.001) {
+                toolbar_->hide();
+                toolbarOpacity_->setOpacity(0.0);
+            } else {
+                toolbarOpacity_->setOpacity(1.0);
+            }
+        });
 
     buildQualityMenu();
     updateMonitors();
@@ -1568,7 +1592,7 @@ void ViewerPage::connectSignals()
                 || !overlay_->isHidden()) {
                 return;
             }
-            toolbar_->hide();
+            fadeToolbar();
         });
 
     installMenuPin(qualityMenu_);
@@ -1800,7 +1824,7 @@ void ViewerPage::updateToolbarVisibility()
     if (!available
         || !overlay_->isHidden()
         || !textOverlay_->isHidden()) {
-        toolbar_->hide();
+        hideToolbarImmediately();
         toolbarTimer_->stop();
         return;
     }
@@ -1821,7 +1845,7 @@ void ViewerPage::showOverlay(
     overlay_->setGeometry(rect());
     overlay_->show();
     overlay_->raise();
-    toolbar_->hide();
+    hideToolbarImmediately();
     toolbarTimer_->stop();
 }
 
@@ -1841,7 +1865,7 @@ void ViewerPage::wakeToolbar()
         return;
     }
     toolbar_->setEnabled(true);
-    toolbar_->show();
+    revealToolbar();
     toolbar_->adjustSize();
     toolbar_->move(
         (width() - toolbar_->width()) / 2,
@@ -1865,13 +1889,51 @@ void ViewerPage::scheduleToolbarHide()
     toolbarTimer_->start(toolbarAutoHideMs_);
 }
 
+void ViewerPage::revealToolbar()
+{
+    toolbarAnimation_->stop();
+    if (toolbar_->isHidden()) {
+        toolbarOpacity_->setOpacity(0.0);
+        toolbar_->show();
+    }
+    if (toolbarOpacity_->opacity() >= 0.999) {
+        toolbarOpacity_->setOpacity(1.0);
+        return;
+    }
+    toolbarAnimation_->setStartValue(toolbarOpacity_->opacity());
+    toolbarAnimation_->setEndValue(1.0);
+    toolbarAnimation_->start();
+}
+
+void ViewerPage::fadeToolbar()
+{
+    if (toolbar_->isHidden()) {
+        return;
+    }
+    toolbarAnimation_->stop();
+    if (toolbarOpacity_->opacity() <= 0.001) {
+        toolbar_->hide();
+        return;
+    }
+    toolbarAnimation_->setStartValue(toolbarOpacity_->opacity());
+    toolbarAnimation_->setEndValue(0.0);
+    toolbarAnimation_->start();
+}
+
+void ViewerPage::hideToolbarImmediately()
+{
+    toolbarAnimation_->stop();
+    toolbar_->hide();
+    toolbarOpacity_->setOpacity(0.0);
+}
+
 void ViewerPage::setMenuPinned(bool pinned)
 {
     menuPinned_ = pinned;
     if (pinned) {
         toolbarTimer_->stop();
         if (live_ && overlay_->isHidden()) {
-            toolbar_->show();
+            revealToolbar();
             toolbar_->raise();
         }
     } else {
@@ -2067,7 +2129,7 @@ void ViewerPage::showFailed(const QString &reason)
     currentFileName_.clear();
     lastFilePercent_ = -1;
     transferLabel_->hide();
-    toolbar_->hide();
+    hideToolbarImmediately();
     toolbarTimer_->stop();
     updateAudioUi();
     showOverlay(
@@ -2092,7 +2154,7 @@ void ViewerPage::showEnded(const QString &reason)
     canvas_->clearFrame();
     dragActive_ = false;
     dropOverlay_->hide();
-    toolbar_->hide();
+    hideToolbarImmediately();
     toolbarTimer_->stop();
     updateStatisticsUi();
     updateAudioUi();
@@ -2129,7 +2191,7 @@ void ViewerPage::resetSession()
     canvas_->clearFrame();
     canvas_->setInputEnabled(false);
     overlay_->hide();
-    toolbar_->hide();
+    hideToolbarImmediately();
     toolbarTimer_->stop();
     dropOverlay_->hide();
     textOverlay_->hide();
