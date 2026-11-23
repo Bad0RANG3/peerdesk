@@ -1,6 +1,6 @@
 #pragma once
 
-#include "session/file_transfer.h"
+#include "session/file_transfer_pipeline.h"
 #include "session/session_types.h"
 #include "session/viewer_audio_pipeline.h"
 #include "session/viewer_video_pipeline.h"
@@ -31,6 +31,10 @@ public:
 
     void setReceiveDirectory(const QString &directory);
     [[nodiscard]] QString receiveDirectory() const;
+    [[nodiscard]] QString fileTransferThreadName() const
+    {
+        return fileTransfer_.ioThreadName();
+    }
 
     [[nodiscard]] QJsonObject info() const { return info_; }
     [[nodiscard]] QJsonObject stats() const { return stats_; }
@@ -122,11 +126,27 @@ private:
     void onVideoFrame(const QByteArray &jpeg, bool keyframe);
     void onAudioPacket(const QByteArray &payload);
     void dispatch(const QJsonObject &message);
-    void handleFileBegin(const QJsonObject &message);
-    void handleFileResume(const QJsonObject &message);
-    void handleFileData(const QJsonObject &message);
-    void handleFileEnd(const QJsonObject &message);
     void handleRemoteFileResult(const QJsonObject &message);
+    void onIncomingFileStarted(
+        const QString &id,
+        const QString &name,
+        qint64 size,
+        bool resumed,
+        qint64 offset);
+    void onIncomingFileProgress(
+        const QString &id,
+        qint64 received,
+        qint64 total);
+    void onIncomingFileFinished(
+        const QString &id,
+        const QString &path,
+        qint64 size);
+    void onIncomingFileFailed(
+        const QString &id,
+        const QString &reason);
+    void onIncomingFileCancelled(
+        const QString &id,
+        const QString &reason);
     void rejectFile(const QString &id, const QString &reason);
     void announceUpload(const QString &state, const QJsonObject &extra = {});
     void sendControlNoReply(const QJsonObject &message);
@@ -139,9 +159,7 @@ private:
     quint32 videoSequence_ = 0;
     quint64 audioFrames_ = 0;
 
-    QString receiveDirectory_;
-    FileReceiver receiver_;
-    FileSender *fileSender_ = nullptr;
+    FileTransferPipeline fileTransfer_;
     ViewerVideoPipeline video_;
     ViewerAudioPipeline audio_;
 

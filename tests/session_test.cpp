@@ -1,6 +1,7 @@
 #include "server/server.h"
 #include "session/audio_codec.h"
 #include "session/file_transfer.h"
+#include "session/file_transfer_pipeline.h"
 #include "session/host_input_pipeline.h"
 #include "session/host_session.h"
 #include "session/media_sources.h"
@@ -21,6 +22,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QtTest>
 
 #include <algorithm>
@@ -1190,6 +1192,200 @@ private slots:
         QCOMPARE(failed.count(), 0);
         QCOMPARE(cancelled.count(), 0);
         QCOMPARE(interrupted.count(), 0);
+    }
+
+    void fileTransferPipelineRunsIoOffUiThread()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QByteArray payload =
+            makePayload(2 * 1024 * 1024, 0x71A5C3);
+        const QString path =
+            directory.filePath(QStringLiteral("pipeline.bin"));
+        QVERIFY(writeBytes(path, payload));
+
+        FileTransferPipeline transfer;
+        const QString ioThread = transfer.ioThreadName();
+        QCOMPARE(
+            ioThread,
+            QStringLiteral("PeerDeskFileTransfer"));
+        QVERIFY(ioThread != QThread::currentThread()->objectName());
+
+        QSignalSpy started(
+            &transfer,
+            &FileTransferPipeline::outgoingFileStarted);
+        QSignalSpy finished(
+            &transfer,
+            &FileTransferPipeline::outgoingFileFinished);
+        QSignalSpy failed(
+            &transfer,
+            &FileTransferPipeline::outgoingFileFailed);
+
+        int heartbeatCount = 0;
+        QTimer heartbeat;
+        connect(&heartbeat, &QTimer::timeout, [&heartbeatCount]() {
+            ++heartbeatCount;
+        });
+        heartbeat.start(10);
+
+        QString error;
+        QVERIFY2(transfer.startSend(path, &error), qPrintable(error));
+        QCOMPARE(started.count(), 1);
+        QVERIFY(waitUntil(
+            [&]() {
+                return finished.count() + failed.count() == 1;
+            },
+            15000));
+        heartbeat.stop();
+
+        QCOMPARE(started.count(), 1);
+        QCOMPARE(finished.count(), 1);
+        QCOMPARE(failed.count(), 0);
+        QVERIFY(heartbeatCount > 0);
+        QVERIFY(!transfer.sendActive());
+        QCOMPARE(transfer.ioThreadName(), ioThread);
+    }
+
+    void fileTransferPipelinePreservesAndDropsResume()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path =
+            directory.filePath(QStringLiteral("resumable.bin"));
+        QVERIFY(writeBytes(path, makePayload(512 * 1024, 0x4A11)));
+
+        FileTransferPipeline transfer;
+        QSignalSpy interrupted(
+            &transfer,
+            &FileTransferPipeline::outgoingFileInterrupted);
+        QSignalSpy cancelled(
+            &transfer,
+            &FileTransferPipeline::outgoingFileCancelled);
+        QList<QJsonObject> control;
+        connect(
+            &transfer,
+            &FileTransferPipeline::controlMessage,
+            [&control](const QJsonObject &message) {
+                control.append(message);
+            });
+
+        QString error;
+        QVERIFY2(transfer.startSend(path, &error), qPrintable(error));
+        QVERIFY(transfer.sendActive());
+        QVERIFY2(
+            transfer.interruptSend(QStringLiteral("network")),
+            "active transfer should be interruptible");
+        QVERIFY(!transfer.sendActive());
+        QCOMPARE(interrupted.count(), 1);
+        QCOMPARE(
+            interrupted.constFirst().at(1).toString(),
+            QStringLiteral("network"));
+        QVERIFY(transfer.hasResumableSend());
+
+        transfer.abortSend();
+        QVERIFY(!transfer.hasResumableSend());
+
+        QVERIFY2(transfer.startSend(path, &error), qPrintable(error));
+        const QString id = transfer.sendId();
+        QVERIFY(!id.isEmpty());
+        QVERIFY(transfer.cancelSend());
+        QVERIFY(!transfer.cancelSend());
+        QCOMPARE(cancelled.count(), 1);
+        QCOMPARE(cancelled.constFirst().at(0).toString(), id);
+        QVERIFY(waitUntil(
+            [&]() {
+                return countMessages(
+                           control,
+                           QStringLiteral("file_cancel"),
+                           id)
+                    == 1;
+            },
+            1000));
+        pumpEvents(80);
+        QCOMPARE(
+            countMessages(
+                control,
+                QStringLiteral("file_cancel"),
+                id),
+            1);
+        QVERIFY(!transfer.sendActive());
+    }
+
+    void fileTransferPipelineRejectsEmptyReceiveIdOnce()
+    {
+        FileTransferPipeline transfer;
+        QSignalSpy failed(
+            &transfer,
+            &FileTransferPipeline::receiveFileFailed);
+        const QJsonObject message{
+            {QStringLiteral("t"), QStringLiteral("file_begin")},
+            {QStringLiteral("name"), QStringLiteral("invalid.bin")},
+            {QStringLiteral("size"), 4},
+        };
+
+        transfer.beginReceive(message);
+        transfer.beginReceive(message);
+        QVERIFY(waitUntil([&]() { return failed.count() == 1; }, 1000));
+        pumpEvents(80);
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(failed.constFirst().at(0).toString(), QString());
+        QCOMPARE(
+            failed.constFirst().at(1).toString(),
+            QStringLiteral("id"));
+    }
+
+    void fileTransferPipelineReceivesOffUiThread()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QByteArray payload =
+            makePayload(180000, 0xB17E);
+        const QString id = QStringLiteral("pipeline-receive");
+
+        FileTransferPipeline transfer(directory.path());
+        QSignalSpy started(
+            &transfer,
+            &FileTransferPipeline::receiveFileStarted);
+        QSignalSpy finished(
+            &transfer,
+            &FileTransferPipeline::receiveFileFinished);
+        QSignalSpy failed(
+            &transfer,
+            &FileTransferPipeline::receiveFileFailed);
+
+        transfer.beginReceive(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("file_begin")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("name"), QStringLiteral("received.bin")},
+            {QStringLiteral("size"), payload.size()},
+        });
+        for (qsizetype offset = 0;
+             offset < payload.size();
+             offset += kFileChunkBytes) {
+            transfer.appendReceive(QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("file_data")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("d"),
+                 QString::fromLatin1(
+                     payload.mid(offset, kFileChunkBytes).toBase64())},
+            });
+        }
+        transfer.finishReceive(id);
+
+        QCOMPARE(started.count(), 0);
+        QCOMPARE(finished.count(), 0);
+        QVERIFY(waitUntil(
+            [&]() { return finished.count() == 1; },
+            5000));
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(started.count(), 1);
+        QCOMPARE(started.constFirst().at(0).toString(), id);
+        QCOMPARE(
+            started.constFirst().at(1).toString(),
+            QStringLiteral("received.bin"));
+        QCOMPARE(
+            readBytes(finished.constFirst().at(1).toString()),
+            payload);
     }
 
     void fileReceiverAbortReleasesReservation()

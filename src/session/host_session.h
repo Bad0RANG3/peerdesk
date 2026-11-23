@@ -1,7 +1,7 @@
 #pragma once
 
 #include "session/audio_codec.h"
-#include "session/file_transfer.h"
+#include "session/file_transfer_pipeline.h"
 #include "session/host_input_pipeline.h"
 #include "session/media_sources.h"
 #include "session/session_types.h"
@@ -46,6 +46,10 @@ public:
 
     void setReceiveDirectory(const QString &directory);
     [[nodiscard]] QString receiveDirectory() const;
+    [[nodiscard]] QString fileTransferThreadName() const
+    {
+        return fileTransfer_.ioThreadName();
+    }
 
     void setRateLimit(double mbps);
     [[nodiscard]] double rateLimit() const { return rateLimitMbps_; }
@@ -102,10 +106,26 @@ private:
 
     void dispatch(const QJsonObject &message);
     void handleMouse(const QJsonObject &message);
-    void handleFileBegin(const QJsonObject &message);
-    void handleFileResume(const QJsonObject &message);
-    void handleFileData(const QJsonObject &message);
-    void handleFileEnd(const QJsonObject &message);
+    void onIncomingFileStarted(
+        const QString &id,
+        const QString &name,
+        qint64 size,
+        bool resumed,
+        qint64 offset);
+    void onIncomingFileProgress(
+        const QString &id,
+        qint64 received,
+        qint64 total);
+    void onIncomingFileFinished(
+        const QString &id,
+        const QString &path,
+        qint64 size);
+    void onIncomingFileFailed(
+        const QString &id,
+        const QString &reason);
+    void onIncomingFileCancelled(
+        const QString &id,
+        const QString &reason);
     void rejectFile(const QString &id, const QString &reason);
 
     void submitInput(const HostInputCommand &command);
@@ -130,8 +150,7 @@ private:
     bool audioRunning_ = false;
     QString audioError_;
 
-    FileReceiver receiver_;
-    FileSender *fileSender_ = nullptr;
+    FileTransferPipeline fileTransfer_;
 
     QTimer *audioTimer_ = nullptr;
     QTimer *statsTimer_ = nullptr;
