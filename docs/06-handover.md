@@ -39,13 +39,15 @@ Qt 6.8、CMake 和 Ninja。
 视频分片、XOR FEC 生成和 NACK 重传缓存检索运行在 `PeerDeskVideoSend` 工作线程，
 待发送帧同样采用最新值覆盖并保护待处理关键帧；入站分片解析、重组、XOR FEC 缺片恢复、
 超时丢帧和 NACK 判定运行在 `PeerDeskVideoReceive` 工作线程，结果排队回主线程后由
-`PeerLink` 更新统计并实际发送 NACK/关键帧请求。`PeerDeskUdpIo` 工作线程独占 UDP
-socket 和唯一加密上下文，完成绑定/关闭、入站类型识别、RLY1 解包、包头解析、接收侧
-AEAD/重放检查、发送侧 AEAD、发送序号、RLY1 封装、实际收写和原子发送统计。只有已认证
-包会回到主线程，`PeerLink` 完成路径锁定、统计和会话衔接后，把已认证包排队交给
-`PeerDeskPeerLinkRx`。该 worker 独占控制分片、可靠控制流、ACK 状态、PING/RTT、
-音视频转发和 Bye 处理，并通过 `LinkWireCommand` 请求主线程选择 UDP 路径并发送
-ACK、Pong 和控制 DATA。会话设置/重置递增接收代际，重置前排队事件不会进入新密钥。
+`PeerLink` 更新统计并发布反馈路由快照。`PeerDeskLinkFeedback` 工作线程异步发送
+NACK、Pong、ACK 和控制 DATA，关键帧请求经认证可靠控制流提交并限制为每 200 ms
+一次。`PeerDeskUdpIo` 工作线程独占 UDP socket 和唯一加密上下文，完成绑定/关闭、
+入站类型识别、RLY1 解包、包头解析、接收侧 AEAD/重放检查、发送侧 AEAD、发送序号、
+RLY1 封装、实际收写和原子发送统计。只有已认证包会回到主线程，`PeerLink` 完成路径
+锁定、统计和会话衔接后，把已认证包排队交给 `PeerDeskPeerLinkRx`。该 worker 独占
+控制分片、可靠控制流、ACK 状态、PING/RTT、音视频转发和 Bye 处理，并通过
+`LinkWireCommand` 把 ACK、Pong 和控制 DATA 交给反馈线程。反馈、UDP 接收和认证流
+代际必须同时匹配，重置或停止后迟到的任务会被丢弃。
 被控端键鼠注入运行在 `PeerDeskHostInput` 工作线程，UI 线程只解析控制消息并提交命令；
 连续绝对移动合并，停止会立即拒绝并清空待处理队列，再等待 worker 释放按键与鼠标按钮。
 文件发送分块、接收 Base64 解码/校验、临时文件读写与提交由 `PeerDeskFileTransfer`

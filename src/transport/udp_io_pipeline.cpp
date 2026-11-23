@@ -130,6 +130,9 @@ public:
             || job.address.isNull() || job.port == 0) {
             return;
         }
+        if (job.generation != 0 && job.generation != generation_) {
+            return;
+        }
 
         if (!job.plain && !crypto_) {
             return;

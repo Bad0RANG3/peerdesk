@@ -20,7 +20,8 @@
   JPEG 编码、Viewer 独立 JPEG 解码、视频分片/FEC/NACK 重传缓存检索工作线程、
   入站视频重组/FEC/NACK 判定工作线程、UDP socket 收发/入站解析/双向 AEAD/重放检查
   工作线程、`PeerDeskPeerLinkRx` 已认证包/控制可靠流工作线程、`PeerDeskHostInput`
-  键鼠注入工作线程、WASAPI loopback、Win32 键鼠、
+  键鼠注入工作线程、`PeerDeskLinkFeedback` 链路反馈工作线程、WASAPI loopback、
+  Win32 键鼠、
   文本剪贴板、带发送中取消与断线续传的双向文件传输，以及 Viewer 与被控端可重试
   多文件队列。
 - `[已完成]` **游戏鼠标（回环）**：相对捕获、16 ms 合帧、独立相对按键、
@@ -65,7 +66,7 @@
 | `peerdesk-transport` | 视频重组、NACK、控制流和 ACK 语义 |
 | `peerdesk-stun` | Binding Request/Success、地址解析和 XOR 地址 |
 | `peerdesk-server` | 信令、注册、配对、令牌、限流、STUN、中继 |
-| `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态、视频收发、UDP 收写、接收认证和代际隔离 |
+| `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态、视频收发、UDP 收写、反馈限频/线程归属、接收认证和代际隔离 |
 | `peerdesk-session` | 被控/控制会话、独立音视频编解码线程、设置、音频、文件和输入事件 |
 | `peerdesk-signaling-client` | TCP JSON Lines、重连策略和消息映射 |
 | `peerdesk-app-controller` | 控制器生命周期、偏好、最近连接持久化、错误和 UI 门面 |
@@ -153,11 +154,16 @@ CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试
   UDP socket 绑定/收发、入站类型识别、RLY1 解包、包头解析、双向 AEAD、重放检查、
   发送序号和发送统计已迁入 `PeerDeskUdpIo`，已认证包分发、控制分片、可靠流 ACK、
   PING/RTT、音视频转发和 Bye 处理已迁入 `PeerDeskPeerLinkRx`，被控端键鼠注入已迁入
-  `PeerDeskHostInput`。回环测试覆盖跨线程输出、最新帧背压、待解码关键帧保护、
+  `PeerDeskHostInput`，NACK、关键帧请求、Pong、ACK 和控制 DATA 的发送已迁入
+  `PeerDeskLinkFeedback`。回环测试覆盖跨线程输出、最新帧背压、待解码关键帧保护、
   音频顺序、播放线程、部分写入续泵、热更新、分片重传、跨线程接收重组/FEC/NACK、
   UDP 实际收写、接收认证、篡改/重放拒绝、旧会话隔离、3 KiB 控制消息分片与重组、
-  ACK/PING/RTT/NACK/BYE、窗口缩放重呈现、输入顺序/合并/停止丢弃和停止隔离。
-  NACK/关键帧请求的实际发送、渲染线程与线程池仍待继续拆解。
+  ACK/PING/RTT/NACK/BYE、关键帧限频、反馈/UDP/认证流代际隔离、窗口缩放重呈现、
+  输入顺序/合并/停止丢弃和停止隔离。渲染线程、窗口最终合成与线程池仍待继续拆解。
+- `[已完成]` **链路反馈线程化（回环）**：`PeerDeskLinkFeedback` 异步发送 NACK、
+  Pong、ACK 和控制 DATA，关键帧请求经认证可靠控制流提交并限制为每 200 ms 一次；
+  反馈 generation、UDP 接收 generation 和认证流 generation 共同隔离 reset/stop
+  后迟到的任务。真实弱网和长会话下的反馈时序仍待跨机验收。
 - `[已完成]` **被控端输入线程化（回环）**：UI 线程只解析控制消息并提交命令；
   `PeerDeskHostInput` 独占 `IInputSink`，连续绝对移动合并，停止、禁用输入和替换
   sink 时释放按键/按钮，generation 隔离旧会话迟到命令。真实游戏兼容性仍未验收。
@@ -171,8 +177,8 @@ CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试
 当前视频是 GDI + 整帧 JPEG，音频是 G.711。抓屏、缩放、静帧检测、JPEG 编码、Viewer
 视频解码与画面呈现、音频解码/播放、视频发送分片/FEC/NACK 缓存检索、入站视频重组/
 FEC/NACK 判定、UDP socket 收发/入站解析/双向 AEAD/重放检查、已认证包处理以及被控端
-键鼠注入和文件 I/O 已在独立线程执行；NACK/关键帧请求的实际发送、窗口最终合成和
-大部分 UI 仍在主线程。没有线程池、GPU 编码、硬件编码、正式吞吐基准或性能报告。
+键鼠注入、文件 I/O 和链路反馈发送已在独立线程执行；窗口最终合成和大部分 UI 仍在
+主线程。没有线程池、GPU 编码、硬件编码、正式吞吐基准或性能报告。
 
 ### P2：交互与文件
 

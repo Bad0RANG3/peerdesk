@@ -64,6 +64,8 @@ target_link_libraries(peerdesk_server
 add_library(peerdesk_transport STATIC
     src/transport/authenticated_packet_pipeline.cpp
     src/transport/authenticated_packet_pipeline.h
+    src/transport/link_feedback_pipeline.cpp
+    src/transport/link_feedback_pipeline.h
     src/transport/peer_link.cpp
     src/transport/peer_link.h
     src/transport/udp_io_pipeline.cpp

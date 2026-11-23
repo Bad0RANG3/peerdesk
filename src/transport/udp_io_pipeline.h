@@ -16,6 +16,7 @@
 namespace pd {
 
 struct UdpSendJob {
+    quint64 generation = 0;
     PacketType type = PacketType::Data;
     quint8 stream = 0;
     quint8 flags = 0;

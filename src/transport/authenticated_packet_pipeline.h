@@ -9,6 +9,8 @@
 #include <QString>
 #include <QThread>
 
+#include <functional>
+
 namespace pd {
 
 struct LinkWireCommand {
@@ -24,6 +26,9 @@ class AuthenticatedPacketPipeline final : public QObject {
     Q_OBJECT
 
 public:
+    using WireCommandHandler =
+        std::function<void(quint64 generation, const LinkWireCommand &command)>;
+
     explicit AuthenticatedPacketPipeline(QObject *parent = nullptr);
     ~AuthenticatedPacketPipeline() override;
 
@@ -34,6 +39,8 @@ public:
     void receive(const Header &header, const QByteArray &payload);
     void sendControl(const QJsonObject &message);
     void sendPing();
+    void requestKeyframe(quint64 expectedGeneration);
+    void setWireCommandHandler(WireCommandHandler handler);
 
     [[nodiscard]] bool running() const { return running_; }
     [[nodiscard]] quint64 sessionGeneration() const { return generation_; }
@@ -62,6 +69,7 @@ private:
     QString workerThreadName_;
     quint64 generation_ = 0;
     bool running_ = false;
+    WireCommandHandler wireCommandHandler_;
 };
 
 } // namespace pd

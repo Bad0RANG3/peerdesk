@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QTcpSocket>
 #include <QThread>
 #include <QtEndian>
@@ -268,6 +269,12 @@ private slots:
             QStringLiteral("PeerDeskPeerLinkRx"));
         QVERIFY(
             host.authenticatedThreadName()
+            != QThread::currentThread()->objectName());
+        QCOMPARE(
+            host.linkFeedbackThreadName(),
+            QStringLiteral("PeerDeskLinkFeedback"));
+        QVERIFY(
+            host.linkFeedbackThreadName()
             != QThread::currentThread()->objectName());
         QVERIFY(waitUntil([&]() {
             return host.stats().sentPackets > 0
@@ -855,6 +862,236 @@ private slots:
             receiverPort);
         pumpEvents(120);
         QCOMPARE(received.size(), qsizetype(3));
+    }
+
+    void linkFeedbackSendsNackAndKeyframeOffThread()
+    {
+        const auto sessions = makeTestSessionPair();
+        QVERIFY(sessions.has_value());
+
+        UdpIoPipeline sender;
+        UdpIoPipeline receiver;
+        QHostAddress senderAddress;
+        QHostAddress receiverAddress;
+        quint16 senderPort = 0;
+        quint16 receiverPort = 0;
+        QString error;
+        QVERIFY2(
+            sender.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &senderAddress,
+                &senderPort,
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &receiverAddress,
+                &receiverPort,
+                &error),
+            qPrintable(error));
+        sender.setSession(sessions->host, true);
+        receiver.setSession(sessions->client, false);
+
+        QList<UdpReceivePacket> received;
+        connect(
+            &receiver,
+            &UdpIoPipeline::packetReceived,
+            this,
+            [&received](const UdpReceivePacket &packet) {
+                received.append(packet);
+            });
+
+        AuthenticatedPacketPipeline authenticatedPackets;
+        QList<quint32> keyframeSequences;
+        QSet<quint32> keyframeRequests;
+        connect(
+            &authenticatedPackets,
+            &AuthenticatedPacketPipeline::wireCommandReady,
+            this,
+            [&keyframeSequences, &keyframeRequests](
+                const LinkWireCommand &command) {
+                if (command.type != PacketType::Data
+                    || command.stream
+                        != static_cast<quint8>(StreamKind::Control)
+                    || (command.flags & FlagReliable) == 0
+                    || command.payload.size() < 4) {
+                    return;
+                }
+                const quint32 sequence = qFromLittleEndian<quint32>(
+                    command.payload.constData());
+                if (!keyframeRequests.contains(sequence)) {
+                    keyframeSequences.append(sequence);
+                }
+                const QJsonDocument document = QJsonDocument::fromJson(
+                    command.payload.mid(4));
+                if (document.isObject()
+                    && document.object()
+                           .value(QStringLiteral("t"))
+                           .toString()
+                        == QStringLiteral("keyframe_req")) {
+                    keyframeRequests.insert(sequence);
+                }
+            });
+        authenticatedPackets.start();
+
+        LinkFeedbackPipeline feedback(&sender, &authenticatedPackets);
+        feedback.start();
+        QCOMPARE(
+            feedback.workerThreadName(),
+            QStringLiteral("PeerDeskLinkFeedback"));
+        QVERIFY(
+            feedback.workerThreadName()
+            != QThread::currentThread()->objectName());
+
+        const auto routeFor = [&]() {
+            LinkFeedbackRoute route;
+            route.generation = feedback.generation();
+            route.udpGeneration = sender.receiveGeneration();
+            route.authGeneration =
+                authenticatedPackets.sessionGeneration();
+            route.sessionReady = true;
+            route.established = true;
+            route.address = receiverAddress;
+            route.port = receiverPort;
+            return route;
+        };
+        feedback.setRoute(routeFor());
+
+        feedback.submitNack(feedback.generation(), 77, {2, 4});
+        QVERIFY(waitUntil([&]() {
+            return std::any_of(
+                received.cbegin(),
+                received.cend(),
+                [](const UdpReceivePacket &packet) {
+                    return packet.header.type == PacketType::Nack;
+                });
+        }));
+        const auto nack = std::find_if(
+            received.cbegin(),
+            received.cend(),
+            [](const UdpReceivePacket &packet) {
+                return packet.header.type == PacketType::Nack;
+            });
+        QVERIFY(nack != received.cend());
+        const auto missing = unpackNack(nack->payload);
+        QVERIFY(missing.has_value());
+        QCOMPARE(missing->first, quint32(77));
+        QCOMPARE(missing->second, QList<quint16>({2, 4}));
+        QCOMPARE(
+            received.constFirst().generation,
+            sender.receiveGeneration());
+
+        feedback.submitKeyframe(feedback.generation());
+        feedback.submitKeyframe(feedback.generation());
+        QVERIFY(waitUntil([&]() { return !keyframeRequests.isEmpty(); }));
+        pumpEvents(100);
+        QCOMPARE(keyframeRequests.size(), qsizetype(1));
+
+        pumpEvents(250);
+        feedback.submitKeyframe(feedback.generation());
+        QVERIFY(waitUntil([&]() {
+            return keyframeRequests.size() == 2;
+        }));
+        QCOMPARE(keyframeSequences.size(), qsizetype(2));
+        QVERIFY(keyframeSequences.at(0) != keyframeSequences.at(1));
+
+        authenticatedPackets.stop();
+
+        const quint64 staleFeedbackGeneration = feedback.generation();
+        const qsizetype beforeReset = received.size();
+        feedback.resetSession();
+        feedback.submitNack(
+            staleFeedbackGeneration,
+            88,
+            QList<quint16>{6});
+        pumpEvents(150);
+        QCOMPARE(received.size(), beforeReset);
+
+        feedback.setRoute(routeFor());
+        feedback.submitNack(feedback.generation(), 99, {8});
+        QVERIFY(waitUntil([&]() {
+            return received.size() > beforeReset;
+        }));
+        QVERIFY(received.constLast().header.type == PacketType::Nack);
+        const auto freshMissing = unpackNack(received.constLast().payload);
+        QVERIFY(freshMissing.has_value());
+        QCOMPARE(freshMissing->first, quint32(99));
+        QCOMPARE(freshMissing->second, QList<quint16>({8}));
+
+        const qsizetype beforeStop = received.size();
+        feedback.stop();
+        feedback.submitNack(
+            feedback.generation(),
+            100,
+            QList<quint16>{9});
+        pumpEvents(150);
+        QCOMPARE(received.size(), beforeStop);
+    }
+
+    void udpIoDropsStaleGenerationSendJobs()
+    {
+        const auto sessions = makeTestSessionPair();
+        QVERIFY(sessions.has_value());
+
+        UdpIoPipeline sender;
+        UdpIoPipeline receiver;
+        QHostAddress senderAddress;
+        QHostAddress receiverAddress;
+        quint16 senderPort = 0;
+        quint16 receiverPort = 0;
+        QString error;
+        QVERIFY2(
+            sender.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &senderAddress,
+                &senderPort,
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.start(
+                QStringLiteral("127.0.0.1"),
+                0,
+                &receiverAddress,
+                &receiverPort,
+                &error),
+            qPrintable(error));
+        receiver.setSession(sessions->client, false);
+        sender.setSession(sessions->host, true);
+
+        QList<UdpReceivePacket> received;
+        connect(
+            &receiver,
+            &UdpIoPipeline::packetReceived,
+            this,
+            [&received](const UdpReceivePacket &packet) {
+                received.append(packet);
+            });
+
+        const quint64 staleGeneration = sender.receiveGeneration();
+        sender.resetSession();
+        sender.setSession(sessions->host, true);
+
+        UdpSendJob job;
+        job.generation = staleGeneration;
+        job.type = PacketType::Data;
+        job.stream = static_cast<quint8>(StreamKind::Control);
+        job.payload = QByteArrayLiteral("stale-generation");
+        job.address = receiverAddress;
+        job.port = receiverPort;
+        (void)sender.send(job);
+        pumpEvents(150);
+        QVERIFY(received.isEmpty());
+
+        job.generation = sender.receiveGeneration();
+        job.payload = QByteArrayLiteral("fresh-generation");
+        (void)sender.send(job);
+        QVERIFY(waitUntil([&]() { return received.size() == 1; }));
+        QCOMPARE(received.constFirst().payload, QByteArrayLiteral("fresh-generation"));
+        QCOMPARE(received.constFirst().header.type, PacketType::Data);
     }
 
     void videoPacketizerIsolatesRestartedGenerations()

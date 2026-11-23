@@ -10,6 +10,7 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <utility>
 
 namespace pd {
 namespace {
@@ -40,15 +41,12 @@ public:
                   deliverControl(message);
               },
               [this](quint32 sequence, const QByteArray &payload, quint8 flags) {
-                  emit wireCommandReady(
-                      generation_,
-                      LinkWireCommand{
+                  dispatchWireCommand(LinkWireCommand{
                           PacketType::Data,
                           static_cast<quint8>(StreamKind::Control),
                           flags,
                           littleU32(sequence) + payload,
-                      },
-                      currentThreadName());
+                      });
               })
     {
     }
@@ -110,7 +108,7 @@ public:
                 const quint32 messageSequence =
                     qFromLittleEndian<quint32>(payload.constData());
                 controlStream_.onData(messageSequence, payload.mid(4));
-                maybeAck(ReliableStream::currentTimeSeconds(), threadName);
+                maybeAck(ReliableStream::currentTimeSeconds());
             }
             break;
         case PacketType::Parity:
@@ -138,10 +136,8 @@ public:
             break;
         }
         case PacketType::Ping:
-            emit wireCommandReady(
-                generation_,
-                LinkWireCommand{PacketType::Pong, 0, 0, payload},
-                threadName);
+            dispatchWireCommand(
+                LinkWireCommand{PacketType::Pong, 0, 0, payload});
             break;
         case PacketType::Pong:
             handlePong(payload, threadName);
@@ -169,6 +165,13 @@ public:
         }
     }
 
+    void requestKeyframe(quint64 expectedGeneration)
+    {
+        sendControl(
+            expectedGeneration,
+            QJsonObject{{QStringLiteral("t"), QStringLiteral("keyframe_req")}});
+    }
+
     void sendPing(quint64 generation)
     {
         if (!accepting_ || generation != generation_) {
@@ -184,16 +187,18 @@ public:
             }
             pingsOut_.remove(oldest);
         }
-        emit wireCommandReady(
-            generation_,
-            LinkWireCommand{
+        dispatchWireCommand(LinkWireCommand{
                 PacketType::Ping,
                 0,
                 0,
                 jsonPayload(
                     QJsonObject{{QStringLiteral("n"), pingSequence_}}),
-            },
-            currentThreadName());
+            });
+    }
+
+    void setWireCommandHandler(AuthenticatedPacketPipeline::WireCommandHandler handler)
+    {
+        wireCommandHandler_ = std::move(handler);
     }
 
 signals:
@@ -245,26 +250,34 @@ private:
             return;
         }
         const double now = ReliableStream::currentTimeSeconds();
-        const QString threadName = currentThreadName();
         controlStream_.tick(now);
-        maybeAck(now, threadName);
+        maybeAck(now);
     }
 
-    void maybeAck(double now, const QString &threadName)
+    void maybeAck(double now)
     {
         if (!controlStream_.needsAck() || now - lastAckAt_ <= 0.004) {
             return;
         }
         lastAckAt_ = now;
-        emit wireCommandReady(
-            generation_,
-            LinkWireCommand{
+        dispatchWireCommand(LinkWireCommand{
                 PacketType::Ack,
                 0,
                 0,
                 packAck(controlStream_.ackPayload()),
-            },
-            threadName);
+            });
+    }
+
+    void dispatchWireCommand(LinkWireCommand command)
+    {
+        if (wireCommandHandler_) {
+            wireCommandHandler_(generation_, command);
+            return;
+        }
+        emit wireCommandReady(
+            generation_,
+            command,
+            currentThreadName());
     }
 
     void deliverControl(const QByteArray &payload)
@@ -309,6 +322,7 @@ private:
     double lastAckAt_ = 0.0;
     quint64 generation_ = 0;
     bool accepting_ = false;
+    AuthenticatedPacketPipeline::WireCommandHandler wireCommandHandler_;
 };
 
 AuthenticatedPacketPipeline::AuthenticatedPacketPipeline(QObject *parent)
@@ -538,6 +552,34 @@ void AuthenticatedPacketPipeline::sendPing()
             worker_->sendPing(generation);
         },
         Qt::QueuedConnection);
+}
+
+void AuthenticatedPacketPipeline::requestKeyframe(quint64 expectedGeneration)
+{
+    if (!worker_) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        worker_,
+        [worker = worker_, expectedGeneration]() {
+            worker->requestKeyframe(expectedGeneration);
+        },
+        Qt::QueuedConnection);
+}
+
+void AuthenticatedPacketPipeline::setWireCommandHandler(
+    WireCommandHandler handler)
+{
+    wireCommandHandler_ = std::move(handler);
+    if (!worker_) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        worker_,
+        [worker = worker_, handler = wireCommandHandler_]() mutable {
+            worker->setWireCommandHandler(std::move(handler));
+        },
+        Qt::BlockingQueuedConnection);
 }
 
 void AuthenticatedPacketPipeline::observeWorker(

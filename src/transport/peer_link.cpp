@@ -51,6 +51,7 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
     , psk_(psk)
     , timer_(new QTimer(this))
     , keyPair_(KeyPair::generate())
+    , feedback_(&udpIo_, &authenticatedPackets_)
 {
     qRegisterMetaType<pd::LinkStats>("pd::LinkStats");
 
@@ -73,12 +74,20 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &videoReceive_,
         &VideoReceivePipeline::nackReady,
         this,
-        &PeerLink::onVideoNackReady);
+        [this](quint32 frameId, const QList<quint16> &missing) {
+            feedback_.submitNack(
+                feedback_.generation(),
+                frameId,
+                missing);
+        });
     connect(
         &videoReceive_,
         &VideoReceivePipeline::keyframeRequested,
         this,
-        &PeerLink::requestKeyframe);
+        [this]() {
+            feedback_.submitKeyframe(
+                feedback_.generation());
+        });
     connect(
         &authenticatedPackets_,
         &AuthenticatedPacketPipeline::controlMessageReceived,
@@ -108,11 +117,13 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &AuthenticatedPacketPipeline::videoRetransmitRequested,
         &videoSend_,
         &VideoSendPipeline::retransmit);
-    connect(
-        &authenticatedPackets_,
-        &AuthenticatedPacketPipeline::wireCommandReady,
-        this,
-        &PeerLink::onWireCommandReady);
+    authenticatedPackets_.setWireCommandHandler(
+        [this](quint64 authGeneration, const LinkWireCommand &command) {
+            feedback_.submitWireCommand(
+                feedback_.generation(),
+                authGeneration,
+                command);
+        });
     connect(
         &authenticatedPackets_,
         &AuthenticatedPacketPipeline::rttMeasured,
@@ -127,6 +138,7 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         [this]() {
             emitLog(QStringLiteral("peer closed"));
             established_ = false;
+            updateFeedbackRoute();
             setState(QStringLiteral("closed"));
         });
     connect(
@@ -186,9 +198,11 @@ bool PeerLink::start(const QString &bindAddress, quint16 port, QString *error)
     closing_ = false;
     lastStatsAt_ = ReliableStream::currentTimeSeconds();
     authenticatedPackets_.start();
+    feedback_.start();
     timer_->start();
     videoSend_.start();
     videoReceive_.start();
+    updateFeedbackRoute();
     emitLog(QStringLiteral("bound udp %1").arg(endpointText(localAddress_, localPort_)));
     return true;
 }
@@ -199,6 +213,8 @@ void PeerLink::close()
         return;
     }
     closing_ = true;
+    authenticatedPackets_.setWireCommandHandler({});
+    feedback_.stop();
     videoSend_.stop();
     videoReceive_.stop();
     if (sessionReady_ && udpIo_.running()) {
@@ -241,6 +257,7 @@ void PeerLink::resetPeer()
     const QByteArray tagBytes = randomBytes(4);
     sessionTag_ = qFromBigEndian<quint32>(tagBytes.constData());
     keyPair_ = KeyPair::generate();
+    feedback_.resetSession();
     udpIo_.resetSession();
     authenticatedPackets_.resetSession();
     sessionReady_ = false;
@@ -256,6 +273,7 @@ void PeerLink::resetPeer()
     remoteDeviceId_.clear();
 
     videoReceive_.resetSession();
+    updateFeedbackRoute();
 
     sentBytesWindow_.clear();
     sentBytesSnapshot_ = 0;
@@ -296,6 +314,7 @@ void PeerLink::setForceRelay(bool forceRelay)
 void PeerLink::addCandidates(const QList<Candidate> &candidates)
 {
     QSet<QString> known;
+    bool changed = false;
     for (const Candidate &candidate : peerCandidates_) {
         known.insert(candidateKey(candidate));
     }
@@ -312,7 +331,11 @@ void PeerLink::addCandidates(const QList<Candidate> &candidates)
         if (!known.contains(key)) {
             peerCandidates_.append(normalized);
             known.insert(key);
+            changed = true;
         }
+    }
+    if (changed) {
+        updateFeedbackRoute();
     }
 }
 
@@ -323,6 +346,7 @@ void PeerLink::beginHandshake()
     if (forceRelay_ && relayPort_ != 0 && !relayAddress_.isNull()) {
         usingRelay_ = true;
         stats_.usingRelay = true;
+        updateFeedbackRoute();
         emitLog(QStringLiteral("force relay mode: skipping direct paths"));
     }
     setState(QStringLiteral("punching"));
@@ -343,12 +367,14 @@ void PeerLink::offerRelay(const QString &host, quint16 port)
     }
     relayAddress_ = address;
     relayPort_ = port;
+    updateFeedbackRoute();
     emitLog(QStringLiteral("relay offered %1").arg(endpointText(address, port)));
 }
 
 void PeerLink::setRelayOutTag(quint32 tag)
 {
     relayOutTag_ = tag;
+    updateFeedbackRoute();
 }
 
 void PeerLink::discoverReflexive(
@@ -447,6 +473,11 @@ QString PeerLink::authenticatedThreadName() const
     return authenticatedPackets_.workerThreadName();
 }
 
+QString PeerLink::linkFeedbackThreadName() const
+{
+    return feedback_.workerThreadName();
+}
+
 QList<Candidate> PeerLink::localCandidates() const
 {
     QList<Candidate> result;
@@ -531,6 +562,7 @@ void PeerLink::tick()
             && now - handshakeStarted_ > kRelayEscalateAfterMs / 1000.0) {
             usingRelay_ = true;
             stats_.usingRelay = true;
+            updateFeedbackRoute();
             sendHello(true);
             emitLog(QStringLiteral("escalating to relay"));
         }
@@ -541,6 +573,7 @@ void PeerLink::tick()
         if (now - lastRxAt_ > kRxTimeoutMs / 1000.0) {
             emitLog(QStringLiteral("rx timeout, re-punching"));
             established_ = false;
+            updateFeedbackRoute();
             setState(QStringLiteral("punching"));
         }
     }
@@ -609,6 +642,7 @@ void PeerLink::processDatagram(const UdpReceivePacket &packet)
     }
     if (header.type == PacketType::Bye && !sessionReady_) {
         established_ = false;
+        updateFeedbackRoute();
         setState(QStringLiteral("closed"));
         return;
     }
@@ -699,6 +733,7 @@ void PeerLink::handleHello(
         udpIo_.setSession(*keys, true);
         authenticatedPackets_.resetSession();
         sessionReady_ = true;
+        updateFeedbackRoute();
         emitLog(QStringLiteral("hello from %1; keys derived, sending ack")
                     .arg(endpointText(sender, port)));
         helloSentAt_ = ReliableStream::currentTimeSeconds();
@@ -772,6 +807,7 @@ void PeerLink::handleHelloAck(
         udpIo_.setSession(*keys, false);
         authenticatedPackets_.resetSession();
         sessionReady_ = true;
+        updateFeedbackRoute();
         emitLog(QStringLiteral("hello_ack from %1; keys derived")
                     .arg(endpointText(sender, port)));
         sendPing();
@@ -784,16 +820,19 @@ void PeerLink::handleAuthenticated(
     const QHostAddress &sender,
     quint16 port)
 {
+    bool pathChanged = false;
     if (!usingRelay_
         && (!hasPeer() || peerAddress_ != sender || peerPort_ != port)) {
         peerAddress_ = sender;
         peerPort_ = port;
+        pathChanged = true;
         emitLog(QStringLiteral("path locked %1").arg(endpointText(sender, port)));
     }
     lastRxAt_ = ReliableStream::currentTimeSeconds();
 
     if (!established_) {
         established_ = true;
+        updateFeedbackRoute();
         setState(usingRelay_ ? QStringLiteral("relay") : QStringLiteral("direct"));
         sendControl(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("hello")},
@@ -802,6 +841,8 @@ void PeerLink::handleAuthenticated(
             {QStringLiteral("v"), 1},
             {QStringLiteral("id"), deviceId_},
         });
+    } else if (pathChanged) {
+        updateFeedbackRoute();
     }
 
     authenticatedPackets_.receive(header, payload);
@@ -816,20 +857,6 @@ void PeerLink::onVideoFrameReady(
     }
     recvFramesWindow_.append(ReliableStream::currentTimeSeconds());
     emit videoFrameReceived(frame, keyframe);
-}
-
-void PeerLink::onVideoNackReady(
-    quint32 frameId,
-    const QList<quint16> &missing)
-{
-    if (closing_ || !sessionReady_ || !established_ || missing.isEmpty()) {
-        return;
-    }
-    (void)sendPacket(
-        PacketType::Nack,
-        static_cast<quint8>(StreamKind::Video),
-        0,
-        packNack(frameId, missing));
 }
 
 void PeerLink::onVideoPacketsReady(const VideoPacketBatch &batch)
@@ -990,6 +1017,7 @@ bool PeerLink::sendPacket(
     }
 
     UdpSendJob job;
+    job.generation = udpIo_.receiveGeneration();
     job.type = type;
     job.stream = stream;
     job.flags = flags;
@@ -1005,18 +1033,6 @@ bool PeerLink::sendPacket(
     return udpIo_.send(job);
 }
 
-void PeerLink::onWireCommandReady(const LinkWireCommand &command)
-{
-    if (closing_ || !sessionReady_) {
-        return;
-    }
-    (void)sendPacket(
-        command.type,
-        command.stream,
-        command.flags,
-        command.payload);
-}
-
 void PeerLink::sendPing()
 {
     if (!sessionReady_ || !authenticatedPackets_.running()) {
@@ -1026,11 +1042,25 @@ void PeerLink::sendPing()
     authenticatedPackets_.sendPing();
 }
 
-void PeerLink::requestKeyframe()
+void PeerLink::updateFeedbackRoute()
 {
-    if (established_) {
-        sendControl(QJsonObject{{QStringLiteral("t"), QStringLiteral("keyframe_req")}});
+    LinkFeedbackRoute route;
+    route.generation = feedback_.generation();
+    route.udpGeneration = udpIo_.receiveGeneration();
+    route.authGeneration = authenticatedPackets_.sessionGeneration();
+    route.sessionReady = sessionReady_;
+    route.established = established_;
+    route.sessionTag = sessionTag_;
+    route.relayTag = relayOutTag_;
+    route.wrapRelay =
+        usingRelay_ && relayPort_ != 0 && !relayAddress_.isNull();
+
+    const QList<Destination> destinations = targetDestinations();
+    if (!destinations.isEmpty()) {
+        route.address = destinations.constFirst().address;
+        route.port = destinations.constFirst().port;
     }
+    feedback_.setRoute(route);
 }
 
 void PeerLink::setState(const QString &state)

@@ -5,6 +5,7 @@
 #include "core/reliable.h"
 #include "core/video.h"
 #include "transport/authenticated_packet_pipeline.h"
+#include "transport/link_feedback_pipeline.h"
 #include "transport/udp_io_pipeline.h"
 #include "transport/video_receive_pipeline.h"
 #include "transport/video_send_pipeline.h"
@@ -104,6 +105,7 @@ public:
     [[nodiscard]] QString videoReassemblerThreadName() const;
     [[nodiscard]] QString udpIoThreadName() const;
     [[nodiscard]] QString authenticatedThreadName() const;
+    [[nodiscard]] QString linkFeedbackThreadName() const;
     [[nodiscard]] QList<Candidate> localCandidates() const;
     [[nodiscard]] QList<Candidate> peerCandidates() const;
 
@@ -148,13 +150,11 @@ private:
         bool plain = false,
         std::optional<quint64> sequence = std::nullopt);
 
-    void onWireCommandReady(const LinkWireCommand &command);
     void sendPing();
-    void requestKeyframe();
     void onVideoFrameReady(const QByteArray &frame, bool keyframe);
-    void onVideoNackReady(quint32 frameId, const QList<quint16> &missing);
     void onVideoPacketsReady(const VideoPacketBatch &batch);
 
+    void updateFeedbackRoute();
     void setState(const QString &state);
     void updateStats(double now);
     void pruneWindows(double now);
@@ -210,6 +210,7 @@ private:
     VideoSendPipeline videoSend_;
     VideoReceivePipeline videoReceive_;
     AuthenticatedPacketPipeline authenticatedPackets_;
+    LinkFeedbackPipeline feedback_;
 
     QString state_ = QStringLiteral("idle");
     LinkStats stats_;

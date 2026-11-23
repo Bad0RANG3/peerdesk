@@ -98,7 +98,8 @@ Host 在传输链路关闭后挂起旧会话并回到 `Waiting`，但保持注�
 - 6 秒未直连时把原始 PDTP 数据报封装为 `RLY1 + tag`，改走服务端中继。
 - 维护 4 秒保活、握手阶段每秒加密 PING、25 秒 RX 超时和 20 ms 链路 tick。
 - 接收视频分片、FEC、NACK、控制消息、音频和统计；把入站视频分片与 parity 提交给
-  接收流水线，并在主线程实际发送 NACK/关键帧请求，把结果回调给会话层。
+  接收流水线，并把反馈路由快照交给独立反馈线程；NACK、关键帧请求、Pong、ACK 和
+  控制 DATA 不再由主线程写入 UDP socket。
 
 状态主线：
 
@@ -130,7 +131,8 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   → PeerDeskUdpIo 认证 → PeerDeskPeerLinkRx 协议分发
   → PeerDeskVideoReceive：分片解析/重组、XOR FEC、超时丢帧、NACK 判定
   → queued frameReady / nackReady / keyframeRequested
-  → PeerLink 主线程：统计、实际发送 NACK/关键帧请求
+  → PeerLink 主线程：统计、反馈路由快照
+  → PeerDeskLinkFeedback：异步 NACK；关键帧请求经可靠控制流限频提交
   → PeerDeskViewerVideo 解码（保留最新帧）
   → PeerDeskViewerPresent 等比缩放（物理像素/DPR，最新帧背压）
   → 主线程 paintEvent：最终 drawImage
@@ -145,9 +147,10 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
 - `FramePacer` 根据实际帧大小调整 JPEG 质量，带宽上限同时影响质量预算和有效发帧率。
 - 静帧可跳过发送；首帧和显式关键帧请求会提供新的编码基准。
 - `PeerDeskVideoReceive` 在独立线程中串行执行分片解析、重组、XOR FEC 缺片恢复、
-  超时丢帧和 NACK 判定；结果以排队信号回到主线程。`PeerLink` 更新接收统计并实际
-  发送 NACK/关键帧请求，重传包由 `PeerDeskVideoSend` 检索缓存并构造。关键帧丢失
-  会请求新的关键帧。
+  超时丢帧和 NACK 判定；结果以排队信号回到主线程。`PeerLink` 更新接收统计并发布
+  路由快照；NACK 由 `PeerDeskLinkFeedback` 异步发送，关键帧请求经
+  `PeerDeskPeerLinkRx` 的可靠控制流生成 DATA，并在反馈线程限制为每 200 ms 一次。
+  重传包由 `PeerDeskVideoSend` 检索缓存并构造；关键帧丢失仍会触发刷新请求。
 - Viewer 把收到的 JPEG 交给 `PeerDeskViewerVideo` 线程解码；解码慢时只保留最新帧，
   尚未交付的关键帧不会被普通帧覆盖。解码完成的 `QImage` 再交给
   `PeerDeskViewerPresent` 线程，按当前窗口与 `devicePixelRatio` 生成等比缩放后的
@@ -285,9 +288,9 @@ Viewer 画面的等比平滑缩放。窗口尺寸或设备像素比变化时会�
 独占唯一的 `VideoReceiver`，串行执行入站视频分片解析、重组、XOR FEC 缺片恢复、
 超时丢帧、NACK 判定和关键帧请求判定。worker 内每 20 ms 运行一次接收器 tick；数据
 提交使用排队调用，启动、停止和会话重置使用阻塞调用。停止、重启或重置会递增
-generation，主线程据此丢弃旧会话路径尚未交付的帧、NACK 和关键帧请求；主线程只更新
-接收统计并实际发送 NACK/关键帧请求。回环测试覆盖跨线程重组、Parity 恢复、NACK、
-关键帧请求、停止隔离、重启和 reset 隔离。
+generation，pipeline 在信号出口丢弃旧会话尚未交付的帧、NACK 和关键帧请求；
+`PeerLink` 只更新接收统计并向反馈线程发布路由快照。回环测试覆盖跨线程重组、Parity
+恢复、NACK、关键帧请求、停止隔离、重启和 reset 隔离。
 
 `UdpIoPipeline` 创建一个名为 `PeerDeskUdpIo` 的 `QThread`，由 worker 独占唯一的
 `QUdpSocket` 和唯一的 `CryptoContext`，负责绑定和关闭 socket、入站报文类型识别、
@@ -303,10 +306,18 @@ RLY1 解包、PDTP 包头解析、接收侧 AEAD 与重放检查、构造发送�
 worker 独占控制分片、可靠控制流、ACK 状态、PING/RTT 和 Bye 处理。视频 Data/Parity、
 音频、控制消息、ACK/NACK、Ping/Pong 和 Bye 都通过排队调用进入该线程；worker 将
 重组后的控制消息、视频/音频负载、重传请求和 RTT 以排队信号送回主线程，并通过
-`LinkWireCommand` 请求发送 ACK、Pong 和控制 DATA。主线程仍负责路径锁定、接收统计、
-选择 UDP 路径和实际发送。启动、停止和会话重置使用阻塞调用，generation 隔离重置前
-排队的旧会话结果。回环测试覆盖线程归属、3 KiB 控制消息分片与重组、可靠流 ACK、
-Ping/Pong、RTT、NACK、Bye 和 reset 代际隔离。
+`LinkWireCommand` 把 ACK、Pong 和控制 DATA 交给 `PeerDeskLinkFeedback`，不回到
+主线程执行 socket 写。主线程仍负责路径锁定、接收统计、路由快照和会话衔接。启动、
+停止和会话重置使用阻塞调用，generation 隔离重置前排队的旧会话结果。回环测试覆盖
+线程归属、3 KiB 控制消息分片与重组、可靠流 ACK、Ping/Pong、RTT、NACK、Bye 和
+reset 代际隔离。
+
+`LinkFeedbackPipeline` 创建一个名为 `PeerDeskLinkFeedback` 的 `QThread`，串行执行
+NACK 构造与发送、关键帧请求限频、Pong/ACK/控制 DATA 的 UDP 发送。worker 只读取
+主线程发布的只读路由快照，不访问 `PeerLink` 的路径状态；反馈 generation、UDP 接收
+generation 和认证流 generation 必须同时匹配，重置或停止后迟到的反馈任务会被丢弃。
+关键帧请求经认证可靠控制流排队，200 ms 冷却内的重复请求被忽略。回环测试覆盖线程
+归属、NACK/关键帧实际到达、限频、停止隔离，以及反馈、UDP 和认证流代际隔离。
 
 `HostInputPipeline` 创建一个名为 `PeerDeskHostInput` 的 `QThread`，由 worker 独占
 唯一的 `IInputSink`，按 FIFO 串行执行鼠标、滚轮、键盘、文本和 `Ctrl+Alt+Del` 注入。
@@ -327,9 +338,9 @@ generation 隔离旧会话命令；停止会先在调用线程拒绝并清空待
 `WasapiLoopbackSource` 内部另有一个 `std::thread`，负责读取 WASAPI loopback PCM，
 随后把数据交回会话路径。
 
-代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；NACK/关键帧请求的实际发送、
-窗口最终合成和大部分 UI 仍在主线程。已认证包处理、被控端输入和文件 I/O 已移出 UI
-线程，但不能据此宣称完整异步媒体管线或已达到某个性能指标。
+代码中没有线程池、GPU 编码、硬件编码或正式吞吐基准；窗口最终合成和大部分 UI 仍在
+主线程。已认证包处理、链路反馈发送、被控端输入和文件 I/O 已移出 UI 线程，但不能
+据此宣称完整异步媒体管线或已达到某个性能指标。
 
 ## 6. 配置、日志与运行边界
 
@@ -394,8 +405,9 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
   播放已移至 `PeerDeskAudio` 工作线程，UDP socket 收发、入站类型识别、RLY1 解包、
   包头解析、双向 AEAD、重放检查和发送统计已移至 `PeerDeskUdpIo` 工作线程，被控端
   输入注入已移至 `PeerDeskHostInput` 工作线程，已认证包分发、控制可靠流、
-  ACK/PING/RTT 和媒体转发已移至 `PeerDeskPeerLinkRx` 工作线程；但 NACK/关键帧请求的
-  实际发送、窗口最终合成和大部分 UI 仍在主线程。
+  ACK/PING/RTT 和媒体转发已移至 `PeerDeskPeerLinkRx` 工作线程，NACK、关键帧请求、
+  Pong、ACK 和控制 DATA 的发送已移至 `PeerDeskLinkFeedback` 工作线程；但窗口最终
+  合成和大部分 UI 仍在主线程。
 - 声音是固定 G.711 µ-law，没有 Opus。
 - 文件支持单文件断线续传，但断点只保留 10 分钟，跨机续传仍待真实验收；断点失效时
   回退为整文件重试。接收端同名同大小文件已通过回环测试分配独立路径并隔离断点，但
