@@ -147,6 +147,8 @@ add_library(peerdesk_ui STATIC
     src/ui/ui_theme.h
     src/ui/ui_widgets.cpp
     src/ui/ui_widgets.h
+    src/ui/viewer_frame_pipeline.cpp
+    src/ui/viewer_frame_pipeline.h
     src/ui/viewer_page.cpp
     src/ui/viewer_page.h
 )

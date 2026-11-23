@@ -141,13 +141,15 @@ CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试
 - `[待开始]` H.264 编码和解码，保留 JPEG 回退路径。
 - `[待开始]` Opus 音频，保留 G.711 兼容回退。
 - `[进行中]` 媒体线程与流水线拆解：抓屏、缩放、静帧检测和 JPEG 编码已迁入
-  `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，音频包校验与
-  G.711 µ-law 解码已迁入 FIFO 的 `PeerDeskViewerAudio`，PCM16 再进入
+  `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，画面等比缩放已迁入
+  `PeerDeskViewerPresent`，音频包校验与 G.711 µ-law 解码已迁入 FIFO 的
+  `PeerDeskViewerAudio`，PCM16 再进入
   `PeerDeskAudio` 线程，由其独占最长 360 ms 待播队列、10 ms 泵和 `QAudioSink`；
   视频分片、XOR FEC 生成和 NACK 重传缓存检索已迁入 `PeerDeskVideoSend`；UDP socket
   绑定/收发、包头、AEAD 发送、发送序号和发送统计已迁入 `PeerDeskUdpIo`。回环测试
   覆盖跨线程输出、最新帧背压、待解码关键帧保护、音频顺序、播放线程、部分写入续泵、
-  热更新、分片重传、UDP 实际收写和停止隔离。接收解密、画面绘制与线程池仍待继续拆解。
+  热更新、分片重传、UDP 实际收写、窗口缩放重呈现和停止隔离。接收解密、渲染线程与
+  线程池仍待继续拆解。
 - `[待开始]` GPU 抓屏、脏矩形、硬件编码和帧间压缩评估。
 - `[待开始]` 虚拟显示器能力评估。
 - `[已完成]` 应用层游戏鼠标：相对捕获、16 ms 合帧、`reldown`/`relup` 按键语义、
@@ -156,9 +158,9 @@ CI 命令使用对应 preset，并要求全部 14 个套件通过。回环测试
 - `[待开始]` 更细的自适应码率策略、拥塞信号和弱网恢复。
 
 当前视频是 GDI + 整帧 JPEG，音频是 G.711。抓屏、缩放、静帧检测、JPEG 编码、Viewer
-视频/音频解码、音频播放、视频分片/FEC/NACK 重传缓存检索以及 UDP socket 收发/包头/
-AEAD 发送已在独立线程执行；接收解密、画面绘制和大部分 UI 仍在主线程。没有线程池、
-GPU 编码、硬件编码、正式吞吐基准或性能报告。
+视频解码与画面呈现、音频解码/播放、视频分片/FEC/NACK 重传缓存检索以及 UDP socket
+收发/包头/AEAD 发送已在独立线程执行；接收解密、窗口最终合成和大部分 UI 仍在主线程。
+没有线程池、GPU 编码、硬件编码、正式吞吐基准或性能报告。
 
 ### P2：交互与文件
 

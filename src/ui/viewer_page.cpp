@@ -4,6 +4,7 @@
 #include "app/viewer_controller.h"
 #include "ui/ui_theme.h"
 #include "ui/ui_widgets.h"
+#include "ui/viewer_frame_pipeline.h"
 
 #include <QAction>
 #include <QApplication>
@@ -195,18 +196,48 @@ ViewerCanvas::ViewerCanvas(QWidget *parent)
     wheelTimer_->setSingleShot(true);
     wheelTimer_->setInterval(0);
     connect(wheelTimer_, &QTimer::timeout, this, &ViewerCanvas::flushWheel);
+
+    presentation_ = new ViewerFramePipeline(this);
+    connect(
+        presentation_,
+        &ViewerFramePipeline::framePresented,
+        this,
+        [this](const QImage &image, const QString &) {
+            if (frame_.isNull() || image.isNull()) {
+                return;
+            }
+            presentedFrame_ = image;
+            update();
+        });
+    submitPresentFrame();
 }
 
 void ViewerCanvas::setFrame(const QImage &frame)
 {
+    if (frame.isNull()) {
+        clearFrame();
+        return;
+    }
     frame_ = frame;
+    submitPresentFrame();
     update();
 }
 
 void ViewerCanvas::clearFrame()
 {
     frame_ = QImage();
+    presentedFrame_ = QImage();
+    if (presentation_) {
+        presentation_->clear();
+    }
     update();
+}
+
+QString ViewerCanvas::presentationThreadName() const
+{
+    return presentation_
+        ? presentation_->presentationThreadName()
+        : QString();
 }
 
 QRectF ViewerCanvas::frameRect() const
@@ -341,11 +372,16 @@ void ViewerCanvas::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     painter.fillRect(rect(), QColor(QStringLiteral("#05070b")));
     const QRectF target = frameRect();
-    if (frame_.isNull() || target.isEmpty()) {
+    if (presentedFrame_.isNull() || target.isEmpty()) {
         return;
     }
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.drawImage(target, frame_);
+    painter.drawImage(target, presentedFrame_);
+}
+
+void ViewerCanvas::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    submitPresentFrame();
 }
 
 void ViewerCanvas::mouseMoveEvent(QMouseEvent *event)
@@ -554,6 +590,10 @@ QVariant ViewerCanvas::inputMethodQuery(Qt::InputMethodQuery query) const
 
 bool ViewerCanvas::event(QEvent *event)
 {
+    if (event->type() == QEvent::DevicePixelRatioChange
+        || event->type() == QEvent::ScreenChangeInternal) {
+        submitPresentFrame();
+    }
     if (event->type() == QEvent::ShortcutOverride && inputEnabled_) {
         event->accept();
         return true;
@@ -626,6 +666,17 @@ void ViewerCanvas::scheduleWheel()
     if (!wheelScheduled_) {
         wheelScheduled_ = true;
         wheelTimer_->start();
+    }
+}
+
+void ViewerCanvas::submitPresentFrame()
+{
+    if (!presentation_) {
+        return;
+    }
+    presentation_->setViewport(size(), devicePixelRatioF());
+    if (!frame_.isNull()) {
+        presentation_->setFrame(frame_);
     }
 }
 

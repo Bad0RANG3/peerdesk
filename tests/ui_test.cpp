@@ -103,6 +103,9 @@ private slots:
     void navigationSwitchesPagesWithoutAutoStart();
     void hostPanelRendersWithSyntheticSource();
     void viewerCanvasScalesAndNormalizesCoordinates();
+    void viewerCanvasPresentsFrameOffMainThread();
+    void viewerCanvasKeepsLatestPresentedFrame();
+    void viewerCanvasResizesAndRejectsLatePresentations();
     void viewerCanvasBatchesPointerInput();
     void viewerCanvasGameMouseRelativeInput();
     void viewerCanvasCapturesAndReleasesKeyboard();
@@ -373,6 +376,98 @@ void UiTest::viewerCanvasScalesAndNormalizesCoordinates()
     canvas.clearFrame();
     QVERIFY(!canvas.hasFrame());
     QCOMPARE(canvas.normalizePoint(QPointF(0.0, 0.0)), QPointF(0.5, 0.5));
+}
+
+void UiTest::viewerCanvasPresentsFrameOffMainThread()
+{
+    pd::ui::ViewerCanvas canvas;
+    canvas.resize(1000, 600);
+
+    QImage frame(800, 400, QImage::Format_RGB32);
+    frame.fill(Qt::darkCyan);
+    canvas.setFrame(frame);
+
+    QTRY_VERIFY_WITH_TIMEOUT(!canvas.presentedFrame().isNull(), 2000);
+    QCOMPARE(canvas.frame().size(), QSize(800, 400));
+    const qreal ratio = canvas.devicePixelRatioF();
+    const QSize viewport(
+        std::max(1, qRound(canvas.width() * ratio)),
+        std::max(1, qRound(canvas.height() * ratio)));
+    QCOMPARE(
+        canvas.presentedFrame().size(),
+        frame.size().scaled(viewport, Qt::KeepAspectRatio));
+    QCOMPARE(
+        canvas.presentationThreadName(),
+        QStringLiteral("PeerDeskViewerPresent"));
+    QCOMPARE(
+        canvas.presentedFrame().pixelColor(
+            canvas.presentedFrame().rect().center()),
+        frame.pixelColor(frame.rect().center()));
+}
+
+void UiTest::viewerCanvasKeepsLatestPresentedFrame()
+{
+    pd::ui::ViewerCanvas canvas;
+    canvas.resize(960, 540);
+    for (int index = 0; index < 8; ++index) {
+        QImage frame(1600, 900, QImage::Format_RGB32);
+        frame.fill(QColor(20 + index * 20, 40, 60));
+        canvas.setFrame(frame);
+    }
+
+    QImage latest(1600, 900, QImage::Format_RGB32);
+    latest.fill(QColor(QStringLiteral("#e64a19")));
+    canvas.setFrame(latest);
+
+    QTRY_VERIFY_WITH_TIMEOUT(!canvas.presentedFrame().isNull(), 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        canvas.presentedFrame().pixelColor(
+            canvas.presentedFrame().rect().center()),
+        latest.pixelColor(latest.rect().center()),
+        2000);
+    QCOMPARE(canvas.frame().size(), latest.size());
+    QCOMPARE(
+        canvas.frameRect(),
+        QRectF(0.0, 0.0, 960.0, 540.0));
+}
+
+void UiTest::viewerCanvasResizesAndRejectsLatePresentations()
+{
+    pd::ui::ViewerCanvas canvas;
+    canvas.resize(1000, 600);
+    canvas.show();
+    QImage frame(800, 400, QImage::Format_RGB32);
+    frame.fill(Qt::darkYellow);
+    canvas.setFrame(frame);
+    const auto expectedSize = [&canvas, &frame](
+                                  int width,
+                                  int height) {
+        const qreal ratio = canvas.devicePixelRatioF();
+        const QSize viewport(
+            std::max(1, qRound(width * ratio)),
+            std::max(1, qRound(height * ratio)));
+        return frame.size().scaled(viewport, Qt::KeepAspectRatio);
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(
+        canvas.presentedFrame().size(),
+        expectedSize(1000, 600),
+        2000);
+
+    canvas.resize(500, 300);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        canvas.presentedFrame().size(),
+        expectedSize(500, 300),
+        2000);
+    QCOMPARE(canvas.frameRect(), QRectF(0.0, 25.0, 500.0, 250.0));
+
+    QImage pending(4000, 2250, QImage::Format_RGB32);
+    pending.fill(Qt::magenta);
+    canvas.setFrame(pending);
+    canvas.clearFrame();
+    QVERIFY(canvas.frame().isNull());
+    QVERIFY(canvas.presentedFrame().isNull());
+    QTest::qWait(100);
+    QVERIFY(canvas.presentedFrame().isNull());
 }
 
 void UiTest::viewerCanvasBatchesPointerInput()
@@ -741,12 +836,18 @@ void UiTest::viewerEndedClearsFrameAndShowsBack()
     frame.fill(Qt::darkGreen);
     page.showDemoFrame(frame);
     QVERIFY(page.canvas()->hasFrame());
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !page.canvas()->presentedFrame().isNull(),
+        2000);
 
     page.showEnded(QStringLiteral("对端主动结束会话"));
 
     QVERIFY(!page.sessionLive());
     QVERIFY(!page.demoMode());
     QVERIFY(!page.canvas()->hasFrame());
+    QVERIFY(page.canvas()->presentedFrame().isNull());
+    QTest::qWait(50);
+    QVERIFY(page.canvas()->presentedFrame().isNull());
     QVERIFY(!page.canvas()->inputEnabled());
     QVERIFY(page.toolbar()->isHidden());
     QVERIFY(page.backButton()->isVisible());
@@ -812,6 +913,9 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     page.canvas()->setFrame(frame);
     page.showStreaming(QStringLiteral("DESKTOP"));
     QTest::qWait(10);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !page.canvas()->presentedFrame().isNull(),
+        2000);
 
     QVERIFY(page.sessionLive());
     QVERIFY(page.canvas()->hasFrame());
@@ -848,6 +952,10 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QVERIFY(page.sessionLive());
     QVERIFY(page.canvas()->hasFrame());
     QCOMPARE(page.canvas()->frame().size(), frame.size());
+    QVERIFY(!page.canvas()->presentedFrame().isNull());
+    QCOMPARE(
+        page.canvas()->presentedFrame().pixelColor(QPoint(20, 20)),
+        frame.pixelColor(QPoint(20, 20)));
     QCOMPARE(
         page.canvas()->frame().pixelColor(QPoint(20, 20)),
         frame.pixelColor(QPoint(20, 20)));
@@ -879,6 +987,7 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     page.showEnded(QStringLiteral("恢复超时"));
     QVERIFY(!page.sessionLive());
     QVERIFY(!page.canvas()->hasFrame());
+    QVERIFY(page.canvas()->presentedFrame().isNull());
     QVERIFY(page.backButton()->isVisible());
     QCOMPARE(page.fileQueueSize(), 0);
 }

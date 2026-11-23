@@ -42,6 +42,7 @@ namespace pd::ui {
 
 class PillLabel;
 class StatusDot;
+class ViewerFramePipeline;
 
 class ViewerCanvas final : public QWidget {
     Q_OBJECT
@@ -53,6 +54,11 @@ public:
     void clearFrame();
     [[nodiscard]] bool hasFrame() const { return !frame_.isNull(); }
     [[nodiscard]] const QImage &frame() const { return frame_; }
+    [[nodiscard]] const QImage &presentedFrame() const
+    {
+        return presentedFrame_;
+    }
+    [[nodiscard]] QString presentationThreadName() const;
 
     [[nodiscard]] QRectF frameRect() const;
     [[nodiscard]] QPointF normalizePoint(const QPointF &position) const;
@@ -85,6 +91,7 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -104,12 +111,15 @@ private:
     void recenterRelativeCursor();
     void scheduleWheel();
     void flushWheel();
+    void submitPresentFrame();
     void sendKeyDown(const QString &code);
     void sendKeyUp(const QString &code);
     [[nodiscard]] QString buttonName(Qt::MouseButton button) const;
     [[nodiscard]] QString keyCode(const QKeyEvent *event) const;
 
     QImage frame_;
+    QImage presentedFrame_;
+    ViewerFramePipeline *presentation_ = nullptr;
     bool inputEnabled_ = false;
     QPointF pendingMove_;
     bool moveScheduled_ = false;
