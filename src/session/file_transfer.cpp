@@ -424,9 +424,43 @@ void FileSender::cancel()
     if (!active()) {
         return;
     }
-    const QString id = id_;
+    const QString cancelledId = id_;
+    if (sender_) {
+        sender_(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("file_cancel")},
+            {QStringLiteral("id"), cancelledId},
+            {QStringLiteral("reason"), QStringLiteral("cancelled")},
+        });
+    }
     cleanup();
-    emit failed(id, QStringLiteral("cancelled"));
+    emit cancelled(cancelledId, QStringLiteral("cancelled"));
+}
+
+void FileSender::abort()
+{
+    cleanup();
+}
+
+void FileSender::failFromPeer(const QString &reason)
+{
+    if (!active()) {
+        return;
+    }
+    const QString failedId = id_;
+    cleanup();
+    emit failed(failedId, reason);
+}
+
+void FileSender::interrupt(const QString &reason)
+{
+    if (!active()) {
+        return;
+    }
+    const QString interruptedId = id_;
+    cleanup();
+    emit interrupted(
+        interruptedId,
+        reason.isEmpty() ? QStringLiteral("interrupted") : reason);
 }
 
 void FileSender::pump()
@@ -478,8 +512,17 @@ void FileSender::fail(const QString &reason)
         return;
     }
     const QString failedId = id_;
+    const QString effectiveReason =
+        reason.isEmpty() ? QStringLiteral("io") : reason;
+    if (sender_) {
+        sender_(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("file_error")},
+            {QStringLiteral("id"), failedId},
+            {QStringLiteral("reason"), effectiveReason},
+        });
+    }
     cleanup();
-    emit failed(failedId, reason);
+    emit failed(failedId, effectiveReason);
 }
 
 void FileSender::cleanup()

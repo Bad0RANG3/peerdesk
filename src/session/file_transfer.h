@@ -88,6 +88,10 @@ public:
         Sender sender,
         QString *error = nullptr);
     void cancel();
+    void fail(const QString &reason);
+    void failFromPeer(const QString &reason);
+    void interrupt(const QString &reason);
+    void abort();
 
     [[nodiscard]] bool active() const { return !id_.isEmpty(); }
     [[nodiscard]] QString id() const { return id_; }
@@ -100,10 +104,11 @@ signals:
     void progress(const QString &id, qint64 sent, qint64 total);
     void completed(const QString &id, const QString &name, qint64 size);
     void failed(const QString &id, const QString &reason);
+    void cancelled(const QString &id, const QString &reason);
+    void interrupted(const QString &id, const QString &reason);
 
 private:
     void pump();
-    void fail(const QString &reason);
     void cleanup();
 
     QTimer *timer_ = nullptr;

@@ -106,6 +106,7 @@ public:
     [[nodiscard]] bool sendFile(
         const QString &path,
         QString *error = nullptr);
+    [[nodiscard]] bool cancelFile();
     void setReceiveDirectory(const QString &directory);
 
 signals:
@@ -134,6 +135,8 @@ signals:
         const QString &name,
         qint64 size);
     void outgoingFileFailed(const QString &id, const QString &reason);
+    void outgoingFileCancelled(const QString &id, const QString &reason);
+    void outgoingFileInterrupted(const QString &id, const QString &reason);
     void logMessage(const QString &message);
     void sessionEnded(const QString &reason);
 

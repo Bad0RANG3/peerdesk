@@ -54,6 +54,7 @@ public:
     [[nodiscard]] bool sendFile(
         const QString &path,
         QString *error = nullptr);
+    [[nodiscard]] bool cancelFile();
 
 signals:
     void eventReceived(const QJsonObject &message);
@@ -70,6 +71,8 @@ signals:
         const QString &name,
         qint64 size);
     void outgoingFileFailed(const QString &id, const QString &reason);
+    void outgoingFileCancelled(const QString &id, const QString &reason);
+    void outgoingFileInterrupted(const QString &id, const QString &reason);
     void logMessage(const QString &message);
 
 private:
@@ -125,8 +128,6 @@ private:
 
     FileReceiver receiver_;
     FileSender *fileSender_ = nullptr;
-    QString remoteFileErrorId_;
-    QString remoteFileErrorReason_;
 
     QTimer *captureTimer_ = nullptr;
     QTimer *audioTimer_ = nullptr;

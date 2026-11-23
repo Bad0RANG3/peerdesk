@@ -102,17 +102,17 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
         fileSender_,
         &FileSender::failed,
         this,
-        [this](const QString &id, const QString &reason) {
-            QString reported = reason;
-            if (id == remoteFileErrorId_ && !remoteFileErrorReason_.isEmpty()) {
-                reported = remoteFileErrorReason_;
-            }
-            if (id == remoteFileErrorId_) {
-                remoteFileErrorId_.clear();
-                remoteFileErrorReason_.clear();
-            }
-            emit outgoingFileFailed(id, reported);
-        });
+        &ViewerSession::outgoingFileFailed);
+    connect(
+        fileSender_,
+        &FileSender::cancelled,
+        this,
+        &ViewerSession::outgoingFileCancelled);
+    connect(
+        fileSender_,
+        &FileSender::interrupted,
+        this,
+        &ViewerSession::outgoingFileInterrupted);
 }
 
 ViewerSession::~ViewerSession()
@@ -142,7 +142,7 @@ void ViewerSession::stop()
     started_ = false;
     receiver_.abortAll();
     if (fileSender_->active()) {
-        fileSender_->cancel();
+        fileSender_->interrupt(QStringLiteral("interrupted"));
     }
     if (uploadActive_) {
         uploadActive_ = false;
@@ -156,8 +156,6 @@ void ViewerSession::stop()
     audioState_ = {};
     videoSequence_ = 0;
     audioFrames_ = 0;
-    remoteFileErrorId_.clear();
-    remoteFileErrorReason_.clear();
     uploadActive_ = false;
     uploadId_.clear();
     uploadName_.clear();
@@ -484,6 +482,15 @@ bool ViewerSession::sendFile(const QString &path, QString *error)
         error);
 }
 
+bool ViewerSession::cancelFile()
+{
+    if (!fileSender_->active()) {
+        return false;
+    }
+    fileSender_->cancel();
+    return true;
+}
+
 void ViewerSession::onLinkStateChanged(const QString &state)
 {
     const LinkStats linkStats = link_ ? link_->stats() : LinkStats{};
@@ -504,7 +511,7 @@ void ViewerSession::onLinkStateChanged(const QString &state)
     } else if (state == QStringLiteral("closed")) {
         receiver_.abortAll();
         if (fileSender_->active()) {
-            fileSender_->cancel();
+            fileSender_->interrupt(QStringLiteral("interrupted"));
         }
         if (uploadActive_) {
             uploadActive_ = false;
@@ -595,6 +602,31 @@ void ViewerSession::dispatch(const QJsonObject &message)
     if (kind == QStringLiteral("file_done")
         || kind == QStringLiteral("file_error")) {
         handleRemoteFileResult(message);
+        return;
+    }
+    if (kind == QStringLiteral("file_cancel")) {
+        const QString id = jsonString(message, "id");
+        if (!id.isEmpty()) {
+            receiver_.abort(id);
+            const QString reason = jsonString(message, "reason");
+            sendControlNoReply(QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("file_cancelled")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"),
+                 reason.isEmpty() ? QStringLiteral("cancelled") : reason},
+            });
+            emit eventReceived(QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("file_in")},
+                {QStringLiteral("state"), QStringLiteral("cancelled")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"),
+                 reason.isEmpty() ? QStringLiteral("cancelled") : reason},
+            });
+        }
+        return;
+    }
+    if (kind == QStringLiteral("file_cancelled")) {
+        emit eventReceived(message);
         return;
     }
     emit eventReceived(message);
@@ -696,9 +728,7 @@ void ViewerSession::handleRemoteFileResult(const QJsonObject &message)
     }
     if (kind == QStringLiteral("file_error")
         && fileSender_->active() && id == fileSender_->id()) {
-        remoteFileErrorId_ = id;
-        remoteFileErrorReason_ = jsonString(message, "reason");
-        fileSender_->cancel();
+        fileSender_->failFromPeer(jsonString(message, "reason"));
     }
     emit eventReceived(message);
 }

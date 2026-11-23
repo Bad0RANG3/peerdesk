@@ -288,7 +288,9 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
 | `key` | 键码、按下/释放、文本输入 |
 | `clip` | 文本剪贴板同步 |
 | `audio` | 音频采集开关与状态；Host 回报 `on`、`enabled`、编码参数、音源和错误 |
-| `file_begin` / `file_data` / `file_end` | 文件传输 |
+| `file_begin` / `file_data` / `file_end` | 文件开始、分块和结束 |
+| `file_cancel` / `file_cancelled` | 发送端取消与接收端回执 |
+| `file_error` | 任一端拒绝、读写或校验失败 |
 | `reboot` | 只回提示，不执行重启 |
 | `stats` | 会话统计 |
 
@@ -304,6 +306,18 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
 - 接收端使用 `QSaveFile` 写入，存在同名文件时生成唯一路径。
 - 每一侧同一时间只能有一个主动发送；接收端可以管理多个传输。
 - 默认接收目录是系统 Downloads 下的 `PeerDesk`。
+
+结束状态按原因分流：
+
+- 用户主动取消：发送端发出一次 `file_cancel`（`reason: "cancelled"`）并停止分块。
+  接收端取消 `QSaveFile`、删除临时文件、释放目标名称预留，再回发
+  `file_cancelled`。发送端只产生一次本机取消事件，不把回执当成失败。
+- 接收端拒绝或落盘失败：接收端发送 `file_error`；发送端停止读取源文件并以对端给出的
+  原因结束，不再回复另一个协议包。
+- 发送端本地读取失败：发送端发送 `file_error`，随后清理资源并报告本地失败。
+- 链路关闭或会话停止：双方清理本机临时状态，只产生 `interrupted`，不发送
+  `file_cancel`。因此“用户取消”和“网络中断”不会在协议层混为一谈。
+- 取消与错误处理是幂等的；重复点击、重复取消或迟到的回执不会再次触发终态事件。
 
 ### 7.3 剪贴板与重启
 
@@ -334,8 +348,9 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
    中继地址、各自的 `relay_tag` 和 `relay_mbps`。
 5. 双方用同一连接码派生 psk，在 UDP 候选上执行 PDTP 握手。
 
-`reconnect` 当前只向被控端发送 `viewer_gone`，没有完整的配对恢复、媒体密钥恢复或
-文件状态恢复。它不是“自动重连已完成”的证明。
+信令层 `reconnect` 消息只向被控端发送 `viewer_gone`；Viewer 的会话恢复由客户端重新
+执行配对、UDP 握手和会话启动完成，不复用旧媒体密钥，也不恢复旧文件队列。该恢复已在
+本机回环测试覆盖，真实弱网与跨 NAT 仍需独立验收。
 
 ### 8.3 错误与限制
 

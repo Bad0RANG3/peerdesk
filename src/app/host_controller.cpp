@@ -138,6 +138,16 @@ void HostController::connectComponents()
         &HostController::outgoingFileFailed);
     connect(
         session_,
+        &HostSession::outgoingFileCancelled,
+        this,
+        &HostController::outgoingFileCancelled);
+    connect(
+        session_,
+        &HostSession::outgoingFileInterrupted,
+        this,
+        &HostController::outgoingFileInterrupted);
+    connect(
+        session_,
         &HostSession::logMessage,
         this,
         &HostController::logMessage);
@@ -641,6 +651,11 @@ bool HostController::sendFile(
     QString *error)
 {
     return session_ && session_->sendFile(path, error);
+}
+
+bool HostController::cancelFile()
+{
+    return session_ && session_->cancelFile();
 }
 
 void HostController::failActive(const QString &message)

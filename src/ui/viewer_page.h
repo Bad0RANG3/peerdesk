@@ -172,6 +172,10 @@ public:
     [[nodiscard]] QLabel *latencyLabel() const { return latencyValue_; }
     [[nodiscard]] QLabel *audioLabel() const { return audioValue_; }
     [[nodiscard]] QLabel *transferLabel() const { return transferLabel_; }
+    [[nodiscard]] QPushButton *fileCancelButton() const
+    {
+        return fileCancelButton_;
+    }
     [[nodiscard]] QLabel *demoBadge() const { return demoBadge_; }
     [[nodiscard]] QWidget *textOverlay() const { return textOverlay_; }
     [[nodiscard]] QWidget *dropOverlay() const { return dropOverlay_; }
@@ -218,6 +222,7 @@ private:
     void scheduleToolbarHide();
     void setMenuPinned(bool pinned);
     void flushFileQueue();
+    void setFileBusy(bool busy);
     void installMenuPin(QMenu *menu);
     void layoutFloatingWidgets();
 
@@ -259,6 +264,7 @@ private:
     QPlainTextEdit *textInput_ = nullptr;
     QPushButton *textSendButton_ = nullptr;
     QLabel *transferLabel_ = nullptr;
+    QPushButton *fileCancelButton_ = nullptr;
     QLabel *demoBadge_ = nullptr;
 
     QString peerName_;

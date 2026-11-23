@@ -141,7 +141,8 @@ WASAPI loopback 采集线程
 控制消息经独立可靠流发送，载荷内包含自己的消息序号。主要消息包括：
 
 `hello`、`settings`、`keyframe_req`、`mouse`、`key`、`text`、`clip`、
-`file_begin`、`file_data`、`file_end`、`reboot`、`stats`。
+`file_begin`、`file_data`、`file_end`、`file_cancel`、`file_cancelled`、
+`file_error`、`reboot`、`stats`。
 
 - 鼠标使用归一化画面坐标，被控端再映射到 Windows 虚拟桌面。
 - 键盘使用 Win32 `SendInput`；失焦、断开和全屏切换会释放已按下的键和鼠标按钮。
@@ -149,6 +150,9 @@ WASAPI loopback 采集线程
 - 文件通过 base64 控制消息分块，每块 24 KiB，单文件上限 512 MiB。
 - 文件名只接受安全 basename，落盘使用临时文件加重命名，默认写入系统 Downloads
   下的 `PeerDesk` 目录。
+- 用户取消发送时只发送一次 `file_cancel`，接收端回滚临时文件与名称预留并回执
+  `file_cancelled`。接收端拒绝、读写失败或校验失败时发送 `file_error`；链路关闭和
+  会话停止只触发本机 `interrupted`，不会伪装成用户取消。
 - `reboot` 目前只返回“收到重启指令（未执行）”，不是实际的远程重启能力。
 
 可靠性窗口、选择性 ACK 与重传细节见 [PDTP/1 协议规范](03-protocol-pdtp1.md)。

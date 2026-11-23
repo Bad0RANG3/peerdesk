@@ -100,6 +100,15 @@ QString failureText(const QString &reason)
     if (reason == QStringLiteral("cancelled")) {
         return QStringLiteral("传输已取消");
     }
+    if (reason == QStringLiteral("interrupted")) {
+        return QStringLiteral("传输已中断");
+    }
+    if (reason == QStringLiteral("io")) {
+        return QStringLiteral("文件读写失败");
+    }
+    if (reason == QStringLiteral("data")) {
+        return QStringLiteral("文件数据校验失败");
+    }
     return reason.isEmpty() ? QStringLiteral("文件传输失败") : reason;
 }
 
@@ -758,6 +767,21 @@ QLabel#transferLabel {
     padding: 6px 10px;
     font-size: 10px;
 }
+QPushButton#fileCancelButton {
+    color: #ffd9db;
+    background: rgba(242, 85, 90, 0.18);
+    border: 1px solid rgba(242, 85, 90, 0.36);
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 10px;
+}
+QPushButton#fileCancelButton:hover {
+    background: rgba(242, 85, 90, 0.30);
+}
+QPushButton#fileCancelButton:disabled {
+    color: #8b7a80;
+    background: rgba(242, 85, 90, 0.08);
+}
 QMenu {
     color: #eef2f8;
     background: #171b26;
@@ -1024,6 +1048,13 @@ QMenu::indicator:checked {
     transferLabel_->setFixedSize(380, 28);
     transferLabel_->hide();
 
+    fileCancelButton_ = new QPushButton(QStringLiteral("取消"), this);
+    fileCancelButton_->setObjectName(QStringLiteral("fileCancelButton"));
+    fileCancelButton_->setCursor(Qt::PointingHandCursor);
+    fileCancelButton_->setFixedSize(64, 28);
+    fileCancelButton_->setFocusPolicy(Qt::NoFocus);
+    fileCancelButton_->hide();
+
     demoBadge_ = new QLabel(
         QStringLiteral("合成演示画面 · 不是真实远端"),
         this);
@@ -1261,7 +1292,7 @@ void ViewerPage::connectSignals()
         &ViewerController::outgoingFileStarted,
         this,
         [this](const QString &, const QString &name, qint64) {
-            fileBusy_ = true;
+            setFileBusy(true);
             currentFileName_ = name;
             lastFilePercent_ = -1;
             transferLabel_->setText(
@@ -1302,7 +1333,7 @@ void ViewerPage::connectSignals()
         &ViewerController::outgoingFileFinished,
         this,
         [this](const QString &, const QString &name, qint64 size) {
-            fileBusy_ = false;
+            setFileBusy(false);
             currentFileName_.clear();
             lastFilePercent_ = -1;
             transferLabel_->setText(
@@ -1318,7 +1349,7 @@ void ViewerPage::connectSignals()
         &ViewerController::outgoingFileFailed,
         this,
         [this](const QString &, const QString &reason) {
-            fileBusy_ = false;
+            setFileBusy(false);
             currentFileName_.clear();
             lastFilePercent_ = -1;
             const QString text =
@@ -1329,8 +1360,61 @@ void ViewerPage::connectSignals()
             showToast(text);
             QTimer::singleShot(0, this, &ViewerPage::flushFileQueue);
         });
+    connect(
+        controller_,
+        &ViewerController::outgoingFileCancelled,
+        this,
+        [this](const QString &, const QString &) {
+            setFileBusy(false);
+            const QString name = currentFileName_;
+            currentFileName_.clear();
+            lastFilePercent_ = -1;
+            const QString text = name.isEmpty()
+                ? QStringLiteral("传输已取消")
+                : QStringLiteral("传输已取消：%1").arg(name);
+            transferLabel_->setText(text);
+            transferLabel_->setStyleSheet(QStringLiteral("color: #ffd9a3;"));
+            if (live_) {
+                transferLabel_->show();
+            }
+            showToast(text);
+            QTimer::singleShot(0, this, &ViewerPage::flushFileQueue);
+        });
+    connect(
+        controller_,
+        &ViewerController::outgoingFileInterrupted,
+        this,
+        [this](const QString &, const QString &) {
+            setFileBusy(false);
+            currentFileName_.clear();
+            lastFilePercent_ = -1;
+            transferLabel_->setText(QStringLiteral("传输已中断"));
+            transferLabel_->setStyleSheet(QStringLiteral("color: #ffb38a;"));
+            if (live_) {
+                transferLabel_->show();
+            }
+        });
 
     connect(backButton_, &QPushButton::clicked, this, &ViewerPage::backRequested);
+    connect(
+        fileCancelButton_,
+        &QPushButton::clicked,
+        this,
+        [this]() {
+            if (!fileBusy_ || !live_ || demoMode_) {
+                return;
+            }
+            fileCancelButton_->setEnabled(false);
+            if (!controller_->cancelFile()) {
+                setFileBusy(false);
+                const QString text = QStringLiteral("取消传输失败");
+                transferLabel_->setText(text);
+                transferLabel_->setStyleSheet(
+                    QStringLiteral("color: #ff9a9e;"));
+                transferLabel_->show();
+                showToast(text);
+            }
+        });
     connect(
         qualityMenu_,
         &QMenu::triggered,
@@ -1828,7 +1912,7 @@ void ViewerPage::flushFileQueue()
         const QString path = pendingFiles_.takeFirst();
         QString error;
         if (controller_->sendFile(path, &error)) {
-            fileBusy_ = true;
+            setFileBusy(true);
             currentFileName_ = QFileInfo(path).fileName();
             if (!currentFileName_.isEmpty()) {
                 transferLabel_->setText(
@@ -1846,6 +1930,16 @@ void ViewerPage::flushFileQueue()
         transferLabel_->setStyleSheet(QStringLiteral("color: #ff9a9e;"));
         transferLabel_->show();
         showToast(text);
+    }
+}
+
+void ViewerPage::setFileBusy(bool busy)
+{
+    fileBusy_ = busy;
+    fileCancelButton_->setEnabled(busy);
+    fileCancelButton_->setVisible(busy && live_ && !demoMode_);
+    if (busy) {
+        fileCancelButton_->raise();
     }
 }
 
@@ -1928,6 +2022,9 @@ void ViewerPage::showStreaming(const QString &peerName)
     canvas_->setFocus(Qt::OtherFocusReason);
     updateToolbarVisibility();
     wakeToolbar();
+    if (!pendingFiles_.isEmpty()) {
+        QTimer::singleShot(0, this, &ViewerPage::flushFileQueue);
+    }
 }
 
 void ViewerPage::showReconnecting()
@@ -1938,6 +2035,9 @@ void ViewerPage::showReconnecting()
     dragActive_ = false;
     dropOverlay_->hide();
     textOverlay_->hide();
+    setFileBusy(false);
+    currentFileName_.clear();
+    lastFilePercent_ = -1;
     transferLabel_->hide();
     canvas_->setInputEnabled(false);
     canvas_->releaseInputs();
@@ -1962,6 +2062,10 @@ void ViewerPage::showFailed(const QString &reason)
     dragActive_ = false;
     dropOverlay_->hide();
     textOverlay_->hide();
+    pendingFiles_.clear();
+    setFileBusy(false);
+    currentFileName_.clear();
+    lastFilePercent_ = -1;
     transferLabel_->hide();
     toolbar_->hide();
     toolbarTimer_->stop();
@@ -1980,7 +2084,7 @@ void ViewerPage::showEnded(const QString &reason)
     demoMode_ = false;
     demoBadge_->hide();
     pendingFiles_.clear();
-    fileBusy_ = false;
+    setFileBusy(false);
     currentFileName_.clear();
     lastFilePercent_ = -1;
     canvas_->setInputEnabled(false);
@@ -2010,7 +2114,7 @@ void ViewerPage::resetSession()
     hudVisible_ = true;
     menuPinned_ = false;
     dragActive_ = false;
-    fileBusy_ = false;
+    setFileBusy(false);
     lastFilePercent_ = -1;
     lastAudioEnabled_ = controller_->audioEnabled();
     peerName_.clear();
@@ -2243,6 +2347,10 @@ void ViewerPage::layoutFloatingWidgets()
         20,
         height() - transferLabel_->height() - 24);
     transferLabel_->raise();
+    fileCancelButton_->move(
+        transferLabel_->x() + transferLabel_->width() + 8,
+        transferLabel_->y());
+    fileCancelButton_->raise();
 }
 
 void ViewerPage::dragEnterEvent(QDragEnterEvent *event)

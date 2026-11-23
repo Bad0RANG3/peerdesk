@@ -59,6 +59,8 @@ private slots:
     void viewerDemoRendersNativeSession();
     void viewerEndedClearsFrameAndShowsBack();
     void viewerReconnectKeepsFrameAndIsolatesInput();
+    void viewerFileTransferCancelState();
+    void hostFileTransferCancelState();
     void appWindowKeepsViewerDuringLiveSession();
     void windowGeometryRoundTrip();
     void windowGeometryFallsBackWhenOffscreen();
@@ -517,11 +519,16 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     page.textOverlay()->show();
     page.dropOverlay()->show();
     page.transferLabel()->show();
+    controller.outgoingFileStarted(
+        QStringLiteral("reconnect-file"),
+        QStringLiteral("reconnect.bin"),
+        4096);
     QTest::qWait(10);
     QVERIFY(page.toolbar()->isVisible());
     QVERIFY(page.textOverlay()->isVisible());
     QVERIFY(page.dropOverlay()->isVisible());
     QVERIFY(page.transferLabel()->isVisible());
+    QVERIFY(page.fileCancelButton()->isVisible());
 
     page.showReconnecting();
     QTest::qWait(10);
@@ -541,11 +548,127 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QVERIFY(page.textOverlay()->isHidden());
     QVERIFY(page.dropOverlay()->isHidden());
     QVERIFY(page.transferLabel()->isHidden());
+    QVERIFY(page.fileCancelButton()->isHidden());
 
     page.showEnded(QStringLiteral("恢复超时"));
     QVERIFY(!page.sessionLive());
     QVERIFY(!page.canvas()->hasFrame());
     QVERIFY(page.backButton()->isVisible());
+}
+
+void UiTest::viewerFileTransferCancelState()
+{
+    const auto preferences = testPreferences();
+    pd::ViewerController controller;
+    controller.setPreferences(preferences);
+    pd::ui::ViewerPage page(&controller);
+    page.resize(960, 600);
+    page.show();
+    QTest::qWait(20);
+
+    QImage frame(640, 360, QImage::Format_RGB32);
+    frame.fill(QColor(QStringLiteral("#31506f")));
+    page.beginSession(QStringLiteral("DESKTOP"), QStringLiteral("123456789"));
+    page.canvas()->setFrame(frame);
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTest::qWait(10);
+
+    QVERIFY(page.fileCancelButton()->isHidden());
+    controller.outgoingFileStarted(
+        QStringLiteral("cancel-file"),
+        QStringLiteral("演示文件.bin"),
+        8192);
+    QTest::qWait(10);
+    QVERIFY(page.fileCancelButton()->isVisible());
+    QVERIFY(page.fileCancelButton()->isEnabled());
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("演示文件.bin")));
+
+    controller.outgoingFileCancelled(
+        QStringLiteral("cancel-file"),
+        QStringLiteral("cancelled"));
+    QTest::qWait(10);
+    QVERIFY(page.fileCancelButton()->isHidden());
+    QVERIFY(page.transferLabel()->text().contains(QStringLiteral("已取消")));
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->hasFrame());
+
+    controller.outgoingFileStarted(
+        QStringLiteral("interrupt-file"),
+        QStringLiteral("interrupt.bin"),
+        4096);
+    QTest::qWait(10);
+    QVERIFY(page.fileCancelButton()->isVisible());
+    controller.outgoingFileInterrupted(
+        QStringLiteral("interrupt-file"),
+        QStringLiteral("network"));
+    QTest::qWait(10);
+    QVERIFY(page.fileCancelButton()->isHidden());
+    QCOMPARE(
+        page.transferLabel()->text(),
+        QStringLiteral("传输已中断"));
+    QVERIFY(page.canvas()->hasFrame());
+}
+
+void UiTest::hostFileTransferCancelState()
+{
+    const auto preferences = testPreferences();
+    pd::HostController host;
+    host.setPreferences(preferences);
+    pd::ui::HostPanel panel(&host, false);
+    panel.resize(800, 900);
+    panel.show();
+    QTest::qWait(20);
+
+    QVERIFY(!panel.fileBusy());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
+    host.outgoingFileStarted(
+        QStringLiteral("host-file"),
+        QStringLiteral("host.bin"),
+        8192);
+    QTest::qWait(10);
+    QVERIFY(panel.fileBusy());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("取消发送"));
+    QVERIFY(panel.fileStatus()->text().contains(QStringLiteral("host.bin")));
+
+    panel.sendFileButton()->click();
+    QTest::qWait(10);
+    QVERIFY(!panel.fileBusy());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
+    QCOMPARE(
+        panel.fileStatus()->text(),
+        QStringLiteral("取消传输失败"));
+
+    host.outgoingFileStarted(
+        QStringLiteral("host-file-2"),
+        QStringLiteral("host-2.bin"),
+        4096);
+    QTest::qWait(10);
+    QVERIFY(panel.fileBusy());
+    host.outgoingFileCancelled(
+        QStringLiteral("host-file-2"),
+        QStringLiteral("cancelled"));
+    QTest::qWait(10);
+    QVERIFY(!panel.fileBusy());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
+    QCOMPARE(
+        panel.fileStatus()->text(),
+        QStringLiteral("传输已取消"));
+
+    host.outgoingFileStarted(
+        QStringLiteral("host-file-3"),
+        QStringLiteral("host-3.bin"),
+        2048);
+    QTest::qWait(10);
+    host.outgoingFileInterrupted(
+        QStringLiteral("host-file-3"),
+        QStringLiteral("network"));
+    QTest::qWait(10);
+    QVERIFY(!panel.fileBusy());
+    QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
+    QCOMPARE(
+        panel.fileStatus()->text(),
+        QStringLiteral("传输已中断"));
 }
 
 void UiTest::appWindowKeepsViewerDuringLiveSession()

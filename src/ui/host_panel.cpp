@@ -463,6 +463,16 @@ void HostPanel::connectSignals()
         }
     });
     connect(sendFileButton_, &QPushButton::clicked, this, [this]() {
+        if (fileBusy_) {
+            if (!controller_->cancelFile()) {
+                setFileBusy(false);
+                fileStatus_->setText(QStringLiteral("取消传输失败"));
+                fileStatus_->setStyleSheet(
+                    QStringLiteral("color: #f2555a;"));
+                fileStatus_->show();
+            }
+            return;
+        }
         const QString path = filePathInput_->text().trimmed();
         if (path.isEmpty()) {
             chooseAndSendFile();
@@ -471,7 +481,9 @@ void HostPanel::connectSignals()
         sendFile(path);
     });
     connect(filePathInput_, &QLineEdit::returnPressed, this, [this]() {
-        sendFile(filePathInput_->text().trimmed());
+        if (!fileBusy_) {
+            sendFile(filePathInput_->text().trimmed());
+        }
     });
 
     connect(
@@ -544,10 +556,12 @@ void HostPanel::connectSignals()
         &HostController::outgoingFileStarted,
         this,
         [this](const QString &, const QString &name, qint64 size) {
+            setFileBusy(true);
             fileStatus_->setText(
                 QStringLiteral("正在发送 %1 · %2 KB")
                     .arg(name)
                     .arg(size / 1024));
+            fileStatus_->setStyleSheet(QStringLiteral("color: #69728a;"));
             fileStatus_->show();
             appendLog(QStringLiteral("开始发送文件 %1").arg(name));
         });
@@ -561,6 +575,7 @@ void HostPanel::connectSignals()
                 : 0;
             fileStatus_->setText(
                 QStringLiteral("文件发送中 · %1%").arg(percent));
+            fileStatus_->setStyleSheet(QStringLiteral("color: #69728a;"));
             fileStatus_->show();
         });
     connect(
@@ -568,6 +583,7 @@ void HostPanel::connectSignals()
         &HostController::outgoingFileFinished,
         this,
         [this](const QString &, const QString &name, qint64) {
+            setFileBusy(false);
             fileStatus_->setText(QStringLiteral("已发送 %1").arg(name));
             fileStatus_->setStyleSheet(QStringLiteral("color: #35d07f;"));
             fileStatus_->show();
@@ -578,10 +594,33 @@ void HostPanel::connectSignals()
         &HostController::outgoingFileFailed,
         this,
         [this](const QString &, const QString &reason) {
+            setFileBusy(false);
             fileStatus_->setText(QStringLiteral("发送失败：%1").arg(reason));
             fileStatus_->setStyleSheet(QStringLiteral("color: #f2555a;"));
             fileStatus_->show();
             appendLog(QStringLiteral("文件发送失败：%1").arg(reason));
+        });
+    connect(
+        controller_,
+        &HostController::outgoingFileCancelled,
+        this,
+        [this](const QString &, const QString &) {
+            setFileBusy(false);
+            fileStatus_->setText(QStringLiteral("传输已取消"));
+            fileStatus_->setStyleSheet(QStringLiteral("color: #ffd9a3;"));
+            fileStatus_->show();
+            appendLog(QStringLiteral("文件传输已取消"));
+        });
+    connect(
+        controller_,
+        &HostController::outgoingFileInterrupted,
+        this,
+        [this](const QString &, const QString &) {
+            setFileBusy(false);
+            fileStatus_->setText(QStringLiteral("传输已中断"));
+            fileStatus_->setStyleSheet(QStringLiteral("color: #ffb38a;"));
+            fileStatus_->show();
+            appendLog(QStringLiteral("文件传输已中断"));
         });
 
     connect(monitorCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -857,6 +896,9 @@ void HostPanel::chooseAndSendFile()
 
 void HostPanel::sendFile(const QString &pathValue)
 {
+    if (fileBusy_) {
+        return;
+    }
     const QString path = pathValue.trimmed();
     if (path.isEmpty()) {
         return;
@@ -882,6 +924,13 @@ void HostPanel::sendFile(const QString &pathValue)
         QStringLiteral("正在发送 %1…").arg(info.fileName()));
     fileStatus_->setStyleSheet(QStringLiteral("color: #9aa5b8;"));
     fileStatus_->show();
+}
+
+void HostPanel::setFileBusy(bool busy)
+{
+    fileBusy_ = busy;
+    sendFileButton_->setText(
+        busy ? QStringLiteral("取消发送") : QStringLiteral("发送"));
 }
 
 void HostPanel::appendLog(const QString &message)

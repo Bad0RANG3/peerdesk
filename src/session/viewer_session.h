@@ -71,6 +71,7 @@ public:
     [[nodiscard]] bool sendFile(
         const QString &path,
         QString *error = nullptr);
+    [[nodiscard]] bool cancelFile();
 
 signals:
     void videoFrameReceived(
@@ -97,6 +98,8 @@ signals:
         const QString &name,
         qint64 size);
     void outgoingFileFailed(const QString &id, const QString &reason);
+    void outgoingFileCancelled(const QString &id, const QString &reason);
+    void outgoingFileInterrupted(const QString &id, const QString &reason);
     void logMessage(const QString &message);
 
 private:
@@ -123,8 +126,6 @@ private:
     QString receiveDirectory_;
     FileReceiver receiver_;
     FileSender *fileSender_ = nullptr;
-    QString remoteFileErrorId_;
-    QString remoteFileErrorReason_;
 
     bool uploadActive_ = false;
     QString uploadId_;

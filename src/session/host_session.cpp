@@ -161,17 +161,17 @@ HostSession::HostSession(PeerLink *link, QObject *parent)
         fileSender_,
         &FileSender::failed,
         this,
-        [this](const QString &id, const QString &reason) {
-            QString reported = reason;
-            if (id == remoteFileErrorId_ && !remoteFileErrorReason_.isEmpty()) {
-                reported = remoteFileErrorReason_;
-            }
-            if (id == remoteFileErrorId_) {
-                remoteFileErrorId_.clear();
-                remoteFileErrorReason_.clear();
-            }
-            emit outgoingFileFailed(id, reported);
-        });
+        &HostSession::outgoingFileFailed);
+    connect(
+        fileSender_,
+        &FileSender::cancelled,
+        this,
+        &HostSession::outgoingFileCancelled);
+    connect(
+        fileSender_,
+        &FileSender::interrupted,
+        this,
+        &HostSession::outgoingFileInterrupted);
 
     connectLink();
 }
@@ -315,10 +315,8 @@ void HostSession::stopStreaming()
     }
     receiver_.abortAll();
     if (fileSender_->active()) {
-        fileSender_->cancel();
+        fileSender_->interrupt(QStringLiteral("interrupted"));
     }
-    remoteFileErrorId_.clear();
-    remoteFileErrorReason_.clear();
     audioCarry_.clear();
     if (screenSource_) {
         screenSource_->close();
@@ -816,10 +814,34 @@ void HostSession::dispatch(const QJsonObject &message)
     if (kind == QStringLiteral("file_error")) {
         const QString id = jsonString(message, "id");
         if (fileSender_->active() && id == fileSender_->id()) {
-            remoteFileErrorId_ = id;
-            remoteFileErrorReason_ = jsonString(message, "reason");
-            fileSender_->cancel();
+            fileSender_->failFromPeer(jsonString(message, "reason"));
         }
+        return;
+    }
+    if (kind == QStringLiteral("file_cancel")) {
+        const QString id = jsonString(message, "id");
+        if (!id.isEmpty()) {
+            receiver_.abort(id);
+            const QString reason = jsonString(message, "reason");
+            sendControl(QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("file_cancelled")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"),
+                 reason.isEmpty() ? QStringLiteral("cancelled") : reason},
+            });
+            emit eventReceived(QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("file_in")},
+                {QStringLiteral("state"), QStringLiteral("cancelled")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"),
+                 reason.isEmpty() ? QStringLiteral("cancelled") : reason},
+            });
+            emit logMessage(QStringLiteral("接收文件已取消"));
+        }
+        return;
+    }
+    if (kind == QStringLiteral("file_cancelled")) {
+        emit eventReceived(message);
         return;
     }
     if (kind == QStringLiteral("file_done")) {
@@ -1026,6 +1048,15 @@ bool HostSession::sendFile(const QString &path, QString *error)
         path,
         [this](const QJsonObject &message) { sendControl(message); },
         error);
+}
+
+bool HostSession::cancelFile()
+{
+    if (!fileSender_->active()) {
+        return false;
+    }
+    fileSender_->cancel();
+    return true;
 }
 
 } // namespace pd

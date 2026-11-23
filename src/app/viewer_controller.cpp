@@ -189,6 +189,16 @@ void ViewerController::connectComponents()
         &ViewerController::outgoingFileFailed);
     connect(
         session_,
+        &ViewerSession::outgoingFileCancelled,
+        this,
+        &ViewerController::outgoingFileCancelled);
+    connect(
+        session_,
+        &ViewerSession::outgoingFileInterrupted,
+        this,
+        &ViewerController::outgoingFileInterrupted);
+    connect(
+        session_,
         &ViewerSession::logMessage,
         this,
         &ViewerController::logMessage);
@@ -882,6 +892,11 @@ bool ViewerController::sendFile(
     QString *error)
 {
     return active_ && session_->sendFile(path, error);
+}
+
+bool ViewerController::cancelFile()
+{
+    return active_ && session_->cancelFile();
 }
 
 void ViewerController::setReceiveDirectory(const QString &directory)

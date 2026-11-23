@@ -89,6 +89,7 @@ public:
     [[nodiscard]] bool sendFile(
         const QString &path,
         QString *error = nullptr);
+    [[nodiscard]] bool cancelFile();
 
 signals:
     void stateChanged(pd::HostController::State state);
@@ -114,6 +115,8 @@ signals:
         const QString &name,
         qint64 size);
     void outgoingFileFailed(const QString &id, const QString &reason);
+    void outgoingFileCancelled(const QString &id, const QString &reason);
+    void outgoingFileInterrupted(const QString &id, const QString &reason);
     void logMessage(const QString &message);
 
 private:

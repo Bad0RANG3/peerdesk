@@ -48,8 +48,10 @@ public:
     [[nodiscard]] QComboBox *monitorCombo() const { return monitorCombo_; }
     [[nodiscard]] ToggleSwitch *inputToggle() const { return inputToggle_; }
     [[nodiscard]] QPushButton *sendFileButton() const { return sendFileButton_; }
+    [[nodiscard]] QLabel *fileStatus() const { return fileStatus_; }
     [[nodiscard]] QLineEdit *filePathInput() const { return filePathInput_; }
     [[nodiscard]] QPlainTextEdit *logView() const { return logView_; }
+    [[nodiscard]] bool fileBusy() const { return fileBusy_; }
 
 public slots:
     void refreshFromController();
@@ -72,12 +74,14 @@ private:
     void updateStatistics(const QJsonObject &statistics);
     void updateLinkState(const QString &state);
     void sendFile(const QString &path);
+    void setFileBusy(bool busy);
     void setSyncing(bool syncing);
     void selectComboValue(QComboBox *combo, int value);
 
     HostController *controller_ = nullptr;
     bool autoStart_ = true;
     bool syncing_ = false;
+    bool fileBusy_ = false;
     QString peerName_;
     QString linkState_;
 

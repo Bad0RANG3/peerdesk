@@ -155,6 +155,40 @@ bool hasMessage(
         });
 }
 
+int countMessages(
+    const QList<QJsonObject> &messages,
+    const QString &type,
+    const QString &id = {})
+{
+    return static_cast<int>(std::count_if(
+        messages.cbegin(),
+        messages.cend(),
+        [&type, &id](const QJsonObject &message) {
+            if (message.value(QStringLiteral("t")).toString() != type) {
+                return false;
+            }
+            return id.isEmpty()
+                || message.value(QStringLiteral("id")).toString() == id;
+        }));
+}
+
+bool hasFileState(
+    const QList<QJsonObject> &messages,
+    const QString &state,
+    const QString &id = {})
+{
+    return std::any_of(
+        messages.cbegin(),
+        messages.cend(),
+        [&state, &id](const QJsonObject &message) {
+            return message.value(QStringLiteral("t")).toString()
+                    == QStringLiteral("file_in")
+                && message.value(QStringLiteral("state")).toString() == state
+                && (id.isEmpty()
+                    || message.value(QStringLiteral("id")).toString() == id);
+        });
+}
+
 class FakeInputSink final : public IInputSink {
 public:
     [[nodiscard]] QRect virtualDesktop() const override
@@ -501,6 +535,342 @@ private slots:
         QVERIFY(error.startsWith(QStringLiteral("size:")));
         QVERIFY(!QFileInfo::exists(
             directory.filePath(QStringLiteral("short.bin"))));
+    }
+
+    void fileSenderSeparatesCancelFailureAndInterruption()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path =
+            directory.filePath(QStringLiteral("payload.bin"));
+        QVERIFY(writeBytes(path, makePayload(256 * 1024, 0x51A7)));
+
+        QList<QJsonObject> wire;
+        const auto collect = [&wire](const QJsonObject &message) {
+            wire.append(message);
+        };
+        FileSender sender;
+        QSignalSpy cancelled(&sender, &FileSender::cancelled);
+        QSignalSpy failed(&sender, &FileSender::failed);
+        QSignalSpy interrupted(&sender, &FileSender::interrupted);
+
+        QString error;
+        QVERIFY2(sender.start(path, collect, &error), qPrintable(error));
+        const QString cancelledId = sender.id();
+        QVERIFY(!cancelledId.isEmpty());
+        wire.clear();
+        sender.cancel();
+        sender.cancel();
+        QVERIFY(!sender.active());
+        QCOMPARE(cancelled.count(), 1);
+        QCOMPARE(cancelled.at(0).at(0).toString(), cancelledId);
+        QCOMPARE(
+            cancelled.at(0).at(1).toString(),
+            QStringLiteral("cancelled"));
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(interrupted.count(), 0);
+        QCOMPARE(countMessages(wire, QStringLiteral("file_cancel")), 1);
+        QCOMPARE(countMessages(wire, QStringLiteral("file_error")), 0);
+
+        cancelled.clear();
+        wire.clear();
+        QVERIFY2(sender.start(path, collect, &error), qPrintable(error));
+        const QString failedId = sender.id();
+        wire.clear();
+        sender.fail(QStringLiteral("disk"));
+        QVERIFY(!sender.active());
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(failed.at(0).at(0).toString(), failedId);
+        QCOMPARE(
+            failed.at(0).at(1).toString(),
+            QStringLiteral("disk"));
+        QCOMPARE(countMessages(wire, QStringLiteral("file_error")), 1);
+        QCOMPARE(
+            wire.constFirst().value(QStringLiteral("reason")).toString(),
+            QStringLiteral("disk"));
+
+        failed.clear();
+        wire.clear();
+        QVERIFY2(sender.start(path, collect, &error), qPrintable(error));
+        const QString peerFailedId = sender.id();
+        wire.clear();
+        sender.failFromPeer(QStringLiteral("checksum"));
+        QVERIFY(!sender.active());
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(failed.at(0).at(0).toString(), peerFailedId);
+        QCOMPARE(
+            failed.at(0).at(1).toString(),
+            QStringLiteral("checksum"));
+        QVERIFY(wire.isEmpty());
+
+        failed.clear();
+        wire.clear();
+        QVERIFY2(sender.start(path, collect, &error), qPrintable(error));
+        const QString interruptedId = sender.id();
+        wire.clear();
+        sender.interrupt(QStringLiteral("network"));
+        QVERIFY(!sender.active());
+        QCOMPARE(interrupted.count(), 1);
+        QCOMPARE(interrupted.at(0).at(0).toString(), interruptedId);
+        QCOMPARE(
+            interrupted.at(0).at(1).toString(),
+            QStringLiteral("network"));
+        QVERIFY(wire.isEmpty());
+
+        interrupted.clear();
+        QVERIFY2(sender.start(path, collect, &error), qPrintable(error));
+        wire.clear();
+        sender.abort();
+        QVERIFY(!sender.active());
+        QVERIFY(wire.isEmpty());
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(cancelled.count(), 0);
+        QCOMPARE(interrupted.count(), 0);
+    }
+
+    void fileReceiverAbortReleasesReservation()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        FileReceiver receiver(directory.path());
+        QString error;
+
+        QVERIFY(receiver.begin(
+            QStringLiteral("aborted"),
+            QStringLiteral("report.txt"),
+            10,
+            &error));
+        QVERIFY(receiver.append(
+            QStringLiteral("aborted"),
+            QByteArrayLiteral("partial"),
+            &error));
+        receiver.abort(QStringLiteral("aborted"));
+        QVERIFY(!receiver.contains(QStringLiteral("aborted")));
+        QVERIFY(!QFileInfo::exists(
+            directory.filePath(QStringLiteral("report.txt"))));
+
+        QVERIFY(receiver.begin(
+            QStringLiteral("retry"),
+            QStringLiteral("report.txt"),
+            5,
+            &error));
+        QVERIFY(receiver.append(
+            QStringLiteral("retry"),
+            QByteArrayLiteral("hello"),
+            &error));
+        QString savedPath;
+        QVERIFY(receiver.finish(
+            QStringLiteral("retry"),
+            &savedPath,
+            nullptr,
+            &error));
+        QCOMPARE(
+            QFileInfo(savedPath).fileName(),
+            QStringLiteral("report.txt"));
+        QCOMPARE(readBytes(savedPath), QByteArrayLiteral("hello"));
+    }
+
+    void cancellableFileTransferRoundTrip()
+    {
+        const QByteArray psk =
+            QByteArrayLiteral("session-cancel-secret");
+        PeerLink hostLink(true, psk);
+        PeerLink viewerLink(false, psk);
+        hostLink.setLabel(QStringLiteral("cancel-host"));
+        viewerLink.setLabel(QStringLiteral("cancel-viewer"));
+        hostLink.setDeviceId(QStringLiteral("cancel-host-device"));
+        viewerLink.setDeviceId(QStringLiteral("cancel-viewer-device"));
+
+        QString error;
+        QVERIFY2(
+            hostLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        QVERIFY2(
+            viewerLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+
+        QTemporaryDir sourceDirectory;
+        QTemporaryDir hostReceive;
+        QTemporaryDir viewerReceive;
+        QVERIFY(sourceDirectory.isValid());
+        QVERIFY(hostReceive.isValid());
+        QVERIFY(viewerReceive.isValid());
+
+        HostSession host(&hostLink);
+        ViewerSession viewer(&viewerLink);
+        host.setReceiveDirectory(hostReceive.path());
+        viewer.setReceiveDirectory(viewerReceive.path());
+
+        QList<QJsonObject> hostEvents;
+        QList<QJsonObject> viewerEvents;
+        QList<QJsonObject> hostWire;
+        QList<QJsonObject> viewerWire;
+        connect(
+            &host,
+            &HostSession::eventReceived,
+            [&hostEvents](const QJsonObject &message) {
+                hostEvents.append(message);
+            });
+        connect(
+            &viewer,
+            &ViewerSession::eventReceived,
+            [&viewerEvents](const QJsonObject &message) {
+                viewerEvents.append(message);
+            });
+        connect(
+            &hostLink,
+            &PeerLink::controlMessageReceived,
+            [&hostWire](const QJsonObject &message) {
+                hostWire.append(message);
+            });
+        connect(
+            &viewerLink,
+            &PeerLink::controlMessageReceived,
+            [&viewerWire](const QJsonObject &message) {
+                viewerWire.append(message);
+            });
+
+        hostLink.addCandidates(viewerLink.localCandidates());
+        viewerLink.addCandidates(hostLink.localCandidates());
+        hostLink.beginHandshake();
+        viewerLink.beginHandshake();
+        QVERIFY(waitUntil(
+            [&]() {
+                return hostLink.established() && viewerLink.established()
+                    && hostLink.state() == QStringLiteral("direct")
+                    && viewerLink.state() == QStringLiteral("direct");
+            },
+            7000));
+        viewer.start();
+
+        QSignalSpy hostStarted(&host, &HostSession::outgoingFileStarted);
+        QSignalSpy hostCancelled(&host, &HostSession::outgoingFileCancelled);
+        QSignalSpy hostInterrupted(
+            &host,
+            &HostSession::outgoingFileInterrupted);
+        QSignalSpy viewerStarted(&viewer, &ViewerSession::outgoingFileStarted);
+        QSignalSpy viewerCancelled(
+            &viewer,
+            &ViewerSession::outgoingFileCancelled);
+        QSignalSpy viewerInterrupted(
+            &viewer,
+            &ViewerSession::outgoingFileInterrupted);
+
+        const QString hostCancelPath =
+            sourceDirectory.filePath(QStringLiteral("host-cancel.bin"));
+        QVERIFY(writeBytes(hostCancelPath, makePayload(300000, 0xC001)));
+        QVERIFY2(host.sendFile(hostCancelPath, &error), qPrintable(error));
+        QCOMPARE(hostStarted.count(), 1);
+        const QString hostCancelId =
+            hostStarted.at(0).at(0).toString();
+        QVERIFY(host.cancelFile());
+        QVERIFY(!host.cancelFile());
+        QCOMPARE(hostCancelled.count(), 1);
+        QCOMPARE(hostCancelled.at(0).at(0).toString(), hostCancelId);
+        QVERIFY(waitUntil(
+            [&]() {
+                return hasFileState(
+                    viewerEvents,
+                    QStringLiteral("cancelled"),
+                    hostCancelId);
+            },
+            3000));
+        QVERIFY(waitUntil(
+            [&]() {
+                return hasMessage(
+                    hostEvents,
+                    QStringLiteral("file_cancelled"),
+                    hostCancelId);
+            },
+            3000));
+        QCOMPARE(
+            countMessages(
+                viewerWire,
+                QStringLiteral("file_cancel"),
+                hostCancelId),
+            1);
+        QVERIFY(!QFileInfo::exists(
+            viewerReceive.filePath(QStringLiteral("host-cancel.bin"))));
+
+        const QString viewerCancelPath =
+            sourceDirectory.filePath(QStringLiteral("viewer-cancel.bin"));
+        QVERIFY(writeBytes(viewerCancelPath, makePayload(280000, 0xC002)));
+        QVERIFY2(viewer.sendFile(viewerCancelPath, &error), qPrintable(error));
+        QCOMPARE(viewerStarted.count(), 1);
+        const QString viewerCancelId =
+            viewerStarted.at(0).at(0).toString();
+        QVERIFY(viewer.cancelFile());
+        QVERIFY(!viewer.cancelFile());
+        QCOMPARE(viewerCancelled.count(), 1);
+        QVERIFY(waitUntil(
+            [&]() {
+                return hasFileState(
+                    hostEvents,
+                    QStringLiteral("cancelled"),
+                    viewerCancelId);
+            },
+            3000));
+        QVERIFY(waitUntil(
+            [&]() {
+                return hasMessage(
+                    viewerEvents,
+                    QStringLiteral("file_cancelled"),
+                    viewerCancelId);
+            },
+            3000));
+        QCOMPARE(
+            countMessages(
+                hostWire,
+                QStringLiteral("file_cancel"),
+                viewerCancelId),
+            1);
+        QVERIFY(!QFileInfo::exists(
+            hostReceive.filePath(QStringLiteral("viewer-cancel.bin"))));
+
+        hostStarted.clear();
+        hostCancelled.clear();
+        hostInterrupted.clear();
+        const QString hostStopPath =
+            sourceDirectory.filePath(QStringLiteral("host-stop.bin"));
+        QVERIFY(writeBytes(hostStopPath, makePayload(240000, 0xC003)));
+        QVERIFY2(host.sendFile(hostStopPath, &error), qPrintable(error));
+        QCOMPARE(hostStarted.count(), 1);
+        const QString hostStopId =
+            hostStarted.at(0).at(0).toString();
+        host.stop();
+        QCOMPARE(hostInterrupted.count(), 1);
+        QCOMPARE(hostInterrupted.at(0).at(0).toString(), hostStopId);
+        QCOMPARE(hostCancelled.count(), 0);
+        pumpEvents(150);
+        QCOMPARE(
+            countMessages(
+                viewerWire,
+                QStringLiteral("file_cancel"),
+                hostStopId),
+            0);
+        viewer.stop();
+
+        viewerStarted.clear();
+        viewerCancelled.clear();
+        viewerInterrupted.clear();
+        const QString viewerClosePath =
+            sourceDirectory.filePath(QStringLiteral("viewer-close.bin"));
+        QVERIFY(writeBytes(viewerClosePath, makePayload(220000, 0xC004)));
+        QVERIFY2(viewer.sendFile(viewerClosePath, &error), qPrintable(error));
+        QCOMPARE(viewerStarted.count(), 1);
+        const QString viewerCloseId =
+            viewerStarted.at(0).at(0).toString();
+        viewerLink.close();
+        QCOMPARE(viewerInterrupted.count(), 1);
+        QCOMPARE(viewerInterrupted.at(0).at(0).toString(), viewerCloseId);
+        QCOMPARE(viewerCancelled.count(), 0);
+        pumpEvents(150);
+        QCOMPARE(
+            countMessages(
+                hostWire,
+                QStringLiteral("file_cancel"),
+                viewerCloseId),
+            0);
     }
 
     void directSessionEndToEnd()
