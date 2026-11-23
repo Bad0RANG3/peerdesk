@@ -223,6 +223,7 @@ void AppWindow::buildUi()
     connectionPage_->setToken(
         viewer_->token().isEmpty() ? viewerPreferences.token
                                    : viewer_->token());
+    refreshRecentConnections();
 
     toast_ = new QLabel(this);
     toast_->setObjectName(QStringLiteral("toastMessage"));
@@ -386,10 +387,23 @@ void AppWindow::connectSignals()
             showToast(QStringLiteral("远程会话已断开"));
         });
     connect(
+        connectionPage_,
+        &ConnectionPage::recentConnectionsCleared,
+        this,
+        [this]() {
+            if (preferences_) {
+                preferences_->clearRecentConnections();
+            }
+            refreshRecentConnections();
+        });
+    connect(
         viewer_,
         &ViewerController::stateChanged,
         this,
-        [this](ViewerController::State) {
+        [this](ViewerController::State state) {
+            if (state == ViewerController::State::Streaming) {
+                rememberCurrentConnection();
+            }
             updateViewerState();
             updateNavigation();
         });
@@ -677,6 +691,32 @@ void AppWindow::scheduleWindowStateSave()
         return;
     }
     windowSaveTimer_->start();
+}
+
+void AppWindow::refreshRecentConnections()
+{
+    if (connectionPage_) {
+        connectionPage_->setRecentConnections(
+            preferences_ ? preferences_->recentConnections()
+                         : QList<RecentConnection>{});
+    }
+}
+
+void AppWindow::rememberCurrentConnection()
+{
+    if (!preferences_
+        || !viewer_
+        || !viewer_->active()
+        || viewer_->state() != ViewerController::State::Streaming
+        || viewer_->code().isEmpty()
+        || viewer_->server().isEmpty()) {
+        return;
+    }
+    preferences_->recordRecentConnection(
+        viewer_->code(),
+        viewer_->peerName(),
+        viewer_->server());
+    refreshRecentConnections();
 }
 
 bool AppWindow::prepareTray()

@@ -5,6 +5,8 @@
 
 #include <QTemporaryDir>
 
+#include <algorithm>
+
 namespace pd {
 namespace {
 
@@ -25,6 +27,38 @@ int readInt(const QSettings &settings, const QString &key, int fallback)
 bool readBool(const QSettings &settings, const QString &key, bool fallback)
 {
     return settings.value(key, fallback).toBool();
+}
+
+QString cleanPeerName(const QString &name)
+{
+    const QString cleaned = name.simplified();
+    if (cleaned.isEmpty()) {
+        return QStringLiteral("远端设备");
+    }
+    return cleaned.left(64);
+}
+
+QString normalizedServer(const QString &server)
+{
+    const QString trimmed = server.trimmed();
+    if (trimmed.isEmpty()) {
+        return {};
+    }
+    const auto parsed = parseServerAddress(trimmed);
+    return parsed ? formatAddress(parsed->host, parsed->port) : QString();
+}
+
+QDateTime readDateTime(const QVariant &value)
+{
+    const QString encoded = value.toString().trimmed();
+    if (encoded.isEmpty()) {
+        return {};
+    }
+    QDateTime result = QDateTime::fromString(encoded, Qt::ISODateWithMs);
+    if (!result.isValid()) {
+        result = QDateTime::fromString(encoded, Qt::ISODate);
+    }
+    return result;
 }
 
 } // namespace
@@ -244,6 +278,161 @@ void Preferences::setWindow(const WindowPreferences &preferences)
         QStringLiteral("window/closeToTray"),
         preferences.closeToTray);
     settings_->sync();
+}
+
+QList<RecentConnection> Preferences::recentConnections() const
+{
+    QList<RecentConnection> result;
+    if (!settings_) {
+        return result;
+    }
+
+    const int storedCount =
+        settings_->beginReadArray(QStringLiteral("viewer/recentConnections"));
+    const int count = std::min(storedCount, kRecentConnectionLimit);
+    result.reserve(count);
+    for (int index = 0; index < count; ++index) {
+        settings_->setArrayIndex(index);
+        RecentConnection entry;
+        const QString code = settings_
+            ->value(QStringLiteral("code"))
+            .toString()
+            .trimmed();
+        if (!codeIsValid(code)) {
+            continue;
+        }
+        entry.code = normalizeCode(code);
+        entry.name = cleanPeerName(
+            settings_->value(QStringLiteral("name")).toString());
+        entry.server = normalizedServer(
+            settings_->value(QStringLiteral("server")).toString());
+        if (entry.server.isEmpty()) {
+            continue;
+        }
+        entry.connectedAt = readDateTime(
+            settings_->value(QStringLiteral("connectedAt")));
+
+        const bool duplicate = std::any_of(
+            result.cbegin(),
+            result.cend(),
+            [&entry](const RecentConnection &existing) {
+                return existing.code == entry.code
+                    && existing.server.compare(
+                           entry.server,
+                           Qt::CaseInsensitive)
+                        == 0;
+            });
+        if (!duplicate) {
+            result.append(entry);
+        }
+    }
+    settings_->endArray();
+    return result;
+}
+
+void Preferences::setRecentConnections(
+    const QList<RecentConnection> &connections)
+{
+    if (!settings_) {
+        return;
+    }
+
+    QList<RecentConnection> normalized;
+    normalized.reserve(
+        std::min(
+            static_cast<qsizetype>(kRecentConnectionLimit),
+            connections.size()));
+    for (const RecentConnection &connection : connections) {
+        if (!codeIsValid(connection.code)) {
+            continue;
+        }
+        RecentConnection entry;
+        entry.code = normalizeCode(connection.code);
+        entry.name = cleanPeerName(connection.name);
+        entry.server = normalizedServer(connection.server);
+        if (entry.server.isEmpty()) {
+            continue;
+        }
+        entry.connectedAt = connection.connectedAt;
+        if (!entry.connectedAt.isValid()) {
+            entry.connectedAt = QDateTime::currentDateTimeUtc();
+        }
+        const bool duplicate = std::any_of(
+            normalized.cbegin(),
+            normalized.cend(),
+            [&entry](const RecentConnection &existing) {
+                return existing.code == entry.code
+                    && existing.server.compare(
+                           entry.server,
+                           Qt::CaseInsensitive)
+                        == 0;
+            });
+        if (!duplicate) {
+            normalized.append(entry);
+        }
+        if (normalized.size() == kRecentConnectionLimit) {
+            break;
+        }
+    }
+
+    settings_->remove(QStringLiteral("viewer/recentConnections"));
+    settings_->beginWriteArray(
+        QStringLiteral("viewer/recentConnections"),
+        normalized.size());
+    for (int index = 0; index < normalized.size(); ++index) {
+        settings_->setArrayIndex(index);
+        const RecentConnection &entry = normalized.at(index);
+        settings_->setValue(QStringLiteral("code"), entry.code);
+        settings_->setValue(QStringLiteral("name"), entry.name);
+        settings_->setValue(QStringLiteral("server"), entry.server);
+        settings_->setValue(
+            QStringLiteral("connectedAt"),
+            entry.connectedAt.toUTC().toString(Qt::ISODateWithMs));
+    }
+    settings_->endArray();
+    settings_->sync();
+}
+
+void Preferences::recordRecentConnection(
+    const QString &code,
+    const QString &name,
+    const QString &server,
+    const QDateTime &connectedAt)
+{
+    RecentConnection entry;
+    entry.code = normalizeCode(code);
+    entry.name = cleanPeerName(name);
+    entry.server = normalizedServer(server);
+    entry.connectedAt = connectedAt.isValid()
+        ? connectedAt.toUTC()
+        : QDateTime::currentDateTimeUtc();
+    if (!codeIsValid(entry.code) || entry.server.isEmpty()) {
+        return;
+    }
+
+    QList<RecentConnection> connections = recentConnections();
+    connections.erase(
+        std::remove_if(
+            connections.begin(),
+            connections.end(),
+            [&entry](const RecentConnection &existing) {
+                return existing.code == entry.code
+                    && existing.server.compare(
+                           entry.server,
+                           Qt::CaseInsensitive)
+                        == 0;
+            }),
+        connections.end());
+    connections.prepend(entry);
+    if (connections.size() > kRecentConnectionLimit) {
+        connections.resize(kRecentConnectionLimit);
+    }
+    setRecentConnections(connections);
+}
+
+void Preferences::clearRecentConnections()
+{
+    setRecentConnections({});
 }
 
 void Preferences::sync()

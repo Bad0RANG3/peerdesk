@@ -95,6 +95,8 @@ private:
     void centerOnPrimaryScreen();
     void ensureSettingsDialog();
     void scheduleWindowStateSave();
+    void refreshRecentConnections();
+    void rememberCurrentConnection();
     [[nodiscard]] bool prepareTray();
     void updateViewerState();
     void updateNavigation();

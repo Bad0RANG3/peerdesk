@@ -5,10 +5,12 @@
 #include "ui/ui_theme.h"
 
 #include <QGraphicsDropShadowEffect>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QStringList>
 #include <QVBoxLayout>
 
 namespace pd::ui {
@@ -30,6 +32,12 @@ void addShadow(QWidget *widget)
     shadow->setOffset(0, 18);
     shadow->setColor(QColor(0, 0, 0, 150));
     widget->setGraphicsEffect(shadow);
+}
+
+QString displayName(const RecentConnection &connection)
+{
+    const QString name = connection.name.simplified();
+    return name.isEmpty() ? QStringLiteral("远端设备") : name;
 }
 
 } // namespace
@@ -121,6 +129,127 @@ void ConnectionPage::buildUi()
     errorText_->setWordWrap(true);
     errorText_->hide();
     cardLayout->addWidget(errorText_);
+
+    recentPanel_ = new QWidget(card);
+    recentPanel_->setObjectName(QStringLiteral("recentConnections"));
+    recentPanel_->hide();
+    auto *recentLayout = new QVBoxLayout(recentPanel_);
+    recentLayout->setContentsMargins(0, 16, 0, 0);
+    recentLayout->setSpacing(8);
+
+    auto *recentHeading = new QHBoxLayout;
+    recentHeading->setSpacing(8);
+    auto *recentCaption = makeCaption(
+        QStringLiteral("最近连接"),
+        recentPanel_);
+    recentHeading->addWidget(recentCaption);
+    recentHeading->addStretch(1);
+    clearRecentButton_ = new QPushButton(
+        QStringLiteral("清除"),
+        recentPanel_);
+    clearRecentButton_->setObjectName(
+        QStringLiteral("clearRecentConnections"));
+    clearRecentButton_->setCursor(Qt::PointingHandCursor);
+    clearRecentButton_->setAccessibleName(
+        QStringLiteral("清除最近连接"));
+    clearRecentButton_->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  color: #7fa9e8;"
+        "  background: transparent;"
+        "  border: 0;"
+        "  padding: 1px 4px;"
+        "  font-size: 11px;"
+        "  font-weight: 500;"
+        "}"
+        "QPushButton:hover { color: #b7d2ff; }"
+        "QPushButton:disabled { color: #56607a; }"));
+    recentHeading->addWidget(clearRecentButton_);
+    recentLayout->addLayout(recentHeading);
+
+    auto *recentGrid = new QGridLayout;
+    recentGrid->setContentsMargins(0, 0, 0, 0);
+    recentGrid->setHorizontalSpacing(7);
+    recentGrid->setVerticalSpacing(7);
+    for (int index = 0;
+         index < Preferences::kRecentConnectionLimit;
+         ++index) {
+        RecentTile tile;
+        tile.button = new QPushButton(recentPanel_);
+        tile.button->setObjectName(
+            QStringLiteral("recentConnectionButton"));
+        tile.button->setProperty("recentIndex", index);
+        tile.button->setCursor(Qt::PointingHandCursor);
+        tile.button->setMinimumHeight(46);
+        tile.button->setSizePolicy(
+            QSizePolicy::Expanding,
+            QSizePolicy::Fixed);
+        tile.button->setStyleSheet(QStringLiteral(
+            "QPushButton#recentConnectionButton {"
+            "  background: rgba(255, 255, 255, 0.035);"
+            "  border: 1px solid rgba(255, 255, 255, 0.085);"
+            "  border-radius: 9px;"
+            "  padding: 0;"
+            "  text-align: left;"
+            "}"
+            "QPushButton#recentConnectionButton:hover {"
+            "  background: rgba(61, 123, 253, 0.11);"
+            "  border-color: rgba(91, 155, 255, 0.34);"
+            "}"
+            "QPushButton#recentConnectionButton:pressed {"
+            "  background: rgba(61, 123, 253, 0.17);"
+            "}"
+            "QPushButton#recentConnectionButton:disabled {"
+            "  background: rgba(255, 255, 255, 0.02);"
+            "  border-color: rgba(255, 255, 255, 0.06);"
+            "}"));
+
+        auto *tileLayout = new QVBoxLayout(tile.button);
+        tileLayout->setContentsMargins(9, 5, 9, 5);
+        tileLayout->setSpacing(1);
+        auto *topLine = new QHBoxLayout;
+        topLine->setSpacing(6);
+        tile.name = new QLabel(tile.button);
+        tile.name->setObjectName(
+            QStringLiteral("recentConnectionName"));
+        tile.name->setFont(uiFont(9, QFont::DemiBold));
+        tile.name->setStyleSheet(
+            QStringLiteral("color: #e8eef9; background: transparent;"));
+        tile.name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        topLine->addWidget(tile.name, 1);
+        tile.code = new QLabel(tile.button);
+        tile.code->setObjectName(
+            QStringLiteral("recentConnectionCode"));
+        tile.code->setFont(uiFont(8, QFont::DemiBold));
+        tile.code->setStyleSheet(
+            QStringLiteral("color: #8bb8ff; background: transparent;"));
+        tile.code->setAttribute(Qt::WA_TransparentForMouseEvents);
+        topLine->addWidget(tile.code, 0, Qt::AlignRight);
+        tileLayout->addLayout(topLine);
+
+        tile.server = new QLabel(tile.button);
+        tile.server->setObjectName(
+            QStringLiteral("recentConnectionServer"));
+        tile.server->setFont(uiFont(7));
+        tile.server->setStyleSheet(
+            QStringLiteral("color: #69728a; background: transparent;"));
+        tile.server->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tileLayout->addWidget(tile.server);
+
+        recentGrid->addWidget(
+            tile.button,
+            index / 2,
+            index % 2);
+        recentTiles_.append(tile);
+        connect(
+            tile.button,
+            &QPushButton::clicked,
+            this,
+            [this, index]() { chooseRecentConnection(index); });
+    }
+    recentGrid->setColumnStretch(0, 1);
+    recentGrid->setColumnStretch(1, 1);
+    recentLayout->addLayout(recentGrid);
+    cardLayout->addWidget(recentPanel_);
 
     auto *statusRail = new QFrame(card);
     statusRail->setObjectName(QStringLiteral("statusRail"));
@@ -220,6 +349,16 @@ void ConnectionPage::buildUi()
         &QPushButton::clicked,
         this,
         &ConnectionPage::hostModeRequested);
+    connect(
+        clearRecentButton_,
+        &QPushButton::clicked,
+        this,
+        [this]() {
+            setRecentConnections({});
+            emit recentConnectionsCleared();
+        });
+
+    setRecentConnections({});
 }
 
 void ConnectionPage::setCode(const QString &code)
@@ -257,6 +396,7 @@ void ConnectionPage::setBusy(bool busy)
             QStringLiteral("正在寻找并连接远端设备…"),
             PillLabel::Tone::Amber);
     }
+    updateRecentControls();
 }
 
 void ConnectionPage::setConnected(bool connected, const QString &peerName)
@@ -280,6 +420,7 @@ void ConnectionPage::setConnected(bool connected, const QString &peerName)
     } else {
         setStatus(QStringLiteral("准备连接"));
     }
+    updateRecentControls();
 }
 
 void ConnectionPage::setStatus(
@@ -331,6 +472,95 @@ void ConnectionPage::focusCode()
 {
     codeInput_->setFocus(Qt::OtherFocusReason);
     codeInput_->selectAll();
+}
+
+void ConnectionPage::setRecentConnections(
+    const QList<RecentConnection> &connections)
+{
+    recentConnections_ = connections.mid(
+        0,
+        Preferences::kRecentConnectionLimit);
+    for (int index = 0; index < recentTiles_.size(); ++index) {
+        RecentTile &tile = recentTiles_[index];
+        const bool visible = index < recentConnections_.size();
+        tile.button->setVisible(visible);
+        if (!visible) {
+            continue;
+        }
+
+        const RecentConnection &connection =
+            recentConnections_.at(index);
+        const QString name = displayName(connection);
+        const QString code = formatCode(connection.code);
+        const QString server = connection.server;
+        tile.name->setText(name);
+        tile.code->setText(code);
+        tile.server->setText(server);
+        QStringList tooltip{
+            name,
+            code,
+            server,
+        };
+        if (connection.connectedAt.isValid()) {
+            tooltip.append(
+                QStringLiteral("最近连接于 %1")
+                    .arg(connection.connectedAt
+                             .toLocalTime()
+                             .toString(
+                                 QStringLiteral("yyyy-MM-dd HH:mm"))));
+        }
+        tile.button->setToolTip(tooltip.join(u'\n'));
+        tile.button->setAccessibleName(
+            QStringLiteral("%1，连接码 %2，服务器 %3")
+                .arg(name, code, server));
+        tile.button->setAccessibleDescription(
+            QStringLiteral("填入此设备的连接码和服务器"));
+    }
+    recentPanel_->setVisible(!recentConnections_.isEmpty());
+    updateRecentControls();
+}
+
+QList<QPushButton *> ConnectionPage::recentConnectionButtons() const
+{
+    QList<QPushButton *> buttons;
+    buttons.reserve(recentTiles_.size());
+    for (const RecentTile &tile : recentTiles_) {
+        buttons.append(tile.button);
+    }
+    return buttons;
+}
+
+void ConnectionPage::chooseRecentConnection(int index)
+{
+    if (busy_
+        || connected_
+        || index < 0
+        || index >= recentConnections_.size()) {
+        return;
+    }
+    const RecentConnection &connection =
+        recentConnections_.at(index);
+    setCode(connection.code);
+    setServer(connection.server);
+    errorText_->hide();
+    codeInput_->setInvalid(false);
+    setStatus(
+        QStringLiteral("已载入 %1，确认后连接")
+            .arg(displayName(connection)),
+        PillLabel::Tone::Blue);
+    connectButton_->setFocus(Qt::TabFocusReason);
+}
+
+void ConnectionPage::updateRecentControls()
+{
+    const bool enabled = !busy_ && !connected_;
+    for (int index = 0; index < recentTiles_.size(); ++index) {
+        recentTiles_.at(index).button->setEnabled(
+            enabled && index < recentConnections_.size());
+    }
+    if (clearRecentButton_) {
+        clearRecentButton_->setEnabled(enabled);
+    }
 }
 
 QString ConnectionPage::code() const

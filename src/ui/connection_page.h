@@ -1,7 +1,9 @@
 #pragma once
 
+#include "app/preferences.h"
 #include "ui/ui_widgets.h"
 
+#include <QList>
 #include <QWidget>
 
 class QLabel;
@@ -30,12 +32,23 @@ public:
         PillLabel::Tone tone = PillLabel::Tone::Neutral);
     void setError(const QString &message);
     void focusCode();
+    void setRecentConnections(
+        const QList<RecentConnection> &connections);
 
     [[nodiscard]] QString code() const;
     [[nodiscard]] QString server() const;
     [[nodiscard]] QString token() const;
     [[nodiscard]] bool busy() const { return busy_; }
     [[nodiscard]] bool connected() const { return connected_; }
+    [[nodiscard]] QWidget *recentConnectionsPanel() const
+    {
+        return recentPanel_;
+    }
+    [[nodiscard]] QPushButton *clearRecentConnectionsButton() const
+    {
+        return clearRecentButton_;
+    }
+    [[nodiscard]] QList<QPushButton *> recentConnectionButtons() const;
 
     [[nodiscard]] CodeInput *codeInput() const { return codeInput_; }
     [[nodiscard]] QLineEdit *serverInput() const { return serverInput_; }
@@ -51,9 +64,19 @@ signals:
         const QString &token);
     void disconnectRequested();
     void hostModeRequested();
+    void recentConnectionsCleared();
 
 private:
+    struct RecentTile {
+        QPushButton *button = nullptr;
+        QLabel *name = nullptr;
+        QLabel *code = nullptr;
+        QLabel *server = nullptr;
+    };
+
     void buildUi();
+    void chooseRecentConnection(int index);
+    void updateRecentControls();
 
     CodeInput *codeInput_ = nullptr;
     QLineEdit *serverInput_ = nullptr;
@@ -62,6 +85,10 @@ private:
     QLabel *statusText_ = nullptr;
     QLabel *errorText_ = nullptr;
     StatusDot *statusDot_ = nullptr;
+    QWidget *recentPanel_ = nullptr;
+    QPushButton *clearRecentButton_ = nullptr;
+    QList<RecentConnection> recentConnections_;
+    QList<RecentTile> recentTiles_;
     bool busy_ = false;
     bool connected_ = false;
 };

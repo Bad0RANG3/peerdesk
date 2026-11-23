@@ -52,6 +52,7 @@ private slots:
     void invalidInputIsRejected();
     void validConnectionIsDispatched();
     void connectedStateSwitchesToDisconnect();
+    void recentConnectionsSelectionAndClear();
     void navigationSwitchesPagesWithoutAutoStart();
     void hostPanelRendersWithSyntheticSource();
     void viewerCanvasScalesAndNormalizesCoordinates();
@@ -74,6 +75,7 @@ private slots:
     void windowGeometryFallsBackWhenOffscreen();
     void closeWithoutTrayQuits();
     void closeToTrayHidesAndExplicitQuitWorks();
+    void appWindowLoadsAndClearsRecentConnections();
     void settingsUpdateControllersAndConnectionPage();
 };
 
@@ -167,6 +169,85 @@ void UiTest::connectedStateSwitchesToDisconnect()
         page.connectButton()->text(),
         QStringLiteral("连接远程设备"));
     QVERIFY(page.codeInput()->isEnabled());
+}
+
+void UiTest::recentConnectionsSelectionAndClear()
+{
+    pd::ui::ConnectionPage page;
+    page.resize(900, 760);
+    page.show();
+    QTest::qWait(20);
+
+    QVERIFY(page.recentConnectionsPanel()->isHidden());
+    QVERIFY(page.recentConnectionButtons().constFirst()->isHidden());
+
+    pd::RecentConnection office;
+    office.code = QStringLiteral("123456789");
+    office.name = QStringLiteral("OFFICE-PC");
+    office.server = QStringLiteral("desk.example:7900");
+    office.connectedAt = QDateTime::currentDateTimeUtc();
+    pd::RecentConnection laptop;
+    laptop.code = QStringLiteral("987654321");
+    laptop.name = QStringLiteral("Studio Laptop");
+    laptop.server = QStringLiteral("lab.example:7901");
+    laptop.connectedAt = office.connectedAt.addSecs(-60);
+    page.setRecentConnections({office, laptop});
+    QTest::qWait(10);
+
+    QVERIFY(page.recentConnectionsPanel()->isVisible());
+    const QList<QPushButton *> buttons =
+        page.recentConnectionButtons();
+    QCOMPARE(buttons.size(), pd::Preferences::kRecentConnectionLimit);
+    QVERIFY(buttons.at(0)->isVisible());
+    QVERIFY(buttons.at(1)->isVisible());
+    QVERIFY(buttons.at(2)->isHidden());
+    QCOMPARE(
+        buttons.at(0)
+            ->findChild<QLabel *>(
+                QStringLiteral("recentConnectionName"))
+            ->text(),
+        QStringLiteral("OFFICE-PC"));
+    QCOMPARE(
+        buttons.at(0)
+            ->findChild<QLabel *>(
+                QStringLiteral("recentConnectionCode"))
+            ->text(),
+        QStringLiteral("123 456 789"));
+    QCOMPARE(
+        buttons.at(0)
+            ->findChild<QLabel *>(
+                QStringLiteral("recentConnectionServer"))
+            ->text(),
+        QStringLiteral("desk.example:7900"));
+
+    page.setToken(QStringLiteral("server-secret"));
+    buttons.at(0)->click();
+    QCOMPARE(page.code(), QStringLiteral("123456789"));
+    QCOMPARE(page.server(), QStringLiteral("desk.example:7900"));
+    QCOMPARE(page.token(), QStringLiteral("server-secret"));
+
+    QSignalSpy requests(
+        &page,
+        &pd::ui::ConnectionPage::connectRequested);
+    page.requestConnect();
+    QCOMPARE(requests.count(), 1);
+    const QList<QVariant> arguments = requests.takeFirst();
+    QCOMPARE(arguments.at(0).toString(), QStringLiteral("123456789"));
+    QCOMPARE(
+        arguments.at(1).toString(),
+        QStringLiteral("desk.example:7900"));
+    QCOMPARE(arguments.at(2).toString(), QStringLiteral("server-secret"));
+    page.setBusy(false);
+
+    QSignalSpy cleared(
+        &page,
+        &pd::ui::ConnectionPage::recentConnectionsCleared);
+    page.clearRecentConnectionsButton()->click();
+    QCOMPARE(cleared.count(), 1);
+    QVERIFY(page.recentConnectionsPanel()->isHidden());
+    for (QPushButton *button : page.recentConnectionButtons()) {
+        QVERIFY(button->isHidden());
+    }
 }
 
 void UiTest::navigationSwitchesPagesWithoutAutoStart()
@@ -1300,6 +1381,65 @@ void UiTest::closeToTrayHidesAndExplicitQuitWorks()
     QVERIFY(!window.isVisible());
     window.requestQuit();
     QCOMPARE(quits.count(), 1);
+}
+
+void UiTest::appWindowLoadsAndClearsRecentConnections()
+{
+    const auto preferences = testPreferences();
+    pd::RecentConnection connection;
+    connection.code = QStringLiteral("246813579");
+    connection.name = QStringLiteral("DESIGN-STUDIO");
+    connection.server = QStringLiteral("studio.example:7900");
+    connection.connectedAt = QDateTime::currentDateTimeUtc();
+    preferences->recordRecentConnection(
+        connection.code,
+        connection.name,
+        connection.server,
+        connection.connectedAt);
+
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.resize(1000, 820);
+    window.show();
+    QTest::qWait(20);
+
+    auto *page = window.connectionPage();
+    QVERIFY(page->recentConnectionsPanel()->isVisible());
+    const QList<QPushButton *> buttons =
+        page->recentConnectionButtons();
+    QCOMPARE(
+        buttons.constFirst()
+            ->findChild<QLabel *>(
+                QStringLiteral("recentConnectionCode"))
+            ->text(),
+        QStringLiteral("246 813 579"));
+    buttons.constFirst()->click();
+    QCOMPARE(page->code(), QStringLiteral("246813579"));
+    QCOMPARE(page->server(), QStringLiteral("studio.example:7900"));
+
+    page->clearRecentConnectionsButton()->click();
+    QVERIFY(page->recentConnectionsPanel()->isHidden());
+    QVERIFY(preferences->recentConnections().isEmpty());
+
+    viewer.setReconnectTimeoutMs(400);
+    QString error;
+    QVERIFY2(
+        viewer.connectTo(
+            QStringLiteral("135792468"),
+            QStringLiteral("127.0.0.1:1"),
+            {},
+            QStringLiteral("tester"),
+            &error),
+        qPrintable(error));
+    QTRY_COMPARE_WITH_TIMEOUT(
+        viewer.state(),
+        pd::ViewerController::State::Error,
+        4000);
+    QVERIFY(preferences->recentConnections().isEmpty());
 }
 
 void UiTest::settingsUpdateControllersAndConnectionPage()

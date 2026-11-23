@@ -2,6 +2,8 @@
 
 #include "session/session_types.h"
 
+#include <QDateTime>
+#include <QList>
 #include <QSettings>
 #include <QString>
 
@@ -36,8 +38,17 @@ struct WindowPreferences {
     bool closeToTray = true;
 };
 
+struct RecentConnection {
+    QString code;
+    QString name;
+    QString server;
+    QDateTime connectedAt;
+};
+
 class Preferences final {
 public:
+    static constexpr int kRecentConnectionLimit = 4;
+
     enum class Mode {
         Persistent,
         Ephemeral,
@@ -57,6 +68,15 @@ public:
     void setViewer(const ViewerPreferences &preferences);
     [[nodiscard]] WindowPreferences window() const;
     void setWindow(const WindowPreferences &preferences);
+    [[nodiscard]] QList<RecentConnection> recentConnections() const;
+    void setRecentConnections(
+        const QList<RecentConnection> &connections);
+    void recordRecentConnection(
+        const QString &code,
+        const QString &name,
+        const QString &server,
+        const QDateTime &connectedAt = {});
+    void clearRecentConnections();
     void sync();
 
 private:

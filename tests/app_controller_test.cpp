@@ -12,6 +12,7 @@
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QThread>
 #include <QTemporaryDir>
@@ -1106,6 +1107,138 @@ private slots:
             10000));
         viewer.hangUp();
         QCOMPARE(viewer.state(), ViewerController::State::Idle);
+    }
+
+    void recentConnectionsPersistWithDeduplication()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString ini =
+            directory.filePath(QStringLiteral("recent.ini"));
+        const QDateTime first =
+            QDateTime::fromString(
+                QStringLiteral("2026-11-23T08:00:00.000Z"),
+                Qt::ISODateWithMs);
+        QVERIFY(first.isValid());
+
+        {
+            Preferences preferences(ini);
+            preferences.recordRecentConnection(
+                QStringLiteral("123 456 789"),
+                QStringLiteral("OFFICE-PC"),
+                QStringLiteral("desk.example"),
+                first);
+            preferences.recordRecentConnection(
+                QStringLiteral("223456789"),
+                QStringLiteral("Laptop"),
+                QStringLiteral("desk.example:7901"),
+                first.addSecs(10));
+            preferences.recordRecentConnection(
+                QStringLiteral("123456789"),
+                QStringLiteral("OFFICE-PC Updated"),
+                QStringLiteral("desk.example:7900"),
+                first.addSecs(20));
+        }
+
+        {
+            Preferences preferences(ini);
+            const QList<RecentConnection> entries =
+                preferences.recentConnections();
+            QCOMPARE(entries.size(), 2);
+            QCOMPARE(entries.at(0).code, QStringLiteral("123456789"));
+            QCOMPARE(
+                entries.at(0).name,
+                QStringLiteral("OFFICE-PC Updated"));
+            QCOMPARE(
+                entries.at(0).server,
+                QStringLiteral("desk.example:7900"));
+            QCOMPARE(
+                entries.at(0).connectedAt.toUTC(),
+                first.addSecs(20).toUTC());
+            QCOMPARE(entries.at(1).code, QStringLiteral("223456789"));
+
+            for (int index = 0; index < 5; ++index) {
+                preferences.recordRecentConnection(
+                    QStringLiteral("20000000%1").arg(index),
+                    QStringLiteral("Device %1").arg(index),
+                    QStringLiteral("192.0.2.%1:7900").arg(index + 1),
+                    first.addSecs(30 + index));
+            }
+            const QList<RecentConnection> capped =
+                preferences.recentConnections();
+            QCOMPARE(
+                capped.size(),
+                Preferences::kRecentConnectionLimit);
+            QCOMPARE(capped.constFirst().name, QStringLiteral("Device 4"));
+            QCOMPARE(capped.constLast().name, QStringLiteral("Device 1"));
+        }
+
+        {
+            Preferences preferences(ini);
+            preferences.clearRecentConnections();
+        }
+        {
+            Preferences preferences(ini);
+            QVERIFY(preferences.recentConnections().isEmpty());
+        }
+
+        QSettings raw(ini, QSettings::IniFormat);
+        for (const QString &key : raw.allKeys()) {
+            QVERIFY(!key.contains(
+                QStringLiteral("token"),
+                Qt::CaseInsensitive));
+        }
+    }
+
+    void recentConnectionsIgnoreMalformedLegacyEntries()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString ini =
+            directory.filePath(QStringLiteral("legacy.ini"));
+        {
+            QSettings settings(ini, QSettings::IniFormat);
+            settings.setValue(
+                QStringLiteral("viewer/server"),
+                QStringLiteral("legacy.example:7900"));
+            settings.setValue(
+                QStringLiteral("viewer/token"),
+                QStringLiteral("legacy-token"));
+            settings.setValue(
+                QStringLiteral("viewer/recentConnections/size"),
+                2);
+            settings.setValue(
+                QStringLiteral("viewer/recentConnections/1/code"),
+                QStringLiteral("012345678"));
+            settings.setValue(
+                QStringLiteral("viewer/recentConnections/2/code"),
+                QStringLiteral("987654321"));
+            settings.setValue(
+                QStringLiteral("viewer/recentConnections/2/name"),
+                QStringLiteral("Missing Server"));
+            settings.setValue(
+                QStringLiteral("viewer/recentConnections/2/server"),
+                QString());
+            settings.sync();
+        }
+
+        Preferences preferences(ini);
+        QCOMPARE(
+            preferences.viewer().server,
+            QStringLiteral("legacy.example:7900"));
+        QCOMPARE(
+            preferences.viewer().token,
+            QStringLiteral("legacy-token"));
+        QVERIFY(preferences.recentConnections().isEmpty());
+
+        preferences.recordRecentConnection(
+            QStringLiteral("987654321"),
+            QStringLiteral("Recovered"),
+            QStringLiteral("legacy.example:7900"));
+        const QList<RecentConnection> entries =
+            preferences.recentConnections();
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.constFirst().name, QStringLiteral("Recovered"));
     }
 
     void preferencesRoundTrip()
