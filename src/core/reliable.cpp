@@ -14,6 +14,7 @@ ReliableStream::ReliableStream(MessageHandler onMessage, RawSender sendRaw)
 quint32 ReliableStream::send(const QByteArray &payload, quint8 flags, double now)
 {
     const quint32 seq = nextSeq_++;
+    hasSent_ = true;
     pending_.insert(seq, Pending{payload, now + kRtoMin, 0});
     sendRaw_(seq, payload, flags);
     return seq;
@@ -40,34 +41,37 @@ void ReliableStream::tick(double now)
 
 void ReliableStream::onAck(quint32 cumulative, quint64 bitmap)
 {
-    const auto keys = pending_.keys();
-    for (const quint32 seq : keys) {
-        if (seq <= cumulative) {
-            pending_.remove(seq);
+    const bool hasCumulative = cumulative != kNoCumulativeAck;
+    if (hasCumulative) {
+        if (!hasSent_
+            || static_cast<qint32>(cumulative - nextSeq_) >= 0) {
+            return;
+        }
+        const auto keys = pending_.keys();
+        for (const quint32 seq : keys) {
+            if (static_cast<qint32>(cumulative - seq) >= 0) {
+                pending_.remove(seq);
+            }
         }
     }
+    const quint32 base = hasCumulative ? cumulative + 1 : 0;
     for (int bit = 0; bit < 64; ++bit) {
         if ((bitmap & (quint64(1) << bit)) == 0) {
             continue;
         }
-        // Bit i acknowledges cumulative-1-i. Bit 0 is deliberately not
-        // cumulative itself, so an initial "nothing received" ACK cannot
-        // discard message zero.
-        if (static_cast<quint64>(cumulative)
-            >= static_cast<quint64>(bit) + 1) {
-            const quint64 acknowledged = static_cast<quint64>(cumulative)
-                - static_cast<quint64>(bit) - 1;
-            pending_.remove(static_cast<quint32>(acknowledged));
-        }
+        pending_.remove(base + static_cast<quint32>(bit));
     }
 }
 
 void ReliableStream::onData(quint32 seq, const QByteArray &payload)
 {
-    if (seq < recvNext_ || recvBuffer_.contains(seq)) {
+    const quint32 offset = seq - recvNext_;
+    if (offset > kReceiveWindow || recvBuffer_.contains(seq)) {
+        ackDirty_ = true;
         return;
     }
     recvBuffer_.insert(seq, payload);
+    ackDirty_ = true;
     while (recvBuffer_.contains(recvNext_)) {
         const QByteArray message = recvBuffer_.take(recvNext_);
         ++recvNext_;
@@ -83,28 +87,28 @@ void ReliableStream::reset()
     pending_.clear();
     recvNext_ = 0;
     recvBuffer_.clear();
-    lastAckCum_ = -1;
+    hasSent_ = false;
+    ackDirty_ = false;
 }
 
 AckPayload ReliableStream::ackPayload()
 {
     AckPayload ack;
-    const qint32 cumulative = static_cast<qint32>(recvNext_) - 1;
-    ack.cumulative = static_cast<quint32>(std::max(cumulative, 0));
+    const quint32 base = recvNext_ == 0 ? 0 : recvNext_;
+    ack.cumulative =
+        recvNext_ == 0 ? kNoCumulativeAck : recvNext_ - 1;
     for (int bit = 0; bit < 64; ++bit) {
-        const qint64 sequence = static_cast<qint64>(ack.cumulative) - bit;
-        if (sequence >= 0
-            && recvBuffer_.contains(static_cast<quint32>(sequence))) {
+        if (recvBuffer_.contains(base + static_cast<quint32>(bit))) {
             ack.bitmap |= quint64(1) << bit;
         }
     }
-    lastAckCum_ = cumulative;
+    ackDirty_ = false;
     return ack;
 }
 
 bool ReliableStream::needsAck() const
 {
-    return static_cast<qint32>(recvNext_) - 1 != lastAckCum_;
+    return ackDirty_;
 }
 
 double ReliableStream::currentTimeSeconds()

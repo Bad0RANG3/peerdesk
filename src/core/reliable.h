@@ -14,6 +14,8 @@ public:
     static constexpr double kRtoMin = 0.15;
     static constexpr double kRtoMax = 1.2;
     static constexpr int kMaxRetries = 14;
+    static constexpr quint32 kReceiveWindow = 256;
+    static constexpr quint32 kNoCumulativeAck = 0xFFFFFFFFU;
 
     using MessageHandler = std::function<void(const QByteArray &)>;
     using RawSender = std::function<void(quint32, const QByteArray &, quint8)>;
@@ -49,7 +51,8 @@ private:
     QHash<quint32, Pending> pending_;
     quint32 recvNext_ = 0;
     QHash<quint32, QByteArray> recvBuffer_;
-    qint32 lastAckCum_ = -1;
+    bool hasSent_ = false;
+    bool ackDirty_ = false;
 };
 
 } // namespace pd
