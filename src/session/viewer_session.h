@@ -23,6 +23,7 @@ public:
     ~ViewerSession() override;
 
     void start();
+    void suspend();
     void stop();
     [[nodiscard]] bool active() const { return started_; }
 
@@ -111,6 +112,7 @@ private:
     void onAudioPacket(const QByteArray &payload);
     void dispatch(const QJsonObject &message);
     void handleFileBegin(const QJsonObject &message);
+    void handleFileResume(const QJsonObject &message);
     void handleFileData(const QJsonObject &message);
     void handleFileEnd(const QJsonObject &message);
     void handleRemoteFileResult(const QJsonObject &message);

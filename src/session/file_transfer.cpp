@@ -1,10 +1,12 @@
 #include "session/file_transfer.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QRandomGenerator>
+#include <QStringList>
 #include <QTimer>
 
 #include <algorithm>
@@ -27,6 +29,11 @@ QString reservedName(const QString &name)
         stem.chop(1);
     }
     return stem.toCaseFolded();
+}
+
+qint64 nowMs()
+{
+    return QDateTime::currentMSecsSinceEpoch();
 }
 
 } // namespace
@@ -125,6 +132,12 @@ bool isSafeBaseName(const QString &name)
     return !reservedNames.contains(reservedName(name));
 }
 
+bool isSameFilePath(const QString &left, const QString &right)
+{
+    return !left.isEmpty() && !right.isEmpty()
+        && normalizedForCompare(left) == normalizedForCompare(right);
+}
+
 QString uniqueFilePath(
     const QString &directory,
     const QString &fileName,
@@ -184,7 +197,10 @@ bool FileReceiver::begin(
     const QString &id,
     const QString &name,
     qint64 size,
-    QString *error)
+    QString *error,
+    const QString &resumeOf,
+    qint64 *resumeOffset,
+    bool *resumed)
 {
     const auto reject = [error](const QString &reason) {
         if (error) {
@@ -201,6 +217,44 @@ bool FileReceiver::begin(
     if (size <= 0 || size > kMaxFileBytes) {
         return reject(QStringLiteral("size"));
     }
+
+    pruneIdle();
+    if (resumeOffset) {
+        *resumeOffset = 0;
+    }
+    if (resumed) {
+        *resumed = false;
+    }
+    if (!resumeOf.isEmpty()) {
+        if (resumeOf == id || entries_.contains(id)) {
+            return reject(QStringLiteral("resume"));
+        }
+        auto previous = entries_.find(resumeOf);
+        if (previous == entries_.end()
+            || previous->second.name != name
+            || previous->second.size != size
+            || nowMs() - previous->second.touchedAt
+                > kFileResumeRetentionMs) {
+            return reject(QStringLiteral("resume"));
+        }
+
+        Entry entry = std::move(previous->second);
+        entries_.erase(previous);
+        entry.touchedAt = nowMs();
+        const qint64 offset = entry.got;
+        entries_.emplace(id, std::move(entry));
+        if (resumeOffset) {
+            *resumeOffset = offset;
+        }
+        if (resumed) {
+            *resumed = true;
+        }
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
     if (entries_.contains(id)) {
         abort(id);
     }
@@ -221,7 +275,9 @@ bool FileReceiver::begin(
 
     Entry entry;
     entry.path = path;
+    entry.name = name;
     entry.size = size;
+    entry.touchedAt = nowMs();
     entry.file = std::move(file);
     entries_.emplace(id, std::move(entry));
     reserved_.insert(path);
@@ -244,6 +300,7 @@ bool FileReceiver::append(
         return false;
     }
     if (data.isEmpty()) {
+        it->second.touchedAt = nowMs();
         return true;
     }
     if (it->second.got + data.size() > it->second.size) {
@@ -261,6 +318,7 @@ bool FileReceiver::append(
         return false;
     }
     it->second.got += data.size();
+    it->second.touchedAt = nowMs();
     if (error) {
         error->clear();
     }
@@ -330,6 +388,20 @@ void FileReceiver::abortAll()
     }
 }
 
+void FileReceiver::pruneIdle(qint64 maxIdleMs)
+{
+    const qint64 now = nowMs();
+    QStringList expired;
+    for (const auto &[id, entry] : entries_) {
+        if (now - entry.touchedAt >= maxIdleMs) {
+            expired.append(id);
+        }
+    }
+    for (const QString &id : expired) {
+        abort(id);
+    }
+}
+
 bool FileReceiver::contains(const QString &id) const
 {
     return entries_.contains(id);
@@ -355,10 +427,19 @@ void FileReceiver::releaseReservation(const Entry &entry)
 FileSender::FileSender(QObject *parent)
     : QObject(parent)
     , timer_(new QTimer(this))
+    , resumeTimer_(new QTimer(this))
 {
     timer_->setInterval(5);
     timer_->setTimerType(Qt::CoarseTimer);
     connect(timer_, &QTimer::timeout, this, &FileSender::pump);
+
+    resumeTimer_->setSingleShot(true);
+    resumeTimer_->setTimerType(Qt::CoarseTimer);
+    connect(
+        resumeTimer_,
+        &QTimer::timeout,
+        this,
+        &FileSender::resumeTimedOut);
 }
 
 FileSender::~FileSender()
@@ -370,6 +451,16 @@ bool FileSender::start(
     const QString &path,
     Sender sender,
     QString *error)
+{
+    const ResumeOffer noResume;
+    return start(path, std::move(sender), error, noResume);
+}
+
+bool FileSender::start(
+    const QString &path,
+    Sender sender,
+    QString *error,
+    const ResumeOffer &resume)
 {
     const auto reject = [error](const QString &reason) {
         if (error) {
@@ -393,9 +484,29 @@ bool FileSender::start(
     if (info.size() <= 0 || info.size() > kMaxFileBytes) {
         return reject(QStringLiteral("size"));
     }
+    const bool wantsResume =
+        !resume.id.isEmpty() || !resume.path.isEmpty()
+        || !resume.name.isEmpty() || resume.size != 0
+        || resume.offset != 0;
+    if (wantsResume
+        && (!resume.valid()
+            || normalizedForCompare(resume.path)
+                != normalizedForCompare(info.absoluteFilePath())
+            || resume.name != info.fileName()
+            || resume.size != info.size()
+            || resume.offset < 0
+            || resume.offset > info.size())) {
+        return reject(QStringLiteral("resume"));
+    }
 
     file_ = std::make_unique<QFile>(info.absoluteFilePath());
     if (!file_->open(QIODevice::ReadOnly)) {
+        file_.reset();
+        return reject(QStringLiteral("io"));
+    }
+    const qint64 offset = wantsResume ? resume.offset : 0;
+    if (!file_->seek(offset)) {
+        file_->close();
         file_.reset();
         return reject(QStringLiteral("io"));
     }
@@ -403,20 +514,104 @@ bool FileSender::start(
     sender_ = std::move(sender);
     id_ = makeTransferId();
     name_ = info.fileName();
+    path_ = info.absoluteFilePath();
+    resumeOf_ = wantsResume ? resume.id : QString();
     size_ = info.size();
-    sent_ = 0;
-    sender_(QJsonObject{
+    sent_ = offset;
+    interruptedOffer_ = ResumeOffer();
+    awaitingResume_ = wantsResume;
+
+    QJsonObject begin{
         {QStringLiteral("t"), QStringLiteral("file_begin")},
         {QStringLiteral("id"), id_},
         {QStringLiteral("name"), name_},
         {QStringLiteral("size"), size_},
-    });
+    };
+    if (wantsResume) {
+        begin.insert(QStringLiteral("resume"), true);
+        begin.insert(QStringLiteral("resume_of"), resumeOf_);
+    }
+    sender_(begin);
     emit started(id_, name_, size_);
-    timer_->start();
+    if (wantsResume) {
+        emit progress(id_, sent_, size_);
+        resumeTimer_->start(resumeTimeoutMs_);
+    } else {
+        timer_->start();
+    }
     if (error) {
         error->clear();
     }
     return true;
+}
+
+bool FileSender::acceptResume(
+    const QJsonObject &message,
+    QString *error)
+{
+    const auto reject = [error](const QString &reason) {
+        if (error) {
+            *error = reason;
+        }
+        return false;
+    };
+    if (!active() || !awaitingResume_) {
+        return reject(QStringLiteral("inactive"));
+    }
+    if (message.value(QStringLiteral("id")).toString() != id_) {
+        return reject(QStringLiteral("id"));
+    }
+    const QJsonValue value =
+        message.value(QStringLiteral("offset"));
+    qint64 offset = -1;
+    if (value.isDouble()) {
+        offset = static_cast<qint64>(value.toDouble());
+    } else if (value.isString()) {
+        bool ok = false;
+        offset = value.toString().toLongLong(&ok);
+        if (!ok) {
+            offset = -1;
+        }
+    }
+    if (offset < 0 || offset > size_) {
+        return reject(QStringLiteral("resume_offset"));
+    }
+    if (!file_ || !file_->seek(offset)) {
+        return reject(QStringLiteral("io"));
+    }
+
+    resumeTimer_->stop();
+    awaitingResume_ = false;
+    sent_ = offset;
+    emit progress(id_, sent_, size_);
+    if (sent_ >= size_) {
+        sender_(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("file_end")},
+            {QStringLiteral("id"), id_},
+        });
+        const QString finishedId = id_;
+        const QString finishedName = name_;
+        const qint64 finishedSize = size_;
+        cleanup();
+        discardResume();
+        emit completed(finishedId, finishedName, finishedSize);
+    } else {
+        timer_->start();
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+void FileSender::setResumeTimeoutMs(int timeoutMs)
+{
+    resumeTimeoutMs_ = std::max(10, timeoutMs);
+}
+
+void FileSender::discardResume()
+{
+    interruptedOffer_ = ResumeOffer();
 }
 
 void FileSender::cancel()
@@ -433,12 +628,14 @@ void FileSender::cancel()
         });
     }
     cleanup();
+    discardResume();
     emit cancelled(cancelledId, QStringLiteral("cancelled"));
 }
 
 void FileSender::abort()
 {
     cleanup();
+    discardResume();
 }
 
 void FileSender::failFromPeer(const QString &reason)
@@ -448,6 +645,7 @@ void FileSender::failFromPeer(const QString &reason)
     }
     const QString failedId = id_;
     cleanup();
+    discardResume();
     emit failed(failedId, reason);
 }
 
@@ -457,6 +655,11 @@ void FileSender::interrupt(const QString &reason)
         return;
     }
     const QString interruptedId = id_;
+    interruptedOffer_.id = id_;
+    interruptedOffer_.path = path_;
+    interruptedOffer_.name = name_;
+    interruptedOffer_.size = size_;
+    interruptedOffer_.offset = sent_;
     cleanup();
     emit interrupted(
         interruptedId,
@@ -465,7 +668,7 @@ void FileSender::interrupt(const QString &reason)
 
 void FileSender::pump()
 {
-    if (!active() || !file_ || !sender_) {
+    if (!active() || awaitingResume_ || !file_ || !sender_) {
         return;
     }
     const QByteArray chunk = file_->read(kFileChunkBytes);
@@ -482,6 +685,7 @@ void FileSender::pump()
         const QString finishedName = name_;
         const qint64 finishedSize = size_;
         cleanup();
+        discardResume();
         emit completed(finishedId, finishedName, finishedSize);
         return;
     }
@@ -502,6 +706,7 @@ void FileSender::pump()
         const QString finishedName = name_;
         const qint64 finishedSize = size_;
         cleanup();
+        discardResume();
         emit completed(finishedId, finishedName, finishedSize);
     }
 }
@@ -522,12 +727,32 @@ void FileSender::fail(const QString &reason)
         });
     }
     cleanup();
+    discardResume();
     emit failed(failedId, effectiveReason);
+}
+
+void FileSender::resumeTimedOut()
+{
+    if (!active() || !awaitingResume_) {
+        return;
+    }
+    const QString failedId = id_;
+    if (sender_) {
+        sender_(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("file_error")},
+            {QStringLiteral("id"), failedId},
+            {QStringLiteral("reason"), QStringLiteral("resume_timeout")},
+        });
+    }
+    cleanup();
+    discardResume();
+    emit failed(failedId, QStringLiteral("resume_timeout"));
 }
 
 void FileSender::cleanup()
 {
     timer_->stop();
+    resumeTimer_->stop();
     if (file_) {
         file_->close();
         file_.reset();
@@ -535,8 +760,11 @@ void FileSender::cleanup()
     sender_ = {};
     id_.clear();
     name_.clear();
+    path_.clear();
+    resumeOf_.clear();
     size_ = 0;
     sent_ = 0;
+    awaitingResume_ = false;
 }
 
 } // namespace pd

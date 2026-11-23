@@ -348,7 +348,7 @@ void HostController::stop()
 void HostController::resetPeerState()
 {
     stopping_ = true;
-    session_->stop();
+    session_->suspend();
     if (linkStarted_) {
         link_->resetPeer();
     }

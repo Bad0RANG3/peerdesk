@@ -32,6 +32,7 @@ public:
     void setClipboard(std::shared_ptr<IClipboard> clipboard);
 
     [[nodiscard]] bool start();
+    void suspend();
     void stop();
     [[nodiscard]] bool running() const { return running_; }
 
@@ -80,6 +81,7 @@ private:
     void onLinkStateChanged(const QString &state);
     void startStreaming();
     void stopStreaming();
+    void resumeOutgoingFile();
     void refreshMonitors();
     void sendInfo();
     void sendControl(const QJsonObject &message);
@@ -98,6 +100,7 @@ private:
     void dispatch(const QJsonObject &message);
     void handleMouse(const QJsonObject &message);
     void handleFileBegin(const QJsonObject &message);
+    void handleFileResume(const QJsonObject &message);
     void handleFileData(const QJsonObject &message);
     void handleFileEnd(const QJsonObject &message);
     void rejectFile(const QString &id, const QString &reason);

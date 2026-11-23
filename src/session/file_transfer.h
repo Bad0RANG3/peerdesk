@@ -18,8 +18,13 @@ namespace pd {
 
 inline constexpr int kFileChunkBytes = 24 * 1024;
 inline constexpr qint64 kMaxFileBytes = 512LL * 1024 * 1024;
+inline constexpr int kFileResumeTimeoutMs = 8000;
+inline constexpr qint64 kFileResumeRetentionMs = 10LL * 60 * 1000;
 
 [[nodiscard]] bool isSafeBaseName(const QString &name);
+[[nodiscard]] bool isSameFilePath(
+    const QString &left,
+    const QString &right);
 [[nodiscard]] QString uniqueFilePath(
     const QString &directory,
     const QString &fileName,
@@ -41,7 +46,10 @@ public:
         const QString &id,
         const QString &name,
         qint64 size,
-        QString *error = nullptr);
+        QString *error = nullptr,
+        const QString &resumeOf = {},
+        qint64 *resumeOffset = nullptr,
+        bool *resumed = nullptr);
     [[nodiscard]] bool append(
         const QString &id,
         const QByteArray &data,
@@ -54,6 +62,7 @@ public:
 
     void abort(const QString &id);
     void abortAll();
+    void pruneIdle(qint64 maxIdleMs = kFileResumeRetentionMs);
 
     [[nodiscard]] bool contains(const QString &id) const;
     [[nodiscard]] qint64 received(const QString &id) const;
@@ -62,8 +71,10 @@ public:
 private:
     struct Entry {
         QString path;
+        QString name;
         qint64 size = 0;
         qint64 got = 0;
+        qint64 touchedAt = 0;
         std::unique_ptr<QSaveFile> file;
     };
 
@@ -80,6 +91,19 @@ class FileSender : public QObject {
 public:
     using Sender = std::function<void(const QJsonObject &)>;
 
+    struct ResumeOffer {
+        QString id;
+        QString path;
+        QString name;
+        qint64 size = 0;
+        qint64 offset = 0;
+
+        [[nodiscard]] bool valid() const
+        {
+            return !id.isEmpty() && !path.isEmpty();
+        }
+    };
+
     explicit FileSender(QObject *parent = nullptr);
     ~FileSender() override;
 
@@ -87,6 +111,16 @@ public:
         const QString &path,
         Sender sender,
         QString *error = nullptr);
+    [[nodiscard]] bool start(
+        const QString &path,
+        Sender sender,
+        QString *error,
+        const ResumeOffer &resume);
+    [[nodiscard]] bool acceptResume(
+        const QJsonObject &message,
+        QString *error = nullptr);
+    void setResumeTimeoutMs(int timeoutMs);
+    void discardResume();
     void cancel();
     void fail(const QString &reason);
     void failFromPeer(const QString &reason);
@@ -98,6 +132,11 @@ public:
     [[nodiscard]] QString fileName() const { return name_; }
     [[nodiscard]] qint64 size() const { return size_; }
     [[nodiscard]] qint64 sent() const { return sent_; }
+    [[nodiscard]] bool waitingForResume() const { return awaitingResume_; }
+    [[nodiscard]] ResumeOffer interruptedOffer() const
+    {
+        return interruptedOffer_;
+    }
 
 signals:
     void started(const QString &id, const QString &name, qint64 size);
@@ -109,15 +148,22 @@ signals:
 
 private:
     void pump();
+    void resumeTimedOut();
     void cleanup();
 
     QTimer *timer_ = nullptr;
+    QTimer *resumeTimer_ = nullptr;
     std::unique_ptr<QFile> file_;
     Sender sender_;
+    ResumeOffer interruptedOffer_;
+    QString path_;
     QString id_;
     QString name_;
+    QString resumeOf_;
     qint64 size_ = 0;
     qint64 sent_ = 0;
+    int resumeTimeoutMs_ = kFileResumeTimeoutMs;
+    bool awaitingResume_ = false;
 };
 
 } // namespace pd

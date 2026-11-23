@@ -137,10 +137,9 @@ void ViewerSession::start()
     }
 }
 
-void ViewerSession::stop()
+void ViewerSession::suspend()
 {
     started_ = false;
-    receiver_.abortAll();
     if (fileSender_->active()) {
         fileSender_->interrupt(QStringLiteral("interrupted"));
     }
@@ -148,6 +147,14 @@ void ViewerSession::stop()
         uploadActive_ = false;
         announceUpload(QStringLiteral("cancelled"));
     }
+}
+
+void ViewerSession::stop()
+{
+    suspend();
+    receiver_.abortAll();
+    fileSender_->abort();
+    fileSender_->discardResume();
     const bool hadInfo = !info_.isEmpty();
     const bool hadStats = !stats_.isEmpty();
     const bool hadAudio = !audioState_.isEmpty();
@@ -491,10 +498,21 @@ bool ViewerSession::sendFile(const QString &path, QString *error)
         }
         return false;
     }
+    FileSender::ResumeOffer offer;
+    const FileSender::ResumeOffer saved =
+        fileSender_->interruptedOffer();
+    if (saved.valid()) {
+        if (isSameFilePath(saved.path, path)) {
+            offer = saved;
+        } else {
+            fileSender_->discardResume();
+        }
+    }
     return fileSender_->start(
         path,
         [this](const QJsonObject &message) { sendControlNoReply(message); },
-        error);
+        error,
+        offer);
 }
 
 bool ViewerSession::cancelFile()
@@ -524,14 +542,7 @@ void ViewerSession::onLinkStateChanged(const QString &state)
         });
         requestKeyframe();
     } else if (state == QStringLiteral("closed")) {
-        receiver_.abortAll();
-        if (fileSender_->active()) {
-            fileSender_->interrupt(QStringLiteral("interrupted"));
-        }
-        if (uploadActive_) {
-            uploadActive_ = false;
-            announceUpload(QStringLiteral("cancelled"));
-        }
+        suspend();
     }
 }
 
@@ -606,6 +617,10 @@ void ViewerSession::dispatch(const QJsonObject &message)
         handleFileBegin(message);
         return;
     }
+    if (kind == QStringLiteral("file_resume")) {
+        handleFileResume(message);
+        return;
+    }
     if (kind == QStringLiteral("file_data")) {
         handleFileData(message);
         return;
@@ -652,10 +667,35 @@ void ViewerSession::handleFileBegin(const QJsonObject &message)
     const QString id = jsonString(message, "id");
     const QString name = jsonString(message, "name");
     const qint64 size = jsonInteger(message, "size");
+    const QString resumeOf = jsonString(message, "resume_of");
+    const bool resume =
+        message.value(QStringLiteral("resume")).toBool(false);
+    if ((resume && resumeOf.isEmpty())
+        || (!resume && !resumeOf.isEmpty())) {
+        rejectFile(id, QStringLiteral("resume"));
+        return;
+    }
+
+    qint64 offset = 0;
+    bool resumed = false;
     QString error;
-    if (!receiver_.begin(id, name, size, &error)) {
+    if (!receiver_.begin(
+            id,
+            name,
+            size,
+            &error,
+            resumeOf,
+            &offset,
+            &resumed)) {
         rejectFile(id, error);
         return;
+    }
+    if (resume) {
+        sendControlNoReply(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("file_resume")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("offset"), offset},
+        });
     }
     emit eventReceived(QJsonObject{
         {QStringLiteral("t"), QStringLiteral("file_in")},
@@ -663,7 +703,27 @@ void ViewerSession::handleFileBegin(const QJsonObject &message)
         {QStringLiteral("id"), id},
         {QStringLiteral("name"), name},
         {QStringLiteral("size"), size},
+        {QStringLiteral("resumed"), resumed},
+        {QStringLiteral("offset"), offset},
     });
+}
+
+void ViewerSession::handleFileResume(const QJsonObject &message)
+{
+    if (!fileSender_->active()
+        || !fileSender_->waitingForResume()) {
+        return;
+    }
+    const QString id = jsonString(message, "id");
+    if (id.isEmpty() || id != fileSender_->id()) {
+        return;
+    }
+    QString error;
+    if (!fileSender_->acceptResume(message, &error)
+        && (error == QStringLiteral("resume_offset")
+            || error == QStringLiteral("io"))) {
+        fileSender_->fail(error);
+    }
 }
 
 void ViewerSession::handleFileData(const QJsonObject &message)

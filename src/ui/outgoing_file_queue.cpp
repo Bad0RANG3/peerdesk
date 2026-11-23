@@ -73,7 +73,6 @@ OutgoingFileQueue::StartResult OutgoingFileQueue::startNext(
     task.state = TaskState::Sending;
     task.id.clear();
     task.error.clear();
-    task.sent = 0;
     ++task.attempts;
     activeIndex_ = index;
 
@@ -107,8 +106,6 @@ void OutgoingFileQueue::resume()
     for (Task &task : tasks_) {
         if (task.state == TaskState::Interrupted) {
             task.state = TaskState::Waiting;
-            task.id.clear();
-            task.sent = 0;
         }
     }
 }

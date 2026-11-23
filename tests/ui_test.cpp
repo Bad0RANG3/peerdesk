@@ -821,6 +821,10 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
         QStringLiteral("reconnect-file"),
         QStringLiteral("reconnect.bin"),
         4096);
+    controller.outgoingFileProgress(
+        QStringLiteral("reconnect-file"),
+        2048,
+        4096);
     QTest::qWait(10);
     QVERIFY(page.toolbar()->isVisible());
     QVERIFY(page.textOverlay()->isVisible());
@@ -854,7 +858,11 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QTest::qWait(10);
     QVERIFY(page.transferLabel()->isVisible());
     QVERIFY(page.transferLabel()->text().contains(
-        QStringLiteral("等待发送")));
+        QStringLiteral("正在续传")));
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("reconnect.bin")));
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("从 50%")));
     QVERIFY(page.fileCancelButton()->isHidden());
     QCOMPARE(page.fileQueueSize(), 1);
 
@@ -1063,10 +1071,15 @@ void UiTest::outgoingFileQueuePausesAndResumes()
         queue.startNext(sender),
         pd::ui::OutgoingFileQueue::StartResult::Started);
     QVERIFY(queue.markStarted(QStringLiteral("paused-1"), {}, 512));
+    QVERIFY(queue.markProgress(QStringLiteral("paused-1"), 256, 512));
+    QCOMPARE(queue.activeTask()->sent, 256);
+    QCOMPARE(queue.activeTask()->attempts, 1);
     queue.pause();
     QVERIFY(queue.interruptActive(QStringLiteral("interrupted")));
     QVERIFY(queue.paused());
     QVERIFY(!queue.active());
+    QVERIFY(queue.hasRetryable());
+    QCOMPARE(queue.size(), 1);
     QCOMPARE(
         queue.startNext(sender),
         pd::ui::OutgoingFileQueue::StartResult::NoTask);
@@ -1075,11 +1088,17 @@ void UiTest::outgoingFileQueuePausesAndResumes()
     queue.resume();
     QVERIFY(!queue.paused());
     QVERIFY(queue.hasPending());
+    QVERIFY(queue.activeTask() == nullptr);
     QCOMPARE(
         queue.startNext(sender),
         pd::ui::OutgoingFileQueue::StartResult::Started);
     QCOMPARE(starts, 2);
+    QCOMPARE(queue.activeTask()->sent, 256);
+    QCOMPARE(queue.activeTask()->attempts, 2);
     QVERIFY(queue.markStarted(QStringLiteral("paused-2"), {}, 512));
+    QVERIFY(!queue.markProgress(QStringLiteral("paused-1"), 300, 512));
+    QVERIFY(queue.markProgress(QStringLiteral("paused-2"), 384, 512));
+    QCOMPARE(queue.activeTask()->sent, 384);
     QVERIFY(queue.markFinished(QStringLiteral("paused-2"), {}, 512));
     QCOMPARE(queue.succeededCount(), 1);
 }
@@ -1182,6 +1201,10 @@ void UiTest::viewerFileTransferCancelState()
         QStringLiteral("interrupt-file"),
         QStringLiteral("interrupt.bin"),
         4096);
+    controller.outgoingFileProgress(
+        QStringLiteral("interrupt-file"),
+        1024,
+        4096);
     QTest::qWait(10);
     QVERIFY(page.fileCancelButton()->isVisible());
     controller.outgoingFileInterrupted(
@@ -1193,6 +1216,17 @@ void UiTest::viewerFileTransferCancelState()
     QVERIFY(page.transferLabel()->text().contains(
         QStringLiteral("传输已中断")));
     QVERIFY(page.canvas()->hasFrame());
+
+    page.showReconnecting();
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTest::qWait(10);
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("正在续传")));
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("interrupt.bin")));
+    QVERIFY(page.transferLabel()->text().contains(
+        QStringLiteral("从 25%")));
+    QCOMPARE(page.fileQueueSize(), 3);
 }
 
 void UiTest::hostFileTransferCancelState()
@@ -1253,7 +1287,7 @@ void UiTest::hostFileTransferCancelState()
     QCOMPARE(panel.sendFileButton()->text(), QStringLiteral("发送"));
     QCOMPARE(
         panel.fileStatus()->text(),
-        QStringLiteral("传输已中断"));
+        QStringLiteral("传输已中断，恢复后自动续传"));
 }
 
 void UiTest::appWindowKeepsViewerDuringLiveSession()

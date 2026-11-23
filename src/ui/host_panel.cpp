@@ -617,7 +617,8 @@ void HostPanel::connectSignals()
         this,
         [this](const QString &, const QString &) {
             setFileBusy(false);
-            fileStatus_->setText(QStringLiteral("传输已中断"));
+            fileStatus_->setText(
+                QStringLiteral("传输已中断，恢复后自动续传"));
             fileStatus_->setStyleSheet(QStringLiteral("color: #ffb38a;"));
             fileStatus_->show();
             appendLog(QStringLiteral("文件传输已中断"));

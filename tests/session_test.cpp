@@ -670,6 +670,278 @@ private slots:
         QCOMPARE(readBytes(savedPath), QByteArrayLiteral("hello"));
     }
 
+    void fileReceiverResumesWithNewId()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QByteArray payload = makePayload(300000, 0xA11CE);
+        const qsizetype split = 110000;
+
+        FileReceiver receiver(directory.path());
+        QString error;
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("resume-old"),
+                QStringLiteral("resume.bin"),
+                payload.size(),
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("resume-old"),
+                payload.left(split),
+                &error),
+            qPrintable(error));
+
+        qint64 offset = -1;
+        bool resumed = false;
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("resume-new"),
+                QStringLiteral("resume.bin"),
+                payload.size(),
+                &error,
+                QStringLiteral("resume-old"),
+                &offset,
+                &resumed),
+            qPrintable(error));
+        QVERIFY(resumed);
+        QCOMPARE(offset, qint64(split));
+        QVERIFY(!receiver.contains(QStringLiteral("resume-old")));
+        QVERIFY(receiver.contains(QStringLiteral("resume-new")));
+        QCOMPARE(
+            receiver.received(QStringLiteral("resume-new")),
+            qint64(split));
+        QCOMPARE(
+            receiver.expected(QStringLiteral("resume-new")),
+            qint64(payload.size()));
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("resume-new"),
+                payload.mid(split),
+                &error),
+            qPrintable(error));
+
+        QString savedPath;
+        qint64 savedBytes = 0;
+        QVERIFY2(
+            receiver.finish(
+                QStringLiteral("resume-new"),
+                &savedPath,
+                &savedBytes,
+                &error),
+            qPrintable(error));
+        QCOMPARE(savedBytes, qint64(payload.size()));
+        QCOMPARE(
+            QFileInfo(savedPath).fileName(),
+            QStringLiteral("resume.bin"));
+        QCOMPARE(readBytes(savedPath), payload);
+        QVERIFY(!receiver.contains(QStringLiteral("resume-new")));
+    }
+
+    void fileReceiverRejectsInvalidOrExpiredResume()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QByteArray payload = makePayload(180000, 0xB22DF);
+
+        FileReceiver receiver(directory.path());
+        QString error;
+        QVERIFY2(
+            receiver.begin(
+                QStringLiteral("held-old"),
+                QStringLiteral("held.bin"),
+                payload.size(),
+                &error),
+            qPrintable(error));
+        QVERIFY2(
+            receiver.append(
+                QStringLiteral("held-old"),
+                payload.left(70000),
+                &error),
+            qPrintable(error));
+
+        QVERIFY(!receiver.begin(
+            QStringLiteral("wrong-name"),
+            QStringLiteral("renamed.bin"),
+            payload.size(),
+            &error,
+            QStringLiteral("held-old")));
+        QCOMPARE(error, QStringLiteral("resume"));
+        QVERIFY(!receiver.begin(
+            QStringLiteral("wrong-size"),
+            QStringLiteral("held.bin"),
+            payload.size() + 1,
+            &error,
+            QStringLiteral("held-old")));
+        QCOMPARE(error, QStringLiteral("resume"));
+        QVERIFY(!receiver.begin(
+            QStringLiteral("held-old"),
+            QStringLiteral("held.bin"),
+            payload.size(),
+            &error,
+            QStringLiteral("held-old")));
+        QCOMPARE(error, QStringLiteral("resume"));
+        QVERIFY(!receiver.begin(
+            QStringLiteral("unknown"),
+            QStringLiteral("held.bin"),
+            payload.size(),
+            &error,
+            QStringLiteral("missing-old")));
+        QCOMPARE(error, QStringLiteral("resume"));
+        QVERIFY(receiver.contains(QStringLiteral("held-old")));
+        QVERIFY(!receiver.contains(QStringLiteral("wrong-name")));
+        QVERIFY(!receiver.contains(QStringLiteral("wrong-size")));
+
+        receiver.pruneIdle(0);
+        QVERIFY(!receiver.contains(QStringLiteral("held-old")));
+        QVERIFY(!QFileInfo::exists(
+            directory.filePath(QStringLiteral("held.bin"))));
+        QVERIFY(!receiver.begin(
+            QStringLiteral("too-late"),
+            QStringLiteral("held.bin"),
+            payload.size(),
+            &error,
+            QStringLiteral("held-old")));
+        QCOMPARE(error, QStringLiteral("resume"));
+    }
+
+    void fileSenderWaitsForResumeAndSendsTail()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QByteArray payload = makePayload(360000, 0xC33E1);
+        const QString path =
+            directory.filePath(QStringLiteral("resume-source.bin"));
+        QVERIFY(writeBytes(path, payload));
+
+        QList<QJsonObject> wire;
+        int unconfirmedBytes = 0;
+        const auto collect = [&wire, &unconfirmedBytes](
+                                 const QJsonObject &message) {
+            wire.append(message);
+            if (message.value(QStringLiteral("t")).toString()
+                == QStringLiteral("file_data")) {
+                unconfirmedBytes +=
+                    message.value(QStringLiteral("d"))
+                        .toString()
+                        .size();
+            }
+        };
+
+        FileSender sender;
+        QSignalSpy started(&sender, &FileSender::started);
+        QSignalSpy completed(&sender, &FileSender::completed);
+        FileSender::ResumeOffer offer{
+            QStringLiteral("previous-transfer"),
+            path,
+            QStringLiteral("resume-source.bin"),
+            payload.size(),
+            84000,
+        };
+        QString error;
+        QVERIFY2(
+            sender.start(path, collect, &error, offer),
+            qPrintable(error));
+        QCOMPARE(started.count(), 1);
+        QVERIFY(sender.active());
+        QVERIFY(sender.waitingForResume());
+        QCOMPARE(sender.sent(), qint64(84000));
+        QCOMPARE(wire.size(), 1);
+        QCOMPARE(
+            wire.constFirst().value(QStringLiteral("t")).toString(),
+            QStringLiteral("file_begin"));
+        QCOMPARE(
+            wire.constFirst().value(QStringLiteral("resume")).toBool(),
+            true);
+        QCOMPARE(
+            wire.constFirst()
+                .value(QStringLiteral("resume_of"))
+                .toString(),
+            QStringLiteral("previous-transfer"));
+        pumpEvents(40);
+        QCOMPARE(unconfirmedBytes, 0);
+
+        const QString id = sender.id();
+        QVERIFY(!sender.acceptResume(
+            QJsonObject{
+                {QStringLiteral("id"), id},
+                {QStringLiteral("offset"), payload.size() + 1},
+            },
+            &error));
+        QCOMPARE(error, QStringLiteral("resume_offset"));
+        QVERIFY(sender.waitingForResume());
+        QVERIFY(sender.acceptResume(
+            QJsonObject{
+                {QStringLiteral("id"), id},
+                {QStringLiteral("offset"), QString::number(84000)},
+            },
+            &error));
+        QVERIFY(!sender.waitingForResume());
+
+        wire.clear();
+        QVERIFY(waitUntil(
+            [&]() {
+                return completed.count() == 1 && !sender.active();
+            },
+            10000));
+        QByteArray tail;
+        for (const QJsonObject &message : wire) {
+            if (message.value(QStringLiteral("t")).toString()
+                == QStringLiteral("file_data")) {
+                tail.append(
+                    QByteArray::fromBase64(
+                        message.value(QStringLiteral("d"))
+                            .toString()
+                            .toLatin1()));
+            }
+        }
+        QCOMPARE(tail, payload.mid(84000));
+        QCOMPARE(countMessages(wire, QStringLiteral("file_end"), id), 1);
+        QCOMPARE(completed.at(0).at(0).toString(), id);
+        QCOMPARE(completed.at(0).at(1).toString(), QStringLiteral("resume-source.bin"));
+        QCOMPARE(completed.at(0).at(2).toLongLong(), qint64(payload.size()));
+        QVERIFY(!sender.acceptResume(
+            QJsonObject{
+                {QStringLiteral("id"), id},
+                {QStringLiteral("offset"), 84000},
+            },
+            &error));
+        QCOMPARE(error, QStringLiteral("inactive"));
+
+        FileSender timedOut;
+        timedOut.setResumeTimeoutMs(20);
+        QSignalSpy failed(&timedOut, &FileSender::failed);
+        QList<QJsonObject> timeoutWire;
+        QVERIFY2(
+            timedOut.start(
+                path,
+                [&timeoutWire](const QJsonObject &message) {
+                    timeoutWire.append(message);
+                },
+                &error,
+                offer),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() { return failed.count() == 1; },
+            1000));
+        QCOMPARE(
+            failed.at(0).at(1).toString(),
+            QStringLiteral("resume_timeout"));
+        QVERIFY(!timedOut.active());
+        QCOMPARE(
+            countMessages(
+                timeoutWire,
+                QStringLiteral("file_error"),
+                failed.at(0).at(0).toString()),
+            1);
+        QCOMPARE(
+            timeoutWire.constLast()
+                .value(QStringLiteral("reason"))
+                .toString(),
+            QStringLiteral("resume_timeout"));
+    }
+
     void cancellableFileTransferRoundTrip()
     {
         const QByteArray psk =
@@ -871,6 +1143,170 @@ private slots:
                 QStringLiteral("file_cancel"),
                 viewerCloseId),
             0);
+    }
+
+    void hostSessionSuspendsAndResumesFileTransfer()
+    {
+        const QByteArray psk =
+            QByteArrayLiteral("session-resume-secret");
+        PeerLink hostLink(true, psk);
+        PeerLink viewerLink(false, psk);
+        hostLink.setLabel(QStringLiteral("resume-host"));
+        viewerLink.setLabel(QStringLiteral("resume-viewer"));
+        hostLink.setDeviceId(QStringLiteral("resume-host-device"));
+        viewerLink.setDeviceId(QStringLiteral("resume-viewer-device"));
+
+        QString error;
+        QVERIFY2(
+            hostLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        QVERIFY2(
+            viewerLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+
+        QTemporaryDir sourceDirectory;
+        QTemporaryDir hostReceive;
+        QTemporaryDir viewerReceive;
+        QVERIFY(sourceDirectory.isValid());
+        QVERIFY(hostReceive.isValid());
+        QVERIFY(viewerReceive.isValid());
+
+        auto screen =
+            std::make_shared<SyntheticScreenSource>(1280, 720, false);
+        HostSession host(&hostLink);
+        ViewerSession viewer(&viewerLink);
+        host.setScreenSource(screen);
+        host.setReceiveDirectory(hostReceive.path());
+        viewer.setReceiveDirectory(viewerReceive.path());
+
+        QList<QString> viewerFiles;
+        QList<QJsonObject> viewerEvents;
+        connect(
+            &viewer,
+            &ViewerSession::fileReceived,
+            [&viewerFiles](const QString &path, qint64) {
+                viewerFiles.append(path);
+            });
+        connect(
+            &viewer,
+            &ViewerSession::eventReceived,
+            [&viewerEvents](const QJsonObject &message) {
+                viewerEvents.append(message);
+            });
+        QSignalSpy hostStarted(&host, &HostSession::outgoingFileStarted);
+        QSignalSpy hostInterrupted(
+            &host,
+            &HostSession::outgoingFileInterrupted);
+
+        hostLink.addCandidates(viewerLink.localCandidates());
+        viewerLink.addCandidates(hostLink.localCandidates());
+        hostLink.beginHandshake();
+        viewerLink.beginHandshake();
+        QVERIFY(waitUntil(
+            [&]() {
+                return hostLink.established() && viewerLink.established()
+                    && hostLink.state() == QStringLiteral("direct")
+                    && viewerLink.state() == QStringLiteral("direct");
+            },
+            7000));
+        QVERIFY(host.start());
+        viewer.start();
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.running() && !viewer.info().isEmpty();
+            },
+            5000));
+
+        const QByteArray firstPayload =
+            makePayload(2 * 1024 * 1024, 0xD44F2);
+        const QString firstPath =
+            sourceDirectory.filePath(QStringLiteral("host-resume.bin"));
+        QVERIFY(writeBytes(firstPath, firstPayload));
+        QVERIFY2(host.sendFile(firstPath, &error), qPrintable(error));
+        QCOMPARE(hostStarted.count(), 1);
+        const QString firstId = hostStarted.at(0).at(0).toString();
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerEvents.cbegin(),
+                    viewerEvents.cend(),
+                    [&firstId](const QJsonObject &message) {
+                        return message.value(QStringLiteral("t")).toString()
+                                == QStringLiteral("file_in")
+                            && message.value(QStringLiteral("state")).toString()
+                                == QStringLiteral("progress")
+                            && message.value(QStringLiteral("id")).toString()
+                                == firstId
+                            && message.value(QStringLiteral("got")).toInt()
+                                > 0;
+                    });
+            },
+            5000));
+
+        host.suspend();
+        QVERIFY(!host.running());
+        QCOMPARE(hostInterrupted.count(), 1);
+        QVERIFY(host.start());
+        QVERIFY(waitUntil(
+            [&]() { return viewerFiles.size() == 1; },
+            15000));
+        QCOMPARE(readBytes(viewerFiles.constFirst()), firstPayload);
+        QVERIFY(hostStarted.count() >= 2);
+        const QString resumedId =
+            hostStarted.constLast().at(0).toString();
+        QVERIFY(resumedId != firstId);
+        const auto resumedBegin = std::find_if(
+            viewerEvents.cbegin(),
+            viewerEvents.cend(),
+            [&resumedId](const QJsonObject &message) {
+                return message.value(QStringLiteral("t")).toString()
+                        == QStringLiteral("file_in")
+                    && message.value(QStringLiteral("state")).toString()
+                        == QStringLiteral("begin")
+                    && message.value(QStringLiteral("id")).toString()
+                        == resumedId;
+            });
+        QVERIFY(resumedBegin != viewerEvents.cend());
+        QCOMPARE(
+            resumedBegin->value(QStringLiteral("resumed")).toBool(),
+            true);
+        QVERIFY(
+            resumedBegin->value(QStringLiteral("offset")).toInt() > 0);
+
+        hostStarted.clear();
+        hostInterrupted.clear();
+        const QByteArray stoppedPayload =
+            makePayload(2 * 1024 * 1024, 0xE55A3);
+        const QString stoppedPath =
+            sourceDirectory.filePath(QStringLiteral("host-stop-resume.bin"));
+        QVERIFY(writeBytes(stoppedPath, stoppedPayload));
+        QVERIFY2(host.sendFile(stoppedPath, &error), qPrintable(error));
+        QCOMPARE(hostStarted.count(), 1);
+        const QString stoppedId = hostStarted.at(0).at(0).toString();
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerEvents.cbegin(),
+                    viewerEvents.cend(),
+                    [&stoppedId](const QJsonObject &message) {
+                        return message.value(QStringLiteral("t")).toString()
+                                == QStringLiteral("file_in")
+                            && message.value(QStringLiteral("state")).toString()
+                                == QStringLiteral("progress")
+                            && message.value(QStringLiteral("id")).toString()
+                                == stoppedId
+                            && message.value(QStringLiteral("got")).toInt()
+                                > 0;
+                    });
+            },
+            5000));
+        host.stop();
+        QCOMPARE(hostInterrupted.count(), 1);
+        QVERIFY(host.start());
+        QVERIFY(waitUntil([&]() { return host.running(); }, 3000));
+        pumpEvents(250);
+        QCOMPARE(hostStarted.count(), 1);
+        QCOMPARE(viewerFiles.size(), 1);
     }
 
     void directSessionEndToEnd()

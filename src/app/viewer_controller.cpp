@@ -438,7 +438,7 @@ void ViewerController::beginRecovery()
     recoveryHandshakeArmed_ = false;
     emit inputReleaseRequested();
     stopping_ = true;
-    session_->stop();
+    session_->suspend();
     if (playback_) {
         playback_->reset();
         playback_->setEnabled(audioEnabled_);
@@ -446,9 +446,6 @@ void ViewerController::beginRecovery()
     if (linkStarted_) {
         link_->resetPeer();
     }
-    info_ = {};
-    statistics_ = {};
-    audioState_ = {};
     stopping_ = false;
     setState(State::Reconnecting);
     deadlineTimer_->start(reconnectTimeoutMs_);
@@ -524,7 +521,7 @@ void ViewerController::onPeerJoined(const PeerInfo &info)
     if (replaceLink) {
         recoveryHandshakeArmed_ = false;
         stopping_ = true;
-        session_->stop();
+        session_->suspend();
         if (linkStarted_) {
             link_->resetPeer();
         }
@@ -596,7 +593,7 @@ void ViewerController::onPeerLeft(const QString &reason)
         emit logMessage(message);
         recoveryHandshakeArmed_ = false;
         stopping_ = true;
-        session_->stop();
+        session_->suspend();
         if (linkStarted_) {
             link_->resetPeer();
         }
@@ -665,7 +662,7 @@ void ViewerController::onLinkState(const QString &state)
     if (recovering_ && state == QStringLiteral("closed")) {
         recoveryHandshakeArmed_ = false;
         stopping_ = true;
-        session_->stop();
+        session_->suspend();
         if (linkStarted_) {
             link_->resetPeer();
         }

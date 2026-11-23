@@ -1516,7 +1516,13 @@ void ViewerPage::connectSignals()
             }
             const auto *task = fileQueue_.activeTask();
             currentFileName_ = task ? task->name : name;
-            lastFilePercent_ = 0;
+            lastFilePercent_ =
+                task && task->size > 0
+                ? std::clamp(
+                    static_cast<int>((task->sent * 100) / task->size),
+                    0,
+                    100)
+                : 0;
             updateFileTransferUi();
             scheduleToolbarHide();
         });
@@ -1611,10 +1617,8 @@ void ViewerPage::connectSignals()
                 return;
             }
             fileQueue_.pause();
-            currentFileName_.clear();
-            lastFilePercent_ = -1;
             updateFileTransferUi(
-                QStringLiteral("传输已中断，恢复连接后自动重试"),
+                QStringLiteral("传输已中断，恢复后自动续传"),
                 QStringLiteral("#ffb38a"));
         });
 
@@ -2225,7 +2229,13 @@ void ViewerPage::flushFileQueue()
         if (result == OutgoingFileQueue::StartResult::Started) {
             if (const auto *task = fileQueue_.activeTask()) {
                 currentFileName_ = task->name;
-                lastFilePercent_ = 0;
+                lastFilePercent_ =
+                    task->size > 0
+                    ? std::clamp(
+                        static_cast<int>((task->sent * 100) / task->size),
+                        0,
+                        100)
+                    : 0;
             }
             updateFileTransferUi();
             return;
@@ -2426,8 +2436,21 @@ void ViewerPage::showStreaming(const QString &peerName)
     updateToolbarVisibility();
     wakeToolbar();
     if (!fileQueue_.empty()) {
+        const int resumePercent =
+            fileQueue_.hasPending() || fileQueue_.hasRetryable()
+            ? lastFilePercent_
+            : -1;
+        const QString resumeName = currentFileName_;
         fileQueue_.resume();
-        updateFileTransferUi();
+        if (resumePercent > 0 && !resumeName.isEmpty()) {
+            updateFileTransferUi(
+                QStringLiteral("正在续传 · %1 · 从 %2%")
+                    .arg(resumeName)
+                    .arg(resumePercent),
+                QStringLiteral("#ffd9a3"));
+        } else {
+            updateFileTransferUi();
+        }
         if (fileQueue_.hasPending()) {
             QTimer::singleShot(
                 0,
@@ -2447,8 +2470,6 @@ void ViewerPage::showReconnecting()
     textOverlay_->hide();
     fileQueue_.pause();
     fileQueue_.interruptActive(QStringLiteral("interrupted"));
-    currentFileName_.clear();
-    lastFilePercent_ = -1;
     transferLabel_->hide();
     fileCancelButton_->hide();
     fileRetryButton_->hide();
