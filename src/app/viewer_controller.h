@@ -121,6 +121,9 @@ signals:
     void peerChanged(const QString &name, bool connected);
     void frameDecoded(const QImage &image, bool keyframe);
     void remoteCursorChanged(const pd::CursorPacket &cursor);
+    void remoteCursorImageChanged(
+        quint32 imageId,
+        const QImage &image);
     void audioEnabledChanged(bool enabled);
     void audioStateChanged(const QJsonObject &state);
     void infoChanged(const QJsonObject &info);

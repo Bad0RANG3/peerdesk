@@ -55,7 +55,21 @@ public:
     void clearFrame();
     void setRemoteCursor(const pd::CursorPacket &cursor);
     void clearRemoteCursor();
+    void setRemoteCursorImage(quint32 imageId, const QImage &image);
+    void clearRemoteCursorImage();
     [[nodiscard]] bool hasRemoteCursor() const { return hasRemoteCursor_; }
+    [[nodiscard]] bool hasRemoteCursorImage() const
+    {
+        return !remoteCursorImage_.isNull();
+    }
+    [[nodiscard]] quint32 remoteCursorImageId() const
+    {
+        return remoteCursorImageId_;
+    }
+    [[nodiscard]] const QImage &remoteCursorImage() const
+    {
+        return remoteCursorImage_;
+    }
     [[nodiscard]] const pd::CursorPacket &remoteCursor() const
     {
         return remoteCursor_;
@@ -130,6 +144,8 @@ private:
     QImage frame_;
     QImage presentedFrame_;
     pd::CursorPacket remoteCursor_;
+    QImage remoteCursorImage_;
+    quint32 remoteCursorImageId_ = 0;
     ViewerFramePipeline *presentation_ = nullptr;
     bool inputEnabled_ = false;
     bool hasRemoteCursor_ = false;

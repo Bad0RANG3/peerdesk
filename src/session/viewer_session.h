@@ -7,6 +7,7 @@
 #include "session/viewer_video_pipeline.h"
 
 #include <QByteArray>
+#include <QHash>
 #include <QImage>
 #include <QJsonObject>
 #include <QObject>
@@ -41,6 +42,14 @@ public:
     [[nodiscard]] QJsonObject stats() const { return stats_; }
     [[nodiscard]] QJsonObject audioState() const { return audioState_; }
     [[nodiscard]] quint32 lastVideoSequence() const { return videoSequence_; }
+    [[nodiscard]] QImage remoteCursorImage(quint32 imageId) const
+    {
+        return cursorImages_.value(imageId);
+    }
+    [[nodiscard]] int remoteCursorImageCacheSize() const
+    {
+        return cursorImages_.size();
+    }
     [[nodiscard]] QString videoDecoderThreadName() const
     {
         return video_.decoderThreadName();
@@ -105,6 +114,9 @@ signals:
         quint32 sequence,
         quint32 timestampMs);
     void remoteCursorChanged(const pd::CursorPacket &cursor);
+    void remoteCursorImageChanged(
+        quint32 imageId,
+        const QImage &image);
     void eventReceived(const QJsonObject &message);
     void infoChanged(const QJsonObject &info);
     void statsChanged(const QJsonObject &stats);
@@ -135,6 +147,8 @@ private:
     void onAudioPacket(const QByteArray &payload);
     void onCursorPacket(const QByteArray &payload);
     void resetRemoteCursor(bool notify);
+    void cacheRemoteCursorImage(quint32 imageId, const QImage &image);
+    void clearRemoteCursorImages(bool notify);
     void dispatch(const QJsonObject &message);
     void handleRemoteFileResult(const QJsonObject &message);
     void onIncomingFileStarted(
@@ -170,6 +184,8 @@ private:
     quint64 audioFrames_ = 0;
     quint32 cursorSequence_ = 0;
     bool cursorSeen_ = false;
+    QHash<quint32, QImage> cursorImages_;
+    QList<quint32> cursorImageOrder_;
 
     FileTransferPipeline fileTransfer_;
     ViewerVideoPipeline video_;

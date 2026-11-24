@@ -171,6 +171,8 @@ private:
     QElapsedTimer adaptiveClock_;
     int lossKeyframeRequests_ = 0;
     quint32 cursorSequence_ = 0;
+    quint32 lastCursorImageId_ = 0;
+    quint32 failedCursorImageId_ = 0;
     qint64 sentFrames_ = 0;
     qint64 statsLastFrames_ = 0;
     double lastStatsFps_ = 0.0;

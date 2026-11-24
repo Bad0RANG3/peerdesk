@@ -1,6 +1,7 @@
 #include "session/viewer_session.h"
 
 #include "session/clipboard_codec.h"
+#include "session/cursor_codec.h"
 #include "core/protocol.h"
 #include "transport/peer_link.h"
 
@@ -8,12 +9,14 @@
 #include <QJsonArray>
 
 #include <algorithm>
+#include <cmath>
 
 namespace pd {
 
 namespace {
 
 constexpr int kClipboardLimit = 256 * 1024;
+constexpr int kCursorImageCacheLimit = 8;
 
 QString jsonString(
     const QJsonObject &object,
@@ -644,6 +647,13 @@ void ViewerSession::onCursorPacket(const QByteArray &payload)
     }
     cursorSeen_ = true;
     cursorSequence_ = packet->sequence;
+    if (packet->shape == CursorShape::Bitmap
+        && packet->imageId != 0) {
+        const QImage image = cursorImages_.value(packet->imageId);
+        if (!image.isNull()) {
+            emit remoteCursorImageChanged(packet->imageId, image);
+        }
+    }
     emit remoteCursorChanged(*packet);
 }
 
@@ -652,10 +662,36 @@ void ViewerSession::resetRemoteCursor(bool notify)
     const bool hadCursor = cursorSeen_;
     cursorSeen_ = false;
     cursorSequence_ = 0;
+    clearRemoteCursorImages(notify);
     if (notify && hadCursor) {
         CursorPacket hidden;
         hidden.shape = CursorShape::Arrow;
         emit remoteCursorChanged(hidden);
+    }
+}
+
+void ViewerSession::cacheRemoteCursorImage(
+    quint32 imageId,
+    const QImage &image)
+{
+    if (imageId == 0 || image.isNull()) {
+        return;
+    }
+    cursorImageOrder_.removeOne(imageId);
+    cursorImages_.insert(imageId, image);
+    cursorImageOrder_.append(imageId);
+    while (cursorImageOrder_.size() > kCursorImageCacheLimit) {
+        cursorImages_.remove(cursorImageOrder_.takeFirst());
+    }
+}
+
+void ViewerSession::clearRemoteCursorImages(bool notify)
+{
+    const bool hadImages = !cursorImages_.isEmpty();
+    cursorImages_.clear();
+    cursorImageOrder_.clear();
+    if (notify && hadImages) {
+        emit remoteCursorImageChanged(0, QImage{});
     }
 }
 
@@ -682,6 +718,40 @@ void ViewerSession::dispatch(const QJsonObject &message)
         audioState_ = message;
         emit audioStateChanged(audioState_);
         emit eventReceived(message);
+        return;
+    }
+    if (kind == QStringLiteral("cursor_image")) {
+        const QJsonValue idValue = message.value(QStringLiteral("id"));
+        const double rawId = idValue.toDouble(0.0);
+        const int width =
+            message.value(QStringLiteral("w")).toInt(-1);
+        const int height =
+            message.value(QStringLiteral("h")).toInt(-1);
+        if (!idValue.isDouble()
+            || rawId < 1.0
+            || rawId > 4294967295.0
+            || std::floor(rawId) != rawId
+            || jsonString(message, "mime") != QStringLiteral("image/png")) {
+            emit logMessage(QStringLiteral("忽略无效的远程光标图片"));
+            return;
+        }
+        const quint32 imageId = static_cast<quint32>(rawId);
+        const CursorImageDecodeResult decoded = decodeCursorImage(
+            jsonString(message, "d"),
+            width,
+            height);
+        if (!decoded.ok()) {
+            emit logMessage(
+                QStringLiteral("忽略无效的远程光标图片：%1")
+                    .arg(decoded.error));
+            return;
+        }
+        if (cursorImageId(decoded.image) != imageId) {
+            emit logMessage(QStringLiteral("忽略校验失败的远程光标图片"));
+            return;
+        }
+        cacheRemoteCursorImage(imageId, decoded.image);
+        emit remoteCursorImageChanged(imageId, decoded.image);
         return;
     }
     if (kind == QStringLiteral("clip")) {

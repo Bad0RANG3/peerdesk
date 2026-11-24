@@ -206,6 +206,7 @@ QPainterPath cursorPath(CursorShape shape)
     QPainterPath path;
     path.setFillRule(Qt::WindingFill);
     switch (shape) {
+    case CursorShape::Bitmap:
     case CursorShape::Arrow:
         path.addPolygon(QPolygonF{
             QPointF(0.0, 0.0),
@@ -370,7 +371,13 @@ void ViewerCanvas::clearFrame()
 void ViewerCanvas::setRemoteCursor(const CursorPacket &cursor)
 {
     if (!cursor.visible || frame_.isNull()) {
-        clearRemoteCursor();
+        const bool hadCursor = hasRemoteCursor_;
+        remoteCursor_ = {};
+        hasRemoteCursor_ = false;
+        applyCursorShape();
+        if (hadCursor) {
+            update();
+        }
         return;
     }
     remoteCursor_ = cursor;
@@ -382,12 +389,42 @@ void ViewerCanvas::setRemoteCursor(const CursorPacket &cursor)
 void ViewerCanvas::clearRemoteCursor()
 {
     const bool hadCursor = hasRemoteCursor_;
+    const bool hadImage = !remoteCursorImage_.isNull();
     remoteCursor_ = {};
     hasRemoteCursor_ = false;
+    remoteCursorImage_ = QImage();
+    remoteCursorImageId_ = 0;
     applyCursorShape();
-    if (hadCursor) {
+    if (hadCursor || hadImage) {
         update();
     }
+}
+
+void ViewerCanvas::setRemoteCursorImage(
+    quint32 imageId,
+    const QImage &image)
+{
+    if (imageId == 0 || image.isNull()) {
+        clearRemoteCursorImage();
+        return;
+    }
+    if (remoteCursorImageId_ == imageId
+        && remoteCursorImage_.cacheKey() == image.cacheKey()) {
+        return;
+    }
+    remoteCursorImageId_ = imageId;
+    remoteCursorImage_ = image;
+    update();
+}
+
+void ViewerCanvas::clearRemoteCursorImage()
+{
+    if (remoteCursorImage_.isNull() && remoteCursorImageId_ == 0) {
+        return;
+    }
+    remoteCursorImage_ = QImage();
+    remoteCursorImageId_ = 0;
+    update();
 }
 
 QString ViewerCanvas::presentationThreadName() const
@@ -547,6 +584,26 @@ void ViewerCanvas::paintEvent(QPaintEvent *event)
     const QPointF topLeft(
         target.left() + nx * target.width() - hx * target.width(),
         target.top() + ny * target.height() - hy * target.height());
+
+    if (remoteCursor_.shape == CursorShape::Bitmap
+        && remoteCursor_.imageId != 0
+        && remoteCursor_.imageId == remoteCursorImageId_
+        && !remoteCursorImage_.isNull()) {
+        const qreal bitmapScale =
+            target.width() / std::max(1, frame_.width());
+        painter.save();
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.translate(topLeft);
+        painter.scale(bitmapScale, bitmapScale);
+        painter.drawImage(QPointF(0.0, 0.0), remoteCursorImage_);
+        painter.restore();
+        return;
+    }
+
+    const CursorShape shape =
+        remoteCursor_.shape == CursorShape::Bitmap
+        ? CursorShape::Arrow
+        : remoteCursor_.shape;
     const qreal scale = std::clamp(
         target.width() / std::max(1, frame_.width()),
         0.35,
@@ -563,8 +620,8 @@ void ViewerCanvas::paintEvent(QPaintEvent *event)
         Qt::SolidLine,
         Qt::RoundCap,
         Qt::RoundJoin));
-    painter.drawPath(cursorPath(remoteCursor_.shape));
-    if (remoteCursor_.shape == CursorShape::NotAllowed) {
+    painter.drawPath(cursorPath(shape));
+    if (shape == CursorShape::NotAllowed) {
         const QPainterPath slash =
             strokedLine(QPointF(8.0, 8.0), QPointF(24.0, 24.0), 4.0);
         painter.setPen(Qt::NoPen);
@@ -1673,6 +1730,11 @@ void ViewerPage::connectSignals()
         &ViewerController::remoteCursorChanged,
         canvas_,
         &ViewerCanvas::setRemoteCursor);
+    connect(
+        controller_,
+        &ViewerController::remoteCursorImageChanged,
+        canvas_,
+        &ViewerCanvas::setRemoteCursorImage);
     connect(
         controller_,
         &ViewerController::peerChanged,

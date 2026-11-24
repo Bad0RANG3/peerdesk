@@ -1,6 +1,7 @@
 #include "session/host_session.h"
 
 #include "session/clipboard_codec.h"
+#include "session/cursor_codec.h"
 #include "core/protocol.h"
 #include "transport/peer_link.h"
 
@@ -277,6 +278,9 @@ void HostSession::onLinkStateChanged(const QString &state)
          || state == QStringLiteral("relay"))
         && wantedRunning_) {
         if (running_) {
+            lastCursorImageId_ = 0;
+            failedCursorImageId_ = 0;
+            sendCursorState();
             videoPipeline_.requestKeyframe();
         } else {
             startStreaming();
@@ -341,6 +345,8 @@ void HostSession::startStreaming()
 
     startAudio();
     cursorSequence_ = 0;
+    lastCursorImageId_ = 0;
+    failedCursorImageId_ = 0;
     sendCursorState();
     cursorTimer_->start();
     sendInfo();
@@ -361,6 +367,8 @@ void HostSession::stopStreaming()
     (void)fileTransfer_.interruptSend(QStringLiteral("interrupted"));
     audioCarry_.clear();
     lossKeyframeRequests_ = 0;
+    lastCursorImageId_ = 0;
+    failedCursorImageId_ = 0;
     adaptiveRate_.reset(settings_.quality, settings_.fps);
     applyAdaptiveLimits();
     if (wasRunning) {
@@ -402,6 +410,48 @@ void HostSession::sendCursorState()
         packet.hotspotX = normalize(sample.hotspot.x(), monitor.width());
         packet.hotspotY = normalize(sample.hotspot.y(), monitor.height());
         packet.shape = sample.shape;
+        if (sample.shape == CursorShape::Bitmap) {
+            const quint32 imageId = cursorImageId(sample.image);
+            if (imageId != 0
+                && imageId != failedCursorImageId_) {
+                if (imageId != lastCursorImageId_) {
+                    QString encodeError;
+                    const QByteArray image =
+                        encodeCursorImage(sample.image, &encodeError);
+                    if (image.isEmpty()) {
+                        failedCursorImageId_ = imageId;
+                        emit logMessage(
+                            QStringLiteral("无法编码自定义光标图片：%1")
+                                .arg(
+                                    encodeError.isEmpty()
+                                        ? QStringLiteral("未知错误")
+                                        : encodeError));
+                    } else {
+                        sendControl(QJsonObject{
+                            {QStringLiteral("t"),
+                             QStringLiteral("cursor_image")},
+                            {QStringLiteral("id"),
+                             static_cast<double>(imageId)},
+                            {QStringLiteral("mime"),
+                             QStringLiteral("image/png")},
+                            {QStringLiteral("w"),
+                             sample.image.width()},
+                            {QStringLiteral("h"),
+                             sample.image.height()},
+                            {QStringLiteral("d"),
+                             QString::fromLatin1(image.toBase64())},
+                        });
+                        lastCursorImageId_ = imageId;
+                    }
+                }
+            }
+            if (imageId != 0 && imageId == lastCursorImageId_) {
+                packet.imageId = imageId;
+            } else {
+                packet.shape = CursorShape::Arrow;
+                packet.imageId = 0;
+            }
+        }
     }
     link_->sendCursor(packCursor(packet));
 }
@@ -856,6 +906,9 @@ void HostSession::dispatch(const QJsonObject &message)
         }
         negotiateCodec(message);
         sendInfo();
+        lastCursorImageId_ = 0;
+        failedCursorImageId_ = 0;
+        sendCursorState();
         return;
     }
     if (kind == QStringLiteral("settings")) {

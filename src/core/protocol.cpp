@@ -269,12 +269,14 @@ QByteArray packCursor(const CursorPacket &packet)
     putU16(payload.data() + 10, packet.hotspotY);
     payload[12] = static_cast<char>(packet.visible ? kCursorVisibleFlag : 0);
     payload[13] = static_cast<char>(packet.shape);
+    putU32(payload.data() + 14, packet.imageId);
     return payload;
 }
 
 std::optional<CursorPacket> unpackCursor(const QByteArray &payload)
 {
-    if (payload.size() != kCursorPayloadLen) {
+    if (payload.size() != kLegacyCursorPayloadLen
+        && payload.size() != kCursorPayloadLen) {
         return std::nullopt;
     }
     const quint8 flags = static_cast<quint8>(payload[12]);
@@ -282,7 +284,7 @@ std::optional<CursorPacket> unpackCursor(const QByteArray &payload)
         return std::nullopt;
     }
     const quint8 shape = static_cast<quint8>(payload[13]);
-    if (shape > static_cast<quint8>(CursorShape::NotAllowed)) {
+    if (shape > static_cast<quint8>(CursorShape::Bitmap)) {
         return std::nullopt;
     }
 
@@ -294,6 +296,9 @@ std::optional<CursorPacket> unpackCursor(const QByteArray &payload)
     packet.hotspotY = getU16(payload.constData() + 10);
     packet.visible = (flags & kCursorVisibleFlag) != 0;
     packet.shape = static_cast<CursorShape>(shape);
+    if (payload.size() == kCursorPayloadLen) {
+        packet.imageId = getU32(payload.constData() + 14);
+    }
     return packet;
 }
 

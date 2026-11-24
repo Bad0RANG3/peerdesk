@@ -5,6 +5,7 @@
 #include "session/adaptive_video_rate_controller.h"
 #include "session/audio_codec.h"
 #include "session/clipboard_codec.h"
+#include "session/cursor_codec.h"
 #include "session/file_transfer.h"
 #include "session/file_transfer_pipeline.h"
 #include "session/host_input_pipeline.h"
@@ -464,6 +465,45 @@ QByteArray readBytes(const QString &path)
     return file.readAll();
 }
 
+QImage cursorTestImage(quint32 seed = 0, int size = 32)
+{
+    QImage image(size, size, QImage::Format_ARGB32);
+    image.fill(Qt::transparent);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            image.setPixelColor(
+                x,
+                y,
+                QColor(
+                    static_cast<int>((seed * 29 + x * 7) % 256),
+                    static_cast<int>((seed * 47 + y * 11) % 256),
+                    static_cast<int>((seed * 61 + x * 3 + y * 5) % 256),
+                    static_cast<int>((seed * 17 + x * 13 + y * 19) % 256)));
+        }
+    }
+    image.setPixelColor(0, 0, QColor(255, 32, 128, 255));
+    image.setPixelColor(size - 1, size - 1, QColor(12, 220, 255, 1));
+    return image;
+}
+
+QJsonObject cursorImageMessage(const QImage &image)
+{
+    QString error;
+    const QByteArray png = encodeCursorImage(image, &error);
+    if (png.isEmpty()) {
+        return {};
+    }
+    return QJsonObject{
+        {QStringLiteral("t"), QStringLiteral("cursor_image")},
+        {QStringLiteral("id"),
+         static_cast<double>(cursorImageId(image))},
+        {QStringLiteral("mime"), QStringLiteral("image/png")},
+        {QStringLiteral("w"), image.width()},
+        {QStringLiteral("h"), image.height()},
+        {QStringLiteral("d"), QString::fromLatin1(png.toBase64())},
+    };
+}
+
 int countKeyframes(const QList<bool> &keyframes)
 {
     return static_cast<int>(
@@ -633,6 +673,87 @@ private slots:
         tooWide.fill(Qt::black);
         const QByteArray rejected = encodeClipboardImage(tooWide, &error);
         QVERIFY(rejected.isEmpty());
+        QVERIFY(!error.isEmpty());
+    }
+
+    void cursorImageCodecValidatesAndRoundTrips()
+    {
+        const QImage image = cursorTestImage(7);
+        const quint32 imageId = cursorImageId(image);
+        QVERIFY(imageId != 0);
+        QCOMPARE(cursorImageId(image.copy()), imageId);
+
+        QString error;
+        const QByteArray png = encodeCursorImage(image, &error);
+        QVERIFY2(!png.isEmpty(), qPrintable(error));
+        QVERIFY(png.size() <= kCursorImageMaxPngBytes);
+
+        const CursorImageDecodeResult decoded = decodeCursorImage(
+            QString::fromLatin1(png.toBase64()),
+            image.width(),
+            image.height());
+        QVERIFY2(decoded.ok(), qPrintable(decoded.error));
+        QCOMPARE(decoded.image.size(), image.size());
+        QCOMPARE(
+            decoded.image.convertToFormat(QImage::Format_ARGB32),
+            image);
+        QCOMPARE(decoded.image.pixelColor(0, 0).alpha(), 255);
+        QCOMPARE(
+            decoded.image.pixelColor(image.width() - 1, image.height() - 1)
+                .alpha(),
+            1);
+        QCOMPARE(cursorImageId(decoded.image), imageId);
+
+        QImage changed = image.copy();
+        changed.setPixelColor(
+            0,
+            0,
+            QColor(255, 32, 128, 128));
+        QVERIFY(cursorImageId(changed) != imageId);
+
+        const QByteArray encoded = png.toBase64();
+        QVERIFY(!decodeCursorImage(
+                     QStringLiteral("not base64!"),
+                     image.width(),
+                     image.height())
+                     .ok());
+        QVERIFY(!decodeCursorImage(
+                     QStringLiteral("AA=A"),
+                     image.width(),
+                     image.height())
+                     .ok());
+        QVERIFY(!decodeCursorImage(
+                     QStringLiteral("-_-_"),
+                     image.width(),
+                     image.height())
+                     .ok());
+        QVERIFY(!decodeCursorImage(
+                     QString::fromLatin1(
+                         QByteArray(kCursorImageMaxPngBytes + 4, 'A')),
+                     image.width(),
+                     image.height())
+                     .ok());
+        QVERIFY(!decodeCursorImage(
+                     QString::fromLatin1(encoded),
+                     image.width() + 1,
+                     image.height())
+                     .ok());
+        QVERIFY(!decodeCursorImage(
+                     QString::fromLatin1(
+                         QByteArrayLiteral("hello").toBase64()),
+                     image.width(),
+                     image.height())
+                     .ok());
+        QVERIFY(!decodeCursorImage(
+                     QString(),
+                     image.width(),
+                     image.height())
+                     .ok());
+
+        QImage oversized(1, kCursorImageMaxDimension + 1,
+                         QImage::Format_ARGB32);
+        oversized.fill(Qt::transparent);
+        QVERIFY(encodeCursorImage(oversized, &error).isEmpty());
         QVERIFY(!error.isEmpty());
     }
 
@@ -2698,6 +2819,417 @@ private slots:
                     });
             },
             3000));
+
+        viewer.stop();
+        host.stop();
+    }
+
+    void viewerValidatesCursorImageCacheAndOrdering()
+    {
+        const QByteArray psk =
+            QByteArrayLiteral("session-cursor-image-secret");
+        PeerLink hostLink(true, psk);
+        PeerLink viewerLink(false, psk);
+        hostLink.setLabel(QStringLiteral("cursor-image-host"));
+        viewerLink.setLabel(QStringLiteral("cursor-image-viewer"));
+        hostLink.setDeviceId(
+            QStringLiteral("cursor-image-host-device"));
+        viewerLink.setDeviceId(
+            QStringLiteral("cursor-image-viewer-device"));
+
+        QString error;
+        QVERIFY2(
+            hostLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        QVERIFY2(
+            viewerLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+
+        ViewerSession viewer(&viewerLink);
+        QList<QPair<quint32, QImage>> images;
+        QList<CursorPacket> cursors;
+        QStringList logs;
+        int clearedImages = 0;
+        connect(
+            &viewer,
+            &ViewerSession::remoteCursorImageChanged,
+            [&images, &clearedImages](
+                quint32 imageId,
+                const QImage &image) {
+                if (imageId == 0 || image.isNull()) {
+                    ++clearedImages;
+                    return;
+                }
+                images.append({imageId, image});
+            });
+        connect(
+            &viewer,
+            &ViewerSession::remoteCursorChanged,
+            [&cursors](const CursorPacket &cursor) {
+                cursors.append(cursor);
+            });
+        connect(
+            &viewer,
+            &ViewerSession::logMessage,
+            [&logs](const QString &message) {
+                logs.append(message);
+            });
+
+        hostLink.addCandidates(viewerLink.localCandidates());
+        viewerLink.addCandidates(hostLink.localCandidates());
+        hostLink.beginHandshake();
+        viewerLink.beginHandshake();
+        QVERIFY(waitUntil(
+            [&]() {
+                return hostLink.established() && viewerLink.established()
+                    && hostLink.state() == QStringLiteral("direct")
+                    && viewerLink.state() == QStringLiteral("direct");
+            },
+            7000));
+        viewer.start();
+
+        QList<quint32> imageIds;
+        for (int index = 0; index < 9; ++index) {
+            const QImage image =
+                cursorTestImage(100 + static_cast<quint32>(index));
+            const quint32 imageId = cursorImageId(image);
+            imageIds.append(imageId);
+            hostLink.sendControl(cursorImageMessage(image));
+            QVERIFY(waitUntil(
+                [&]() {
+                    return !viewer.remoteCursorImage(imageId).isNull();
+                },
+                3000));
+        }
+        QCOMPARE(viewer.remoteCursorImageCacheSize(), 8);
+        QVERIFY(viewer.remoteCursorImage(imageIds.constFirst()).isNull());
+        for (qsizetype index = 1; index < imageIds.size(); ++index) {
+            QVERIFY(
+                !viewer.remoteCursorImage(imageIds.at(index)).isNull());
+        }
+
+        const int imageEventsBeforeInvalid = images.size();
+        const int logsBeforeInvalid = logs.size();
+        QJsonObject invalid =
+            cursorImageMessage(cursorTestImage(300));
+        invalid.insert(
+            QStringLiteral("mime"),
+            QStringLiteral("image/jpeg"));
+        hostLink.sendControl(invalid);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    logs.cbegin() + logsBeforeInvalid,
+                    logs.cend(),
+                    [](const QString &message) {
+                        return message.contains(
+                            QStringLiteral("远程光标图片"));
+                    });
+            },
+            3000));
+
+        const QImage mismatchedImage = cursorTestImage(301);
+        QJsonObject mismatched = cursorImageMessage(mismatchedImage);
+        const quint32 mismatchedId =
+            cursorImageId(mismatchedImage);
+        mismatched.insert(
+            QStringLiteral("id"),
+            static_cast<double>(
+                mismatchedId == 0xFFFFFFFFU
+                    ? mismatchedId - 1
+                    : mismatchedId + 1));
+        hostLink.sendControl(mismatched);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    logs.cbegin(),
+                    logs.cend(),
+                    [](const QString &message) {
+                        return message.contains(
+                            QStringLiteral("校验失败"));
+                    });
+            },
+            3000));
+        QCOMPARE(images.size(), imageEventsBeforeInvalid);
+        QCOMPARE(viewer.remoteCursorImageCacheSize(), 8);
+
+        const QImage lateImage = cursorTestImage(401);
+        const quint32 lateImageId = cursorImageId(lateImage);
+        CursorPacket packetBeforeImage;
+        packetBeforeImage.sequence = 9001;
+        packetBeforeImage.x = 12345;
+        packetBeforeImage.y = 23456;
+        packetBeforeImage.visible = true;
+        packetBeforeImage.shape = CursorShape::Bitmap;
+        packetBeforeImage.imageId = lateImageId;
+        hostLink.sendCursor(packCursor(packetBeforeImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    cursors.cbegin(),
+                    cursors.cend(),
+                    [lateImageId](const CursorPacket &cursor) {
+                        return cursor.sequence == 9001
+                            && cursor.imageId == lateImageId;
+                    });
+            },
+            3000));
+        const auto packetBeforeImageIt = std::find_if(
+            cursors.cbegin(),
+            cursors.cend(),
+            [](const CursorPacket &cursor) {
+                return cursor.sequence == 9001;
+            });
+        QVERIFY(packetBeforeImageIt != cursors.cend());
+        QVERIFY(packetBeforeImageIt->visible);
+        QCOMPARE(packetBeforeImageIt->x, packetBeforeImage.x);
+        QCOMPARE(packetBeforeImageIt->y, packetBeforeImage.y);
+        QCOMPARE(packetBeforeImageIt->imageId, lateImageId);
+        QVERIFY(viewer.remoteCursorImage(lateImageId).isNull());
+        hostLink.sendControl(cursorImageMessage(lateImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return !viewer.remoteCursorImage(lateImageId).isNull();
+            },
+            3000));
+
+        const QImage earlyImage = cursorTestImage(402);
+        const quint32 earlyImageId = cursorImageId(earlyImage);
+        hostLink.sendControl(cursorImageMessage(earlyImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return !viewer.remoteCursorImage(earlyImageId).isNull();
+            },
+            3000));
+        CursorPacket imageBeforePacket;
+        imageBeforePacket.sequence = 9002;
+        imageBeforePacket.visible = true;
+        imageBeforePacket.x = 30000;
+        imageBeforePacket.y = 31000;
+        imageBeforePacket.shape = CursorShape::Bitmap;
+        imageBeforePacket.imageId = earlyImageId;
+        hostLink.sendCursor(packCursor(imageBeforePacket));
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    cursors.cbegin(),
+                    cursors.cend(),
+                    [earlyImageId](const CursorPacket &cursor) {
+                        return cursor.sequence == 9002
+                            && cursor.shape == CursorShape::Bitmap
+                            && cursor.imageId == earlyImageId;
+                    });
+            },
+            3000));
+        QVERIFY(
+            std::any_of(
+                images.cbegin(),
+                images.cend(),
+                [earlyImageId](const QPair<quint32, QImage> &entry) {
+                    return entry.first == earlyImageId;
+                }));
+
+        clearedImages = 0;
+        viewer.stop();
+        QVERIFY(clearedImages >= 1);
+        QCOMPARE(viewer.remoteCursorImageCacheSize(), 0);
+
+        viewerLink.close();
+        hostLink.close();
+    }
+
+    void customCursorBitmapTransfersOnceAndResendsAfterHello()
+    {
+        const QByteArray psk =
+            QByteArrayLiteral("session-custom-cursor-secret");
+        PeerLink hostLink(true, psk);
+        PeerLink viewerLink(false, psk);
+        hostLink.setLabel(QStringLiteral("custom-cursor-host"));
+        viewerLink.setLabel(QStringLiteral("custom-cursor-viewer"));
+        hostLink.setDeviceId(
+            QStringLiteral("custom-cursor-host-device"));
+        viewerLink.setDeviceId(
+            QStringLiteral("custom-cursor-viewer-device"));
+
+        QString error;
+        QVERIFY2(
+            hostLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        QVERIFY2(
+            viewerLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+
+        auto screen =
+            std::make_shared<SyntheticScreenSource>(1280, 720, false);
+        const QImage firstImage = cursorTestImage(501);
+        const QImage secondImage = cursorTestImage(502, 40);
+        const quint32 firstImageId = cursorImageId(firstImage);
+        const quint32 secondImageId = cursorImageId(secondImage);
+        CursorSample sample;
+        sample.visible = true;
+        sample.screenPosition = QPoint(640, 360);
+        sample.hotspot = QPoint(4, 6);
+        sample.shape = CursorShape::Bitmap;
+        sample.image = firstImage;
+        screen->setCursorSample(sample);
+
+        HostSession host(&hostLink);
+        ViewerSession viewer(&viewerLink);
+        host.setScreenSource(screen);
+        QList<QPair<quint32, QImage>> images;
+        QList<CursorPacket> cursors;
+        QList<QJsonObject> wire;
+        connect(
+            &viewer,
+            &ViewerSession::remoteCursorImageChanged,
+            [&images](quint32 imageId, const QImage &image) {
+                if (imageId != 0 && !image.isNull()) {
+                    images.append({imageId, image});
+                }
+            });
+        connect(
+            &viewer,
+            &ViewerSession::remoteCursorChanged,
+            [&cursors](const CursorPacket &cursor) {
+                cursors.append(cursor);
+            });
+        connect(
+            &viewerLink,
+            &PeerLink::controlMessageReceived,
+            [&wire](const QJsonObject &message) {
+                wire.append(message);
+            });
+
+        const auto imageMessageCount =
+            [&wire](quint32 imageId) {
+                return std::count_if(
+                    wire.cbegin(),
+                    wire.cend(),
+                    [imageId](const QJsonObject &message) {
+                        return message.value(
+                                   QStringLiteral("t")).toString()
+                                == QStringLiteral("cursor_image")
+                            && static_cast<quint32>(
+                                   message.value(
+                                       QStringLiteral("id")).toDouble())
+                                == imageId;
+                    });
+            };
+
+        hostLink.addCandidates(viewerLink.localCandidates());
+        viewerLink.addCandidates(hostLink.localCandidates());
+        hostLink.beginHandshake();
+        viewerLink.beginHandshake();
+        QVERIFY(waitUntil(
+            [&]() {
+                return hostLink.established() && viewerLink.established()
+                    && hostLink.state() == QStringLiteral("direct")
+                    && viewerLink.state() == QStringLiteral("direct");
+            },
+            7000));
+
+        viewer.start();
+        QVERIFY(host.start());
+        const bool initialCustomCursorReady = waitUntil(
+            [&]() {
+                return host.running() && viewer.active()
+                    && imageMessageCount(firstImageId) >= 1
+                    && !viewer.remoteCursorImage(firstImageId).isNull()
+                    && std::any_of(
+                        cursors.cbegin(),
+                        cursors.cend(),
+                        [firstImageId](const CursorPacket &cursor) {
+                            return cursor.visible
+                                && cursor.shape == CursorShape::Bitmap
+                                && cursor.imageId == firstImageId;
+                        });
+            },
+            5000);
+        if (!initialCustomCursorReady) {
+            qWarning().noquote()
+                << "custom cursor readiness:"
+                << "host=" << host.running()
+                << "viewer=" << viewer.active()
+                << "wire=" << imageMessageCount(firstImageId)
+                << "images="
+                << !viewer.remoteCursorImage(firstImageId).isNull()
+                << "imageCache="
+                << viewer.remoteCursorImageCacheSize()
+                << "cursors=" << cursors.size();
+        }
+        QVERIFY(initialCustomCursorReady);
+        const int initialFirstImageMessages =
+            imageMessageCount(firstImageId);
+        const QImage received =
+            viewer.remoteCursorImage(firstImageId);
+        QCOMPARE(received.size(), firstImage.size());
+        QCOMPARE(received.pixelColor(0, 0).alpha(), 255);
+        QCOMPARE(
+            received.pixelColor(
+                firstImage.width() - 1,
+                firstImage.height() - 1)
+                .alpha(),
+            1);
+
+        pumpEvents(180);
+        QCOMPARE(
+            imageMessageCount(firstImageId),
+            initialFirstImageMessages);
+        sample.screenPosition = QPoint(1120, 180);
+        screen->setCursorSample(sample);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    cursors.cbegin(),
+                    cursors.cend(),
+                    [](const CursorPacket &cursor) {
+                        return cursor.visible
+                            && cursor.shape == CursorShape::Bitmap
+                            && cursor.x > 50000;
+                    });
+            },
+            3000));
+        QCOMPARE(
+            imageMessageCount(firstImageId),
+            initialFirstImageMessages);
+
+        sample.image = secondImage;
+        screen->setCursorSample(sample);
+        QVERIFY(waitUntil(
+            [&]() {
+                return imageMessageCount(secondImageId) >= 1
+                    && !viewer.remoteCursorImage(secondImageId).isNull()
+                    && std::any_of(
+                        cursors.cbegin(),
+                        cursors.cend(),
+                        [secondImageId](const CursorPacket &cursor) {
+                            return cursor.visible
+                                && cursor.shape == CursorShape::Bitmap
+                                && cursor.imageId == secondImageId;
+                        });
+            },
+            5000));
+        const int initialSecondImageMessages =
+            imageMessageCount(secondImageId);
+        pumpEvents(180);
+        QCOMPARE(
+            imageMessageCount(secondImageId),
+            initialSecondImageMessages);
+
+        QVERIFY(viewer.active());
+        viewer.stop();
+        QCOMPARE(viewer.remoteCursorImageCacheSize(), 0);
+        QCOMPARE(
+            imageMessageCount(secondImageId),
+            initialSecondImageMessages);
+        viewer.start();
+        QVERIFY(waitUntil(
+            [&]() {
+                return imageMessageCount(secondImageId)
+                        > initialSecondImageMessages
+                    && !viewer.remoteCursorImage(secondImageId).isNull();
+            },
+            5000));
 
         viewer.stop();
         host.stop();

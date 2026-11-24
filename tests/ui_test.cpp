@@ -604,14 +604,74 @@ void UiTest::viewerCanvasRendersAndClearsRemoteCursor()
     }
     QVERIFY2(changed > 0, "remote cursor should be composited on the frame");
 
-    canvas.clearRemoteCursor();
-    QVERIFY(!canvas.hasRemoteCursor());
-    QCOMPARE(canvas.cursor().shape(), Qt::ArrowCursor);
-
+    QImage bitmap(32, 32, QImage::Format_ARGB32);
+    bitmap.fill(Qt::transparent);
+    for (int y = 0; y < 24; ++y) {
+        for (int x = 0; x < 24; ++x) {
+            bitmap.setPixelColor(x, y, QColor(255, 20, 180, 255));
+        }
+    }
+    const quint32 bitmapId = 0xC0FFEE01U;
+    cursor.shape = pd::CursorShape::Bitmap;
+    cursor.imageId = bitmapId;
+    canvas.setRemoteCursorImage(bitmapId, bitmap);
+    QVERIFY(canvas.hasRemoteCursorImage());
+    QCOMPARE(canvas.remoteCursorImageId(), bitmapId);
     canvas.setRemoteCursor(cursor);
     QVERIFY(canvas.hasRemoteCursor());
+    QTest::qWait(20);
+    const QImage withBitmap = canvas.grab().toImage();
+    changed = 0;
+    for (int y = 0; y < withBitmap.height(); ++y) {
+        for (int x = 0; x < withBitmap.width(); ++x) {
+            if (withBitmap.pixel(x, y) != withCursor.pixel(x, y)) {
+                ++changed;
+            }
+        }
+    }
+    QVERIFY2(changed > 0, "bitmap cursor should replace the vector cursor");
+
+    cursor.visible = false;
+    canvas.setRemoteCursor(cursor);
+    QVERIFY(!canvas.hasRemoteCursor());
+    QVERIFY(canvas.hasRemoteCursorImage());
+    cursor.visible = true;
+
+    canvas.clearRemoteCursor();
+    QVERIFY(!canvas.hasRemoteCursor());
+    QVERIFY(!canvas.hasRemoteCursorImage());
+    cursor.imageId = bitmapId + 1;
+    canvas.setRemoteCursor(cursor);
+    QVERIFY(canvas.hasRemoteCursor());
+    QVERIFY(!canvas.hasRemoteCursorImage());
+    QTest::qWait(20);
+    const QImage fallback = canvas.grab().toImage();
+    canvas.setRemoteCursorImage(cursor.imageId, bitmap);
+    QVERIFY(canvas.hasRemoteCursorImage());
+    QTest::qWait(20);
+    const QImage lateBitmap = canvas.grab().toImage();
+    changed = 0;
+    for (int y = 0; y < lateBitmap.height(); ++y) {
+        for (int x = 0; x < lateBitmap.width(); ++x) {
+            if (lateBitmap.pixel(x, y) != fallback.pixel(x, y)) {
+                ++changed;
+            }
+        }
+    }
+    QVERIFY2(changed > 0, "late cursor image should update the canvas");
+
+    canvas.clearRemoteCursor();
+    QVERIFY(!canvas.hasRemoteCursor());
+    QVERIFY(!canvas.hasRemoteCursorImage());
+    QCOMPARE(canvas.cursor().shape(), Qt::ArrowCursor);
+
+    canvas.setRemoteCursorImage(cursor.imageId, bitmap);
+    canvas.setRemoteCursor(cursor);
+    QVERIFY(canvas.hasRemoteCursor());
+    QVERIFY(canvas.hasRemoteCursorImage());
     canvas.clearFrame();
     QVERIFY(!canvas.hasRemoteCursor());
+    QVERIFY(!canvas.hasRemoteCursorImage());
 }
 
 void UiTest::viewerCanvasPresentsFrameOffMainThread()
@@ -1190,6 +1250,11 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     cursor.shape = pd::CursorShape::Arrow;
     page.canvas()->setRemoteCursor(cursor);
     QVERIFY(page.canvas()->hasRemoteCursor());
+    QImage cursorImage(32, 32, QImage::Format_ARGB32);
+    cursorImage.fill(QColor(255, 80, 20, 255));
+    const quint32 cursorImageId = 0xC0FFEE02U;
+    page.canvas()->setRemoteCursorImage(cursorImageId, cursorImage);
+    QVERIFY(page.canvas()->hasRemoteCursorImage());
 
     page.showReconnecting();
     QTest::qWait(10);
@@ -1207,6 +1272,7 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QVERIFY(!page.canvas()->inputEnabled());
     QVERIFY(page.canvas()->pressedKeys().isEmpty());
     QVERIFY(!page.canvas()->hasRemoteCursor());
+    QVERIFY(!page.canvas()->hasRemoteCursorImage());
     QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
     QVERIFY(page.connectionOverlay()->isVisible());
     QVERIFY(page.overlayTitle()->text().contains(QStringLiteral("恢复")));
@@ -1233,11 +1299,14 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
 
     page.canvas()->setRemoteCursor(cursor);
     QVERIFY(page.canvas()->hasRemoteCursor());
+    page.canvas()->setRemoteCursorImage(cursorImageId, cursorImage);
+    QVERIFY(page.canvas()->hasRemoteCursorImage());
     page.showEnded(QStringLiteral("恢复超时"));
     QVERIFY(!page.sessionLive());
     QVERIFY(!page.canvas()->hasFrame());
     QVERIFY(page.canvas()->presentedFrame().isNull());
     QVERIFY(!page.canvas()->hasRemoteCursor());
+    QVERIFY(!page.canvas()->hasRemoteCursorImage());
     QVERIFY(page.backButton()->isVisible());
     QCOMPARE(page.fileQueueSize(), 0);
 }

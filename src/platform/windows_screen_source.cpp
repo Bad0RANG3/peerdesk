@@ -1,16 +1,25 @@
 #include "platform/windows_screen_source.h"
 
+#include "session/cursor_codec.h"
+
 #include <Windows.h>
 
+#include <QBitArray>
+#include <QHash>
 #include <QImage>
+#include <QList>
 #include <QString>
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
+#include <utility>
 
 namespace pd {
 
 namespace {
+
+constexpr int kCursorImageCacheLimit = 16;
 
 QString win32Error(DWORD code)
 {
@@ -61,7 +70,7 @@ BOOL CALLBACK collectMonitor(
     return TRUE;
 }
 
-CursorShape standardCursorShape(HCURSOR cursor)
+std::optional<CursorShape> standardCursorShape(HCURSOR cursor)
 {
     struct ShapeMap {
         LPCWSTR id;
@@ -86,7 +95,224 @@ CursorShape standardCursorShape(HCURSOR cursor)
             return entry.shape;
         }
     }
-    return CursorShape::Arrow;
+    return std::nullopt;
+}
+
+struct IconInfoData {
+    ICONINFO value{};
+
+    ~IconInfoData()
+    {
+        if (value.hbmMask != nullptr) {
+            DeleteObject(value.hbmMask);
+        }
+        if (value.hbmColor != nullptr) {
+            DeleteObject(value.hbmColor);
+        }
+    }
+};
+
+bool bitmapSize(HBITMAP bitmap, QSize *size)
+{
+    if (bitmap == nullptr || size == nullptr) {
+        return false;
+    }
+    BITMAP description{};
+    if (GetObjectW(bitmap, sizeof(description), &description)
+        != sizeof(description)) {
+        return false;
+    }
+    if (description.bmWidth <= 0 || description.bmHeight <= 0) {
+        return false;
+    }
+    *size = QSize(description.bmWidth, description.bmHeight);
+    return true;
+}
+
+QImage colorBitmapImage(HBITMAP bitmap, const QSize &size)
+{
+    if (bitmap == nullptr || size.isEmpty()) {
+        return {};
+    }
+    QImage image(size, QImage::Format_ARGB32);
+    if (image.isNull()) {
+        return {};
+    }
+    image.fill(Qt::transparent);
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size.width();
+    info.bmiHeader.biHeight = -size.height();
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    info.bmiHeader.biSizeImage =
+        static_cast<DWORD>(size.width() * size.height() * 4);
+
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (dc == nullptr) {
+        return {};
+    }
+    const int rows = GetDIBits(
+        dc,
+        bitmap,
+        0,
+        static_cast<UINT>(size.height()),
+        image.bits(),
+        &info,
+        DIB_RGB_COLORS);
+    DeleteDC(dc);
+    return rows == size.height() ? image : QImage{};
+}
+
+QBitArray monochromeBitmapBits(
+    HBITMAP bitmap,
+    int width,
+    int rows)
+{
+    if (bitmap == nullptr || width <= 0 || rows <= 0) {
+        return {};
+    }
+    const int stride = ((width + 31) / 32) * 4;
+    QByteArray bits(stride * rows, '\0');
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -rows;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 1;
+    info.bmiHeader.biCompression = BI_RGB;
+    info.bmiHeader.biSizeImage =
+        static_cast<DWORD>(stride * rows);
+
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (dc == nullptr) {
+        return {};
+    }
+    const int copied = GetDIBits(
+        dc,
+        bitmap,
+        0,
+        static_cast<UINT>(rows),
+        bits.data(),
+        &info,
+        DIB_RGB_COLORS);
+    DeleteDC(dc);
+    if (copied != rows) {
+        return {};
+    }
+
+    QBitArray result(width * rows);
+    for (int y = 0; y < rows; ++y) {
+        const uchar *row = reinterpret_cast<const uchar *>(
+            bits.constData() + y * stride);
+        for (int x = 0; x < width; ++x) {
+            result.setBit(
+                y * width + x,
+                (row[x / 8] & (0x80U >> (x % 8))) != 0);
+        }
+    }
+    return result;
+}
+
+QImage cursorImageFromIcon(const ICONINFO &icon)
+{
+    QSize colorSize;
+    QSize maskSize;
+    const bool hasColor =
+        bitmapSize(icon.hbmColor, &colorSize);
+    const bool hasMask = bitmapSize(icon.hbmMask, &maskSize);
+    if (!hasColor && !hasMask) {
+        return {};
+    }
+
+    QSize size = hasColor ? colorSize : maskSize;
+    if (!hasColor) {
+        size.setHeight(size.height() / 2);
+    }
+    if (size.width() <= 0 || size.height() <= 0
+        || size.width() > kCursorImageMaxDimension
+        || size.height() > kCursorImageMaxDimension) {
+        return {};
+    }
+
+    QBitArray maskBits;
+    if (hasMask) {
+        maskBits = monochromeBitmapBits(
+            icon.hbmMask,
+            size.width(),
+            size.height());
+    }
+
+    QImage image;
+    if (hasColor && colorSize == size) {
+        image = colorBitmapImage(icon.hbmColor, size);
+        if (image.isNull()) {
+            return {};
+        }
+
+        bool hasAlpha = false;
+        for (int y = 0; y < size.height() && !hasAlpha; ++y) {
+            const QRgb *row = reinterpret_cast<const QRgb *>(
+                image.constScanLine(y));
+            for (int x = 0; x < size.width(); ++x) {
+                if (qAlpha(row[x]) != 0) {
+                    hasAlpha = true;
+                    break;
+                }
+            }
+        }
+        if (hasAlpha) {
+            return image;
+        }
+        if (maskBits.isEmpty()) {
+            return {};
+        }
+        for (int y = 0; y < size.height(); ++y) {
+            QRgb *row = reinterpret_cast<QRgb *>(image.scanLine(y));
+            for (int x = 0; x < size.width(); ++x) {
+                if (!maskBits.testBit(y * size.width() + x)) {
+                    row[x] |= 0xFF000000U;
+                }
+            }
+        }
+        return image;
+    }
+
+    if (maskBits.isEmpty() || maskSize.width() != size.width()
+        || maskSize.height() < size.height() * 2) {
+        return {};
+    }
+    const QBitArray xorBits = monochromeBitmapBits(
+        icon.hbmMask,
+        size.width(),
+        size.height() * 2);
+    if (xorBits.isEmpty()) {
+        return {};
+    }
+
+    image = QImage(size, QImage::Format_ARGB32);
+    if (image.isNull()) {
+        return {};
+    }
+    image.fill(Qt::transparent);
+    for (int y = 0; y < size.height(); ++y) {
+        QRgb *row = reinterpret_cast<QRgb *>(image.scanLine(y));
+        for (int x = 0; x < size.width(); ++x) {
+            const int index = y * size.width() + x;
+            const bool andBit = maskBits.testBit(index);
+            const bool xorBit = xorBits.testBit(
+                (size.height() + y) * size.width() + x);
+            if (andBit && !xorBit) {
+                continue;
+            }
+            row[x] = xorBit ? qRgba(255, 255, 255, 255)
+                            : qRgba(0, 0, 0, 255);
+        }
+    }
+    return image;
 }
 
 } // namespace
@@ -100,6 +326,8 @@ struct WindowsScreenSource::Impl {
     int width = 0;
     int height = 0;
     mutable QList<MonitorInfo> monitors;
+    QHash<quintptr, QImage> cursorImages;
+    QList<quintptr> cursorImageOrder;
 
     ~Impl() { close(); }
 
@@ -124,6 +352,8 @@ struct WindowsScreenSource::Impl {
             ReleaseDC(nullptr, screenDc);
             screenDc = nullptr;
         }
+        cursorImages.clear();
+        cursorImageOrder.clear();
     }
 
     bool ensureDevice(QString *error)
@@ -358,20 +588,46 @@ CursorSample WindowsScreenSource::cursorSample() const
     sample.screenPosition = QPoint(
         info.ptScreenPos.x,
         info.ptScreenPos.y);
-    sample.shape = standardCursorShape(info.hCursor);
 
-    ICONINFO icon{};
-    if (GetIconInfo(info.hCursor, &icon)) {
+    IconInfoData icon;
+    const bool hasIcon = GetIconInfo(info.hCursor, &icon.value);
+    if (hasIcon) {
         sample.hotspot = QPoint(
-            static_cast<int>(icon.xHotspot),
-            static_cast<int>(icon.yHotspot));
-        if (icon.hbmMask != nullptr) {
-            DeleteObject(icon.hbmMask);
-        }
-        if (icon.hbmColor != nullptr) {
-            DeleteObject(icon.hbmColor);
-        }
+            static_cast<int>(icon.value.xHotspot),
+            static_cast<int>(icon.value.yHotspot));
     }
+
+    const std::optional<CursorShape> standard =
+        standardCursorShape(info.hCursor);
+    if (standard.has_value()) {
+        sample.shape = *standard;
+        return sample;
+    }
+
+    sample.shape = CursorShape::Arrow;
+    if (!hasIcon) {
+        return sample;
+    }
+
+    const quintptr key =
+        reinterpret_cast<quintptr>(info.hCursor);
+    QImage image = impl_->cursorImages.value(key);
+    if (!image.isNull()) {
+        impl_->cursorImageOrder.removeOne(key);
+    } else {
+        image = cursorImageFromIcon(icon.value);
+        if (image.isNull()) {
+            return sample;
+        }
+        if (impl_->cursorImageOrder.size() >= kCursorImageCacheLimit) {
+            const quintptr oldest = impl_->cursorImageOrder.takeFirst();
+            impl_->cursorImages.remove(oldest);
+        }
+        impl_->cursorImages.insert(key, image);
+    }
+    impl_->cursorImageOrder.append(key);
+    sample.shape = CursorShape::Bitmap;
+    sample.image = std::move(image);
     return sample;
 }
 

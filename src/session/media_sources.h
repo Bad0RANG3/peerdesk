@@ -30,6 +30,7 @@ struct CursorSample {
     QPoint screenPosition;
     QPoint hotspot;
     CursorShape shape = CursorShape::Arrow;
+    QImage image;
 };
 
 class IScreenSource {

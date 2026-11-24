@@ -135,6 +135,11 @@ void ViewerController::connectComponents()
         &ViewerController::remoteCursorChanged);
     connect(
         session_,
+        &ViewerSession::remoteCursorImageChanged,
+        this,
+        &ViewerController::remoteCursorImageChanged);
+    connect(
+        session_,
         &ViewerSession::audioReceived,
         this,
         &ViewerController::onAudio);

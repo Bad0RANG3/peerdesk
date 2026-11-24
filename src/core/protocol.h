@@ -134,6 +134,7 @@ enum class CursorShape : quint8 {
     SizeWE = 8,
     SizeNS = 9,
     NotAllowed = 10,
+    Bitmap = 11,
 };
 
 struct CursorPacket {
@@ -144,9 +145,11 @@ struct CursorPacket {
     quint16 hotspotY = 0;
     bool visible = false;
     CursorShape shape = CursorShape::Arrow;
+    quint32 imageId = 0;
 };
 
-inline constexpr int kCursorPayloadLen = 14;
+inline constexpr int kLegacyCursorPayloadLen = 14;
+inline constexpr int kCursorPayloadLen = 18;
 
 [[nodiscard]] QByteArray packCursor(const CursorPacket &packet);
 [[nodiscard]] std::optional<CursorPacket> unpackCursor(const QByteArray &payload);

@@ -119,6 +119,8 @@ add_library(peerdesk_session STATIC
     src/session/media_sources.h
     src/session/clipboard_codec.cpp
     src/session/clipboard_codec.h
+    src/session/cursor_codec.cpp
+    src/session/cursor_codec.h
     src/session/audio_codec.cpp
     src/session/audio_codec.h
     src/session/file_transfer.cpp

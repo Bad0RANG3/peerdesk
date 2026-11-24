@@ -158,7 +158,7 @@ private slots:
     void cursorRoundTrip()
     {
         for (quint8 shape = 0;
-             shape <= static_cast<quint8>(CursorShape::NotAllowed);
+             shape <= static_cast<quint8>(CursorShape::Bitmap);
              ++shape) {
             CursorPacket packet;
             packet.sequence = 0x89ABCDEFU;
@@ -168,6 +168,7 @@ private slots:
             packet.hotspotY = 4096;
             packet.visible = (shape % 2) == 0;
             packet.shape = static_cast<CursorShape>(shape);
+            packet.imageId = 0xF1234567U;
 
             const QByteArray payload = packCursor(packet);
             QCOMPARE(payload.size(), kCursorPayloadLen);
@@ -182,13 +183,42 @@ private slots:
             QCOMPARE(
                 static_cast<int>(decoded->shape),
                 static_cast<int>(packet.shape));
+            QCOMPARE(decoded->imageId, packet.imageId);
         }
+    }
+
+    void cursorAcceptsLegacyPayloads()
+    {
+        CursorPacket packet;
+        packet.sequence = 77;
+        packet.x = 1234;
+        packet.y = 5678;
+        packet.hotspotX = 90;
+        packet.hotspotY = 123;
+        packet.visible = true;
+        packet.shape = CursorShape::Hand;
+        packet.imageId = 0xAABBCCDDU;
+
+        const QByteArray legacy =
+            packCursor(packet).left(kLegacyCursorPayloadLen);
+        QCOMPARE(legacy.size(), kLegacyCursorPayloadLen);
+        const auto decoded = unpackCursor(legacy);
+        QVERIFY(decoded.has_value());
+        QCOMPARE(decoded->sequence, packet.sequence);
+        QCOMPARE(decoded->shape, packet.shape);
+        QCOMPARE(decoded->imageId, 0U);
     }
 
     void cursorRejectsMalformedPayloads()
     {
         const QByteArray valid = packCursor(CursorPacket{});
-        QVERIFY(!unpackCursor(valid.left(kCursorPayloadLen - 1)).has_value());
+        QVERIFY(!unpackCursor({}).has_value());
+        QVERIFY(!unpackCursor(valid.left(kLegacyCursorPayloadLen - 1))
+                     .has_value());
+        QVERIFY(!unpackCursor(valid.left(kLegacyCursorPayloadLen + 1))
+                     .has_value());
+        QVERIFY(!unpackCursor(valid.left(kCursorPayloadLen - 1))
+                     .has_value());
         QVERIFY(!unpackCursor(valid + QByteArray(1, '\0')).has_value());
 
         QByteArray reservedFlags = valid;
@@ -197,7 +227,7 @@ private slots:
 
         QByteArray invalidShape = valid;
         invalidShape[13] = static_cast<char>(
-            static_cast<quint8>(CursorShape::NotAllowed) + 1);
+            static_cast<quint8>(CursorShape::Bitmap) + 1);
         QVERIFY(!unpackCursor(invalidShape).has_value());
     }
 

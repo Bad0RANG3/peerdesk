@@ -3,6 +3,7 @@
 #include "platform/windows_input.h"
 #include "platform/windows_screen_source.h"
 #include "platform/windows_startup_registration.h"
+#include "session/cursor_codec.h"
 
 #include <QDir>
 #include <QImage>
@@ -345,7 +346,19 @@ private slots:
         if (sample.visible) {
             QVERIFY(
                 static_cast<quint8>(sample.shape)
-                <= static_cast<quint8>(CursorShape::NotAllowed));
+                <= static_cast<quint8>(CursorShape::Bitmap));
+            if (sample.shape == CursorShape::Bitmap) {
+                QVERIFY(!sample.image.isNull());
+                QVERIFY(sample.image.width() > 0);
+                QVERIFY(sample.image.height() > 0);
+                QVERIFY(
+                    sample.image.width()
+                    <= kCursorImageMaxDimension);
+                QVERIFY(
+                    sample.image.height()
+                    <= kCursorImageMaxDimension);
+                QVERIFY(cursorImageId(sample.image) != 0);
+            }
             QVERIFY(source.cursorSample().screenPosition.x() >= -32768);
         }
     }
