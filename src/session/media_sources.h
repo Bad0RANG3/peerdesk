@@ -69,6 +69,12 @@ public:
 
     [[nodiscard]] virtual QString text() const = 0;
     virtual bool setText(const QString &text) = 0;
+    [[nodiscard]] virtual QImage image() const { return {}; }
+    virtual bool setImage(const QImage &image)
+    {
+        (void)image;
+        return false;
+    }
 };
 
 class SyntheticScreenSource final : public IScreenSource {

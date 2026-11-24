@@ -1,5 +1,6 @@
 #include "session/viewer_session.h"
 
+#include "session/clipboard_codec.h"
 #include "core/protocol.h"
 #include "transport/peer_link.h"
 
@@ -400,6 +401,28 @@ bool ViewerSession::sendClipboard(const QString &text)
     });
 }
 
+bool ViewerSession::sendClipboardImage(const QImage &image)
+{
+    QString error;
+    const QByteArray png = encodeClipboardImage(image, &error);
+    if (png.isEmpty()) {
+        emit logMessage(
+            QStringLiteral("剪贴板图片编码失败：%1")
+                .arg(error.isEmpty()
+                         ? QStringLiteral("未知错误")
+                         : error));
+        return false;
+    }
+    return sendControl(QJsonObject{
+        {QStringLiteral("t"), QStringLiteral("clip")},
+        {QStringLiteral("kind"), QStringLiteral("image")},
+        {QStringLiteral("mime"), QStringLiteral("image/png")},
+        {QStringLiteral("w"), image.width()},
+        {QStringLiteral("h"), image.height()},
+        {QStringLiteral("d"), QString::fromLatin1(png.toBase64())},
+    });
+}
+
 void ViewerSession::sendCtrlAltDelete()
 {
     sendControlNoReply(QJsonObject{
@@ -622,6 +645,32 @@ void ViewerSession::dispatch(const QJsonObject &message)
         emit audioStateChanged(audioState_);
         emit eventReceived(message);
         return;
+    }
+    if (kind == QStringLiteral("clip")) {
+        const QString clipKind = jsonString(message, "kind");
+        if (clipKind == QStringLiteral("image")) {
+            const ClipboardImageDecodeResult decoded =
+                decodeClipboardImage(jsonString(message, "d"));
+            if (!decoded.ok()) {
+                emit logMessage(
+                    QStringLiteral("忽略无效的剪贴板图片：%1")
+                        .arg(decoded.error));
+                return;
+            }
+            if (!clipboardImageMatchesDimensions(
+                    decoded.image,
+                    message.value(QStringLiteral("w")).toInt(-1),
+                    message.value(QStringLiteral("h")).toInt(-1))) {
+                emit logMessage(
+                    QStringLiteral("忽略尺寸不匹配的剪贴板图片"));
+                return;
+            }
+            emit clipboardImageReceived(decoded.image);
+            return;
+        }
+        if (!clipKind.isEmpty()) {
+            return;
+        }
     }
     if (kind == QStringLiteral("file_begin")) {
         fileTransfer_.beginReceive(message);

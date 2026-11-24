@@ -88,6 +88,7 @@ signals:
     void keyRequested(const QString &code, bool down);
     void textRequested(const QString &text);
     void clipboardPasteRequested(const QString &text);
+    void clipboardImagePasteRequested(const QImage &image);
 
 protected:
     void paintEvent(QPaintEvent *event) override;

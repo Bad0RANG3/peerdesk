@@ -4,6 +4,7 @@
 #endif
 #include "session/adaptive_video_rate_controller.h"
 #include "session/audio_codec.h"
+#include "session/clipboard_codec.h"
 #include "session/file_transfer.h"
 #include "session/file_transfer_pipeline.h"
 #include "session/host_input_pipeline.h"
@@ -360,16 +361,28 @@ private:
 class FakeClipboard final : public IClipboard {
 public:
     [[nodiscard]] QString text() const override { return value; }
+    [[nodiscard]] QImage image() const override { return imageValue; }
 
     bool setText(const QString &text) override
     {
         value = text;
+        imageValue = {};
         ++writes;
         return true;
     }
 
+    bool setImage(const QImage &image) override
+    {
+        imageValue = image;
+        value.clear();
+        ++imageWrites;
+        return true;
+    }
+
     QString value;
+    QImage imageValue;
     int writes = 0;
+    int imageWrites = 0;
 };
 
 class ThreadAwareScreenSource final : public IScreenSource {
@@ -532,6 +545,95 @@ private slots:
         limitedPacer.setQuality(90);
         QCOMPARE(limitedPacer.quality(), 60);
         QCOMPARE(limitedPacer.qualityLimit(), 60);
+    }
+
+    void clipboardImageCodecValidatesAndRoundTrips()
+    {
+        QImage image(96, 64, QImage::Format_ARGB32);
+        image.fill(QColor(QStringLiteral("#203a54")));
+        for (int y = 8; y < 40; ++y) {
+            for (int x = 12; x < 72; ++x) {
+                image.setPixelColor(
+                    x,
+                    y,
+                    QColor(220, 96 + y / 2, 48, 180));
+            }
+        }
+
+        QString error = QStringLiteral("stale");
+        const QByteArray png = encodeClipboardImage(image, &error);
+        QVERIFY2(png.isEmpty() == false, qPrintable(error));
+        QVERIFY(error.isEmpty());
+        QVERIFY(png.startsWith(QByteArray::fromHex("89504e470d0a1a0a")));
+
+        const ClipboardImageDecodeResult decoded =
+            decodeClipboardImage(QString::fromLatin1(png.toBase64()));
+        QVERIFY2(decoded.ok(), qPrintable(decoded.error));
+        QCOMPARE(decoded.image.size(), image.size());
+        QCOMPARE(
+            decoded.image.convertToFormat(QImage::Format_ARGB32),
+            image);
+        QCOMPARE(
+            clipboardImageFingerprint(decoded.image),
+            clipboardImageFingerprint(image));
+        QVERIFY(clipboardImageMatchesDimensions(
+            decoded.image,
+            image.width(),
+            image.height()));
+        QVERIFY(!clipboardImageMatchesDimensions(
+            decoded.image,
+            image.width() + 1,
+            image.height()));
+        QVERIFY(!clipboardImageMatchesDimensions(
+            decoded.image,
+            image.width(),
+            -1));
+
+        QImage changed = image.copy();
+        changed.setPixelColor(0, 0, QColor(QStringLiteral("#ffcc00")));
+        QVERIFY(
+            clipboardImageFingerprint(changed)
+            != clipboardImageFingerprint(image));
+
+        QVERIFY(!decodeClipboardImage(
+                     QStringLiteral("not base64!")).ok());
+        QVERIFY(!decodeClipboardImage(
+                     QString::fromLatin1(
+                         QByteArrayLiteral("hello").toBase64())).ok());
+        constexpr qsizetype kPngDecodedLimit = 4 * 1024 * 1024;
+        const qsizetype oversizedLength =
+            ((kPngDecodedLimit + 2) / 3) * 4 + 4;
+        const QByteArray oversizedBase64(oversizedLength, 'A');
+        QVERIFY(!decodeClipboardImage(
+                     QString::fromLatin1(oversizedBase64)).ok());
+
+        QByteArray tampered = png;
+        QVERIFY(tampered.size() >= 24);
+        const quint32 oversizedWidth = 9000;
+        tampered[16] = static_cast<char>((oversizedWidth >> 24) & 0xFF);
+        tampered[17] = static_cast<char>((oversizedWidth >> 16) & 0xFF);
+        tampered[18] = static_cast<char>((oversizedWidth >> 8) & 0xFF);
+        tampered[19] = static_cast<char>(oversizedWidth & 0xFF);
+        QVERIFY(!decodeClipboardImage(
+                     QString::fromLatin1(tampered.toBase64())).ok());
+
+        const quint32 oversizedPixels = 5000;
+        tampered[16] = static_cast<char>((oversizedPixels >> 24) & 0xFF);
+        tampered[17] = static_cast<char>((oversizedPixels >> 16) & 0xFF);
+        tampered[18] = static_cast<char>((oversizedPixels >> 8) & 0xFF);
+        tampered[19] = static_cast<char>(oversizedPixels & 0xFF);
+        tampered[20] = static_cast<char>((oversizedPixels >> 24) & 0xFF);
+        tampered[21] = static_cast<char>((oversizedPixels >> 16) & 0xFF);
+        tampered[22] = static_cast<char>((oversizedPixels >> 8) & 0xFF);
+        tampered[23] = static_cast<char>(oversizedPixels & 0xFF);
+        QVERIFY(!decodeClipboardImage(
+                     QString::fromLatin1(tampered.toBase64())).ok());
+
+        QImage tooWide(9000, 1, QImage::Format_RGB32);
+        tooWide.fill(Qt::black);
+        const QByteArray rejected = encodeClipboardImage(tooWide, &error);
+        QVERIFY(rejected.isEmpty());
+        QVERIFY(!error.isEmpty());
     }
 
     void adaptiveVideoRateUsesFeedbackAndRecovers()
@@ -2536,6 +2638,7 @@ private slots:
         QList<bool> keyframes;
         QList<QByteArray> audioFrames;
         QList<QJsonObject> viewerAudioStates;
+        QList<QImage> viewerClipboardImages;
         QList<QString> hostFiles;
         QList<QString> viewerFiles;
         QList<QJsonObject> viewerStats;
@@ -2602,6 +2705,12 @@ private slots:
             &ViewerSession::audioStateChanged,
             [&viewerAudioStates](const QJsonObject &state) {
                 viewerAudioStates.append(state);
+            });
+        connect(
+            &viewer,
+            &ViewerSession::clipboardImageReceived,
+            [&viewerClipboardImages](const QImage &image) {
+                viewerClipboardImages.append(image);
             });
         connect(
             &host,
@@ -3151,6 +3260,138 @@ private slots:
             },
             3000));
         QVERIFY(clipboard->writes >= clipboardWrites);
+
+        QImage viewerImage(72, 48, QImage::Format_RGB32);
+        viewerImage.fill(QColor(QStringLiteral("#b34a20")));
+        viewerImage.setPixelColor(
+            4,
+            4,
+            QColor(QStringLiteral("#20c080")));
+        QVERIFY(viewer.sendClipboardImage(viewerImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return clipboard->imageValue.size()
+                    == viewerImage.size();
+            },
+            4000));
+        QCOMPARE(
+            clipboard->imageValue.pixelColor(4, 4),
+            viewerImage.pixelColor(4, 4));
+        QVERIFY(clipboard->value.isEmpty());
+        QVERIFY(clipboard->imageWrites > 0);
+
+        const int hostPollImageEvents =
+            static_cast<int>(viewerClipboardImages.size());
+        pumpEvents(900);
+        QCOMPARE(
+            static_cast<int>(viewerClipboardImages.size()),
+            hostPollImageEvents);
+
+        QImage hostImage(80, 50, QImage::Format_RGB32);
+        hostImage.fill(QColor(QStringLiteral("#2c5f8a")));
+        hostImage.setPixelColor(
+            10,
+            12,
+            QColor(QStringLiteral("#f0d040")));
+        QVERIFY(clipboard->setImage(hostImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerClipboardImages.cbegin(),
+                    viewerClipboardImages.cend(),
+                    [&hostImage](const QImage &received) {
+                        return received.size() == hostImage.size()
+                            && received.pixelColor(10, 12)
+                                == hostImage.pixelColor(10, 12);
+                    });
+            },
+            4000));
+        const int imageEventsAfterHostUpdate =
+            static_cast<int>(viewerClipboardImages.size());
+        pumpEvents(900);
+        QCOMPARE(
+            static_cast<int>(viewerClipboardImages.size()),
+            imageEventsAfterHostUpdate);
+
+        QVERIFY(viewer.sendControl(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("clip")},
+            {QStringLiteral("kind"), QStringLiteral("image")},
+            {QStringLiteral("mime"), QStringLiteral("image/png")},
+            {QStringLiteral("w"), 80},
+            {QStringLiteral("h"), 50},
+            {QStringLiteral("d"), QStringLiteral("AAAA")},
+        }));
+        pumpEvents(500);
+        QCOMPARE(clipboard->imageValue.size(), hostImage.size());
+        QCOMPARE(
+            clipboard->imageValue.pixelColor(10, 12),
+            hostImage.pixelColor(10, 12));
+
+        QString imageError;
+        const QByteArray hostPng =
+            encodeClipboardImage(hostImage, &imageError);
+        QVERIFY2(hostPng.isEmpty() == false, qPrintable(imageError));
+        QVERIFY(viewer.sendControl(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("clip")},
+            {QStringLiteral("kind"), QStringLiteral("image")},
+            {QStringLiteral("mime"), QStringLiteral("image/png")},
+            {QStringLiteral("w"), hostImage.width() + 1},
+            {QStringLiteral("h"), hostImage.height()},
+            {QStringLiteral("d"),
+             QString::fromLatin1(hostPng.toBase64())},
+        }));
+        pumpEvents(500);
+        QCOMPARE(clipboard->imageValue.size(), hostImage.size());
+        QCOMPARE(
+            clipboard->imageValue.pixelColor(10, 12),
+            hostImage.pixelColor(10, 12));
+
+        const int imageEventsBeforeMismatch =
+            static_cast<int>(viewerClipboardImages.size());
+        hostLink.sendControl(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("clip")},
+            {QStringLiteral("kind"), QStringLiteral("image")},
+            {QStringLiteral("mime"), QStringLiteral("image/png")},
+            {QStringLiteral("w"), hostImage.width() + 1},
+            {QStringLiteral("h"), hostImage.height()},
+            {QStringLiteral("d"),
+             QString::fromLatin1(hostPng.toBase64())},
+        });
+        pumpEvents(500);
+        QCOMPARE(
+            static_cast<int>(viewerClipboardImages.size()),
+            imageEventsBeforeMismatch);
+
+        QImage largeImage(1000, 900, QImage::Format_RGB32);
+        quint32 randomState = 0x51A7C3E9u;
+        for (int y = 0; y < largeImage.height(); ++y) {
+            auto *line =
+                reinterpret_cast<QRgb *>(largeImage.scanLine(y));
+            for (int x = 0; x < largeImage.width(); ++x) {
+                randomState =
+                    randomState * 1664525u + 1013904223u;
+                line[x] = qRgb(
+                    static_cast<int>(randomState & 0xFF),
+                    static_cast<int>((randomState >> 8) & 0xFF),
+                    static_cast<int>((randomState >> 16) & 0xFF));
+            }
+        }
+        const QByteArray largePng =
+            encodeClipboardImage(largeImage, &imageError);
+        QVERIFY2(largePng.isEmpty() == false, qPrintable(imageError));
+        QVERIFY(largePng.size() > 2 * 1024 * 1024);
+        QVERIFY(largePng.size() <= kClipboardPngMaxBytes);
+        QVERIFY(viewer.sendClipboardImage(largeImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return clipboard->imageValue.size()
+                        == largeImage.size()
+                    && clipboard->imageValue.pixelColor(137, 211)
+                        == largeImage.pixelColor(137, 211)
+                    && clipboard->imageValue.pixelColor(902, 733)
+                        == largeImage.pixelColor(902, 733);
+            },
+            15000));
 
         const QByteArray hostPayload = makePayload(150000, 0x12345678);
         const QString hostSource =

@@ -5,7 +5,9 @@
 #include "platform/windows_startup_registration.h"
 
 #include <QDir>
+#include <QImage>
 #include <QRandomGenerator>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QTest>
 #include <QUuid>
@@ -279,6 +281,40 @@ private slots:
         QVERIFY(clipboard.setText(marker));
         QCOMPARE(clipboard.text(), marker);
         QVERIFY(clipboard.setText(original));
+    }
+
+    void clipboardImageRoundTrip()
+    {
+        WindowsClipboard clipboard;
+        const QImage originalImage = clipboard.image();
+        const QString originalText = clipboard.text();
+        const auto restoreClipboard = qScopeGuard([&]() {
+            if (!originalImage.isNull()) {
+                clipboard.setImage(originalImage);
+            } else {
+                clipboard.setText(originalText);
+            }
+        });
+
+        QImage image(83, 47, QImage::Format_ARGB32);
+        image.fill(QColor(QStringLiteral("#18324f")));
+        for (int y = 5; y < 32; ++y) {
+            for (int x = 7; x < 61; ++x) {
+                image.setPixelColor(
+                    x,
+                    y,
+                    QColor(40 + x, 90 + y, 150, 255));
+            }
+        }
+
+        QVERIFY(clipboard.setImage(image));
+        const QImage stored = clipboard.image();
+        QVERIFY(!stored.isNull());
+        QCOMPARE(stored.size(), image.size());
+        QCOMPARE(
+            stored.convertToFormat(QImage::Format_RGB32),
+            image.convertToFormat(QImage::Format_RGB32));
+        QVERIFY(clipboard.text().isEmpty());
     }
 
     void screenSourceCapturesScaledFrame()

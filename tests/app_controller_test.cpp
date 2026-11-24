@@ -201,16 +201,28 @@ private:
 class FakeClipboard final : public IClipboard {
 public:
     [[nodiscard]] QString text() const override { return value; }
+    [[nodiscard]] QImage image() const override { return imageValue; }
 
     bool setText(const QString &text) override
     {
         value = text;
+        imageValue = {};
         ++writes;
         return true;
     }
 
+    bool setImage(const QImage &image) override
+    {
+        imageValue = image;
+        value.clear();
+        ++imageWrites;
+        return true;
+    }
+
     QString value;
+    QImage imageValue;
     int writes = 0;
+    int imageWrites = 0;
 };
 
 class FakeAudioPlayback final : public IAudioPlayback {
@@ -333,6 +345,7 @@ private slots:
         QList<QJsonObject> viewerEvents;
         QList<QJsonObject> viewerStats;
         QList<QJsonObject> hostEvents;
+        QList<QImage> viewerClipboardImages;
         QList<QString> viewerErrors;
         QList<QString> hostErrors;
         auto hostTrace = std::make_shared<QStringList>();
@@ -348,6 +361,12 @@ private slots:
             &ViewerController::eventReceived,
             [&viewerEvents](const QJsonObject &event) {
                 viewerEvents.append(event);
+            });
+        connect(
+            &viewer,
+            &ViewerController::clipboardImageReceived,
+            [&viewerClipboardImages](const QImage &image) {
+                viewerClipboardImages.append(image);
             });
         connect(
             &viewer,
@@ -646,6 +665,42 @@ private slots:
                     [](const QJsonObject &event) {
                         return event.value(QStringLiteral("s")).toString()
                             == QStringLiteral("host clipboard back");
+                    });
+            },
+            4000));
+
+        QImage viewerImage(64, 40, QImage::Format_RGB32);
+        viewerImage.fill(QColor(QStringLiteral("#287a64")));
+        viewerImage.setPixelColor(
+            6,
+            7,
+            QColor(QStringLiteral("#f4c542")));
+        QVERIFY(viewer.sendClipboardImage(viewerImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return clipboard->imageValue.size() == viewerImage.size();
+            },
+            4000));
+        QCOMPARE(
+            clipboard->imageValue.pixelColor(6, 7),
+            viewerImage.pixelColor(6, 7));
+
+        QImage hostImage(88, 52, QImage::Format_RGB32);
+        hostImage.fill(QColor(QStringLiteral("#533a72")));
+        hostImage.setPixelColor(
+            11,
+            13,
+            QColor(QStringLiteral("#e86a33")));
+        QVERIFY(clipboard->setImage(hostImage));
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerClipboardImages.cbegin(),
+                    viewerClipboardImages.cend(),
+                    [&hostImage](const QImage &received) {
+                        return received.size() == hostImage.size()
+                            && received.pixelColor(11, 13)
+                                == hostImage.pixelColor(11, 13);
                     });
             },
             4000));

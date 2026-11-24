@@ -140,6 +140,11 @@ void ViewerController::connectComponents()
         &ViewerController::eventReceived);
     connect(
         session_,
+        &ViewerSession::clipboardImageReceived,
+        this,
+        &ViewerController::clipboardImageReceived);
+    connect(
+        session_,
         &ViewerSession::infoChanged,
         this,
         [this](const QJsonObject &info) {
@@ -864,6 +869,11 @@ void ViewerController::sendText(const QString &text)
 bool ViewerController::sendClipboard(const QString &text)
 {
     return active_ && session_->sendClipboard(text);
+}
+
+bool ViewerController::sendClipboardImage(const QImage &image)
+{
+    return active_ && session_->sendClipboardImage(image);
 }
 
 void ViewerController::sendCtrlAltDelete()

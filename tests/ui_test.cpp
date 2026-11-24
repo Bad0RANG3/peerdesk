@@ -14,6 +14,7 @@
 #include "ui/viewer_page.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
@@ -25,6 +26,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScreen>
 #include <QScopeGuard>
@@ -114,6 +116,7 @@ private slots:
     void viewerEndedClearsFrameAndShowsBack();
     void viewerToolbarFadesAndRevealsOnActivity();
     void viewerReconnectKeepsFrameAndIsolatesInput();
+    void viewerClipboardImagePriorityAndSync();
     void viewerPageGameMouseLifecycle();
     void outgoingFileQueueRetriesAndContinues();
     void outgoingFileQueuePausesAndResumes();
@@ -990,6 +993,125 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QVERIFY(page.canvas()->presentedFrame().isNull());
     QVERIFY(page.backButton()->isVisible());
     QCOMPARE(page.fileQueueSize(), 0);
+}
+
+void UiTest::viewerClipboardImagePriorityAndSync()
+{
+    QClipboard *clipboard = QApplication::clipboard();
+    const QImage originalImage = clipboard->image();
+    const QString originalText = clipboard->text();
+    const auto restoreClipboard = qScopeGuard([&]() {
+        if (!originalImage.isNull()) {
+            clipboard->setImage(originalImage);
+        } else {
+            clipboard->setText(originalText);
+        }
+    });
+
+    const auto preferences = testPreferences();
+    pd::ViewerController controller;
+    controller.setPreferences(preferences);
+    pd::ui::ViewerPage page(&controller);
+    page.resize(960, 600);
+    page.show();
+    QTest::qWait(20);
+    page.beginSession(
+        QStringLiteral("DESKTOP"),
+        QStringLiteral("123456789"));
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->inputEnabled());
+
+    QSignalSpy toasts(&page, &pd::ui::ViewerPage::toastRequested);
+    QSignalSpy imagePastes(
+        page.canvas(),
+        &pd::ui::ViewerCanvas::clipboardImagePasteRequested);
+    QSignalSpy textPastes(
+        page.canvas(),
+        &pd::ui::ViewerCanvas::clipboardPasteRequested);
+    QSignalSpy remoteEvents(
+        &controller,
+        &pd::ViewerController::eventReceived);
+
+    QImage localImage(64, 40, QImage::Format_RGB32);
+    localImage.fill(QColor(QStringLiteral("#264f73")));
+    localImage.setPixelColor(
+        7,
+        9,
+        QColor(QStringLiteral("#f7c948")));
+    clipboard->setImage(localImage);
+    QVERIFY(!clipboard->image().isNull());
+    page.canvas()->setFocus(Qt::OtherFocusReason);
+    QTest::keyClick(
+        page.canvas(),
+        Qt::Key_V,
+        Qt::ControlModifier);
+    QCOMPARE(imagePastes.count(), 1);
+    QCOMPARE(textPastes.count(), 0);
+    QCOMPARE(toasts.count(), 1);
+    QCOMPARE(
+        toasts.takeFirst().at(0).toString(),
+        QStringLiteral("剪贴板图片发送失败"));
+
+    page.clipboardButton()->click();
+    QCOMPARE(toasts.count(), 1);
+    QCOMPARE(
+        toasts.takeFirst().at(0).toString(),
+        QStringLiteral("剪贴板图片发送失败"));
+
+    const QString localText =
+        QStringLiteral("PeerDesk clipboard text %1").arg(
+            QRandomGenerator::global()->generate64());
+    clipboard->setText(localText);
+    QVERIFY(clipboard->image().isNull());
+    QTest::keyClick(
+        page.canvas(),
+        Qt::Key_V,
+        Qt::ControlModifier);
+    QCOMPARE(imagePastes.count(), 1);
+    QCOMPARE(textPastes.count(), 1);
+    QCOMPARE(
+        textPastes.at(0).at(0).toString(),
+        localText);
+    QCOMPARE(toasts.count(), 1);
+    QCOMPARE(
+        toasts.takeFirst().at(0).toString(),
+        QStringLiteral("剪贴板发送失败"));
+
+    QImage remoteImage(72, 48, QImage::Format_RGB32);
+    remoteImage.fill(QColor(QStringLiteral("#533a72")));
+    remoteImage.setPixelColor(
+        11,
+        13,
+        QColor(QStringLiteral("#6ee7a8")));
+    QVERIFY(QMetaObject::invokeMethod(
+        &controller,
+        "clipboardImageReceived",
+        Qt::DirectConnection,
+        Q_ARG(QImage, remoteImage)));
+    QCOMPARE(clipboard->image().size(), remoteImage.size());
+    QCOMPARE(
+        clipboard->image().pixelColor(11, 13),
+        remoteImage.pixelColor(11, 13));
+    QVERIFY(clipboard->text().isEmpty());
+    QCOMPARE(toasts.count(), 1);
+    QCOMPARE(
+        toasts.takeFirst().at(0).toString(),
+        QStringLiteral("已同步远端剪贴板图片"));
+    QCOMPARE(remoteEvents.count(), 0);
+
+    const QJsonObject imageEvent{
+        {QStringLiteral("t"), QStringLiteral("clip")},
+        {QStringLiteral("kind"), QStringLiteral("image")},
+        {QStringLiteral("s"), QStringLiteral("must not paste")},
+    };
+    QVERIFY(QMetaObject::invokeMethod(
+        &controller,
+        "eventReceived",
+        Qt::DirectConnection,
+        Q_ARG(QJsonObject, imageEvent)));
+    QVERIFY(clipboard->text().isEmpty());
+    QCOMPARE(toasts.count(), 0);
 }
 
 void UiTest::viewerPageGameMouseLifecycle()

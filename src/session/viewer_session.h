@@ -72,6 +72,7 @@ public:
     [[nodiscard]] bool sendKey(const QString &code, bool down);
     void sendText(const QString &text);
     [[nodiscard]] bool sendClipboard(const QString &text);
+    [[nodiscard]] bool sendClipboardImage(const QImage &image);
     void sendCtrlAltDelete();
 
     [[nodiscard]] bool beginUpload(
@@ -107,6 +108,7 @@ signals:
     void infoChanged(const QJsonObject &info);
     void statsChanged(const QJsonObject &stats);
     void audioStateChanged(const QJsonObject &state);
+    void clipboardImageReceived(const QImage &image);
     void fileReceived(const QString &path, qint64 size);
     void outgoingFileStarted(
         const QString &id,

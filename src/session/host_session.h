@@ -176,6 +176,7 @@ private:
     qint64 lastCaptureMs_ = 0;
     qint64 lastEncodeMs_ = 0;
     QString lastClipboard_;
+    QByteArray lastClipboardImage_;
 };
 
 } // namespace pd

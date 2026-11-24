@@ -1,5 +1,6 @@
 #include "session/host_session.h"
 
+#include "session/clipboard_codec.h"
 #include "core/protocol.h"
 #include "transport/peer_link.h"
 
@@ -227,6 +228,7 @@ void HostSession::setClipboard(std::shared_ptr<IClipboard> clipboard)
 {
     clipboard_ = std::move(clipboard);
     lastClipboard_.clear();
+    lastClipboardImage_.clear();
 }
 
 bool HostSession::start()
@@ -322,6 +324,8 @@ void HostSession::startStreaming()
 
     if (clipboard_) {
         lastClipboard_ = clipboard_->text().left(kClipboardLimit);
+        lastClipboardImage_ =
+            clipboardImageFingerprint(clipboard_->image());
         clipboardTimer_->start();
     }
 
@@ -665,6 +669,41 @@ void HostSession::pollClipboard()
     if (!running_ || !settings_.clipboard || !clipboard_) {
         return;
     }
+    const QImage image = clipboard_->image();
+    if (!image.isNull()) {
+        const QByteArray fingerprint = clipboardImageFingerprint(image);
+        if (fingerprint.isEmpty()
+            || fingerprint == lastClipboardImage_) {
+            return;
+        }
+
+        QString error;
+        const QByteArray png = encodeClipboardImage(image, &error);
+        if (png.isEmpty()) {
+            emit logMessage(
+                QStringLiteral("剪贴板图片编码失败：%1")
+                    .arg(error.isEmpty()
+                             ? QStringLiteral("未知错误")
+                             : error));
+            lastClipboardImage_ = fingerprint;
+            return;
+        }
+
+        lastClipboardImage_ = fingerprint;
+        lastClipboard_ = clipboard_->text().left(kClipboardLimit);
+        sendControl(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("clip")},
+            {QStringLiteral("kind"), QStringLiteral("image")},
+            {QStringLiteral("mime"), QStringLiteral("image/png")},
+            {QStringLiteral("w"), image.width()},
+            {QStringLiteral("h"), image.height()},
+            {QStringLiteral("d"),
+             QString::fromLatin1(png.toBase64())},
+        });
+        return;
+    }
+
+    lastClipboardImage_.clear();
     const QString text = clipboard_->text().left(kClipboardLimit);
     if (text == lastClipboard_) {
         return;
@@ -820,6 +859,38 @@ void HostSession::dispatch(const QJsonObject &message)
         if (!settings_.clipboard || !clipboard_) {
             return;
         }
+        const QString clipKind = jsonString(message, "kind");
+        if (clipKind == QStringLiteral("image")) {
+            const ClipboardImageDecodeResult decoded =
+                decodeClipboardImage(jsonString(message, "d"));
+            if (!decoded.ok()) {
+                emit logMessage(
+                    QStringLiteral("忽略无效的剪贴板图片：%1")
+                        .arg(decoded.error));
+                return;
+            }
+
+            if (!clipboardImageMatchesDimensions(
+                    decoded.image,
+                    message.value(QStringLiteral("w")).toInt(-1),
+                    message.value(QStringLiteral("h")).toInt(-1))) {
+                emit logMessage(
+                    QStringLiteral("忽略尺寸不匹配的剪贴板图片"));
+                return;
+            }
+            if (!clipboard_->setImage(decoded.image)) {
+                emit logMessage(QStringLiteral("写入本机剪贴板图片失败"));
+                return;
+            }
+            lastClipboardImage_ =
+                clipboardImageFingerprint(decoded.image);
+            lastClipboard_ = clipboard_->text().left(kClipboardLimit);
+            return;
+        }
+        if (!clipKind.isEmpty()) {
+            return;
+        }
+
         const QString text =
             jsonString(message, "s").left(kClipboardLimit);
         if (text == lastClipboard_) {
@@ -827,6 +898,7 @@ void HostSession::dispatch(const QJsonObject &message)
         }
         if (clipboard_->setText(text)) {
             lastClipboard_ = text;
+            lastClipboardImage_.clear();
         } else {
             emit logMessage(QStringLiteral("写入本机剪贴板失败"));
         }

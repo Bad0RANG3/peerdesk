@@ -96,6 +96,7 @@ public:
     [[nodiscard]] bool sendKey(const QString &code, bool down);
     void sendText(const QString &text);
     [[nodiscard]] bool sendClipboard(const QString &text);
+    [[nodiscard]] bool sendClipboardImage(const QImage &image);
     void sendCtrlAltDelete();
 
     [[nodiscard]] bool beginUpload(
@@ -124,6 +125,7 @@ signals:
     void statisticsChanged(const QJsonObject &stats);
     void linkStateChanged(const QString &state);
     void eventReceived(const QJsonObject &message);
+    void clipboardImageReceived(const QImage &image);
     void fileReceived(const QString &path, qint64 size);
     void outgoingFileStarted(
         const QString &id,

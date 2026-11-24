@@ -540,8 +540,13 @@ void ViewerCanvas::keyPressEvent(QKeyEvent *event)
         && !event->modifiers().testFlag(Qt::AltModifier)
         && !event->modifiers().testFlag(Qt::MetaModifier);
     if (paste) {
-        const QString text = QApplication::clipboard()->text();
-        emit clipboardPasteRequested(text);
+        const QImage image = QApplication::clipboard()->image();
+        if (!image.isNull()) {
+            emit clipboardImagePasteRequested(image);
+        } else {
+            emit clipboardPasteRequested(
+                QApplication::clipboard()->text());
+        }
         event->accept();
         return;
     }
@@ -1383,6 +1388,20 @@ void ViewerPage::connectSignals()
         });
     connect(
         canvas_,
+        &ViewerCanvas::clipboardImagePasteRequested,
+        this,
+        [this](const QImage &image) {
+            if (!live_ || demoMode_ || image.isNull()) {
+                return;
+            }
+            if (controller_->sendClipboardImage(image)) {
+                showToast(QStringLiteral("已粘贴本机剪贴板图片"));
+            } else {
+                showToast(QStringLiteral("剪贴板图片发送失败"));
+            }
+        });
+    connect(
+        canvas_,
         &ViewerCanvas::mouseMoveRequested,
         this,
         [this](double, double) {
@@ -1516,12 +1535,28 @@ void ViewerPage::connectSignals()
         });
     connect(
         controller_,
+        &ViewerController::clipboardImageReceived,
+        this,
+        [this](const QImage &image) {
+            if (image.isNull()) {
+                return;
+            }
+            QApplication::clipboard()->setImage(image);
+            showToast(QStringLiteral("已同步远端剪贴板图片"));
+        });
+    connect(
+        controller_,
         &ViewerController::eventReceived,
         this,
         [this](const QJsonObject &message) {
             const QString kind = jsonString(message, "t");
             if (kind == QStringLiteral("clip")
                 || kind == QStringLiteral("clipboard")) {
+                const QString clipKind =
+                    jsonString(message, "kind");
+                if (!clipKind.isEmpty()) {
+                    return;
+                }
                 const QString text = jsonString(message, "s");
                 QApplication::clipboard()->setText(text);
                 showToast(QStringLiteral("已同步远端剪贴板"));
@@ -1760,6 +1795,15 @@ void ViewerPage::connectSignals()
         [this]() {
             if (!live_ || demoMode_) {
                 showToast(QStringLiteral("演示画面不会发送真实输入"));
+                return;
+            }
+            const QImage image = QApplication::clipboard()->image();
+            if (!image.isNull()) {
+                if (controller_->sendClipboardImage(image)) {
+                    showToast(QStringLiteral("已发送剪贴板图片"));
+                } else {
+                    showToast(QStringLiteral("剪贴板图片发送失败"));
+                }
                 return;
             }
             const QString text = QApplication::clipboard()->text();
