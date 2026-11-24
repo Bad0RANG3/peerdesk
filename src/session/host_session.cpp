@@ -63,6 +63,7 @@ HostSession::HostSession(PeerLink *link, QObject *parent)
     , link_(link)
     , fileTransfer_(defaultReceiveDirectory())
     , audioTimer_(new QTimer(this))
+    , cursorTimer_(new QTimer(this))
     , statsTimer_(new QTimer(this))
     , clipboardTimer_(new QTimer(this))
 {
@@ -93,6 +94,14 @@ HostSession::HostSession(PeerLink *link, QObject *parent)
     audioTimer_->setInterval(kAudioFrameMs);
     audioTimer_->setTimerType(Qt::PreciseTimer);
     connect(audioTimer_, &QTimer::timeout, this, &HostSession::pollAudio);
+
+    cursorTimer_->setInterval(33);
+    cursorTimer_->setTimerType(Qt::PreciseTimer);
+    connect(
+        cursorTimer_,
+        &QTimer::timeout,
+        this,
+        &HostSession::sendCursorState);
 
     statsTimer_->setInterval(1000);
     statsTimer_->setTimerType(Qt::CoarseTimer);
@@ -198,6 +207,7 @@ void HostSession::setScreenSource(std::shared_ptr<IScreenSource> source)
     if (running_) {
         stopStreaming();
     }
+    screenSource_ = source;
     videoPipeline_.setSource(std::move(source));
     monitors_ = videoPipeline_.monitors();
     currentMonitor_ = 0;
@@ -330,6 +340,9 @@ void HostSession::startStreaming()
     }
 
     startAudio();
+    cursorSequence_ = 0;
+    sendCursorState();
+    cursorTimer_->start();
     sendInfo();
     statsTimer_->start();
     resumeOutgoingFile();
@@ -340,6 +353,7 @@ void HostSession::stopStreaming()
     const bool wasRunning = running_;
     running_ = false;
     videoPipeline_.stop();
+    cursorTimer_->stop();
     statsTimer_->stop();
     clipboardTimer_->stop();
     stopAudio();
@@ -352,6 +366,44 @@ void HostSession::stopStreaming()
     if (wasRunning) {
         emit logMessage(QStringLiteral("会话已停止"));
     }
+}
+
+void HostSession::sendCursorState()
+{
+    if (!running_ || !link_ || !link_->established()) {
+        return;
+    }
+
+    const CursorSample sample = screenSource_
+        ? screenSource_->cursorSample()
+        : CursorSample{};
+    const QRect monitor = currentMonitorRect();
+
+    CursorPacket packet;
+    packet.sequence = cursorSequence_++;
+    if (monitor.isValid() && monitor.width() > 0 && monitor.height() > 0
+        && sample.visible && monitor.contains(sample.screenPosition)) {
+        const auto normalize = [](int value, int size) {
+            if (size <= 0) {
+                return quint16(0);
+            }
+            const qint64 scaled =
+                static_cast<qint64>(std::clamp(value, 0, size)) * 65535
+                / size;
+            return static_cast<quint16>(std::clamp<qint64>(scaled, 0, 65535));
+        };
+        packet.visible = true;
+        packet.x = normalize(
+            sample.screenPosition.x() - monitor.left(),
+            monitor.width());
+        packet.y = normalize(
+            sample.screenPosition.y() - monitor.top(),
+            monitor.height());
+        packet.hotspotX = normalize(sample.hotspot.x(), monitor.width());
+        packet.hotspotY = normalize(sample.hotspot.y(), monitor.height());
+        packet.shape = sample.shape;
+    }
+    link_->sendCursor(packCursor(packet));
 }
 
 void HostSession::onVideoFrame(const EncodedVideoFrame &frame)

@@ -121,6 +121,11 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &PeerLink::audioReceived);
     connect(
         &authenticatedPackets_,
+        &AuthenticatedPacketPipeline::cursorDataReceived,
+        this,
+        &PeerLink::cursorReceived);
+    connect(
+        &authenticatedPackets_,
         &AuthenticatedPacketPipeline::videoRetransmitRequested,
         this,
         [this](quint32 frameId, const QList<quint16> &missing) {
@@ -457,6 +462,15 @@ void PeerLink::sendAudio(const QByteArray &payload)
         return;
     }
     (void)sendPacket(PacketType::Audio, static_cast<quint8>(StreamKind::Audio),
+                     0, payload);
+}
+
+void PeerLink::sendCursor(const QByteArray &payload)
+{
+    if (!sessionReady_ || !established_) {
+        return;
+    }
+    (void)sendPacket(PacketType::Cursor, static_cast<quint8>(StreamKind::Cursor),
                      0, payload);
 }
 

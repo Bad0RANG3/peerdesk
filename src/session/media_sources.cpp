@@ -148,6 +148,11 @@ CaptureResult SyntheticScreenSource::capture(const CaptureRequest &request)
     return result;
 }
 
+CursorSample SyntheticScreenSource::cursorSample() const
+{
+    return cursor_;
+}
+
 ToneAudioSource::ToneAudioSource(double frequency)
     : frequency_(frequency)
 {

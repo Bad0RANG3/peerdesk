@@ -12,6 +12,7 @@ namespace {
 constexpr char kMagic[] = {'P', 'D'};
 constexpr char kRelayMagic[] = {'R', 'L', 'Y', '1'};
 constexpr quint8 kControlFragmentTag = 0xF1;
+constexpr quint8 kCursorVisibleFlag = 0x01;
 
 void putU16(char *out, quint16 value)
 {
@@ -255,6 +256,44 @@ std::optional<AudioPacket> unpackAudio(const QByteArray &payload)
     }
     packet.previous = payload.mid(12, previousLength);
     packet.current = payload.mid(12 + previousLength);
+    return packet;
+}
+
+QByteArray packCursor(const CursorPacket &packet)
+{
+    QByteArray payload(kCursorPayloadLen, '\0');
+    putU32(payload.data(), packet.sequence);
+    putU16(payload.data() + 4, packet.x);
+    putU16(payload.data() + 6, packet.y);
+    putU16(payload.data() + 8, packet.hotspotX);
+    putU16(payload.data() + 10, packet.hotspotY);
+    payload[12] = static_cast<char>(packet.visible ? kCursorVisibleFlag : 0);
+    payload[13] = static_cast<char>(packet.shape);
+    return payload;
+}
+
+std::optional<CursorPacket> unpackCursor(const QByteArray &payload)
+{
+    if (payload.size() != kCursorPayloadLen) {
+        return std::nullopt;
+    }
+    const quint8 flags = static_cast<quint8>(payload[12]);
+    if ((flags & ~kCursorVisibleFlag) != 0) {
+        return std::nullopt;
+    }
+    const quint8 shape = static_cast<quint8>(payload[13]);
+    if (shape > static_cast<quint8>(CursorShape::NotAllowed)) {
+        return std::nullopt;
+    }
+
+    CursorPacket packet;
+    packet.sequence = getU32(payload.constData());
+    packet.x = getU16(payload.constData() + 4);
+    packet.y = getU16(payload.constData() + 6);
+    packet.hotspotX = getU16(payload.constData() + 8);
+    packet.hotspotY = getU16(payload.constData() + 10);
+    packet.visible = (flags & kCursorVisibleFlag) != 0;
+    packet.shape = static_cast<CursorShape>(shape);
     return packet;
 }
 

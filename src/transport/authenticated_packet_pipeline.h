@@ -59,6 +59,7 @@ signals:
         const QByteArray &payload,
         pd::VideoCodec codec);
     void audioReceived(const QByteArray &payload);
+    void cursorDataReceived(const QByteArray &payload);
     void videoRetransmitRequested(
         quint32 frameId,
         const QList<quint16> &missing);

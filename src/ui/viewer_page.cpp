@@ -29,6 +29,8 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -165,6 +167,137 @@ QFrame *makeOverlayCard(QWidget *parent, const QString &objectName)
     return card;
 }
 
+QPainterPath strokedLine(
+    const QPointF &from,
+    const QPointF &to,
+    qreal width)
+{
+    QPainterPath line;
+    line.moveTo(from);
+    line.lineTo(to);
+    QPainterPathStroker stroker;
+    stroker.setWidth(width);
+    stroker.setCapStyle(Qt::RoundCap);
+    stroker.setJoinStyle(Qt::RoundJoin);
+    return stroker.createStroke(line);
+}
+
+QPolygonF arrowHead(
+    const QPointF &tip,
+    const QPointF &direction,
+    qreal width)
+{
+    const qreal length = std::hypot(direction.x(), direction.y());
+    if (length <= 0.0) {
+        return {};
+    }
+    const QPointF unit(direction.x() / length, direction.y() / length);
+    const QPointF normal(-unit.y(), unit.x());
+    const QPointF base = tip - unit * 8.0;
+    return {
+        tip,
+        base + normal * width,
+        base - normal * width,
+    };
+}
+
+QPainterPath cursorPath(CursorShape shape)
+{
+    QPainterPath path;
+    path.setFillRule(Qt::WindingFill);
+    switch (shape) {
+    case CursorShape::Arrow:
+        path.addPolygon(QPolygonF{
+            QPointF(0.0, 0.0),
+            QPointF(0.0, 24.0),
+            QPointF(6.5, 18.0),
+            QPointF(10.5, 28.0),
+            QPointF(15.0, 26.0),
+            QPointF(11.0, 16.5),
+            QPointF(20.0, 16.5),
+        });
+        path.closeSubpath();
+        break;
+    case CursorShape::IBeam:
+        path.addRoundedRect(QRectF(12.5, 6.0, 7.0, 20.0), 1.2, 1.2);
+        path.addRect(QRectF(8.0, 3.0, 16.0, 5.0));
+        path.addRect(QRectF(8.0, 24.0, 16.0, 5.0));
+        break;
+    case CursorShape::Hand:
+        path.addPolygon(QPolygonF{
+            QPointF(8.0, 1.0),
+            QPointF(8.0, 12.0),
+            QPointF(5.0, 9.5),
+            QPointF(2.0, 12.0),
+            QPointF(2.5, 17.0),
+            QPointF(5.0, 28.0),
+            QPointF(9.0, 31.0),
+            QPointF(24.0, 31.0),
+            QPointF(27.0, 26.0),
+            QPointF(27.0, 17.0),
+            QPointF(24.0, 16.0),
+            QPointF(24.0, 13.0),
+            QPointF(21.0, 12.0),
+            QPointF(21.0, 9.0),
+            QPointF(18.0, 8.0),
+            QPointF(18.0, 5.0),
+            QPointF(15.0, 4.0),
+            QPointF(15.0, 1.0),
+        });
+        path.closeSubpath();
+        break;
+    case CursorShape::Crosshair:
+        path.addRect(QRectF(13.0, 3.0, 6.0, 26.0));
+        path.addRect(QRectF(3.0, 13.0, 26.0, 6.0));
+        break;
+    case CursorShape::Wait:
+        path.addPolygon(QPolygonF{
+            QPointF(8.0, 2.0),
+            QPointF(24.0, 2.0),
+            QPointF(18.0, 15.0),
+            QPointF(24.0, 29.0),
+            QPointF(8.0, 29.0),
+            QPointF(14.0, 15.0),
+        });
+        path.closeSubpath();
+        break;
+    case CursorShape::SizeAll:
+        path.addPath(strokedLine(QPointF(7.0, 16.0), QPointF(25.0, 16.0), 4.0));
+        path.addPath(strokedLine(QPointF(16.0, 7.0), QPointF(16.0, 25.0), 4.0));
+        path.addPolygon(arrowHead(QPointF(2.0, 16.0), QPointF(-1.0, 0.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(30.0, 16.0), QPointF(1.0, 0.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(16.0, 2.0), QPointF(0.0, -1.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(16.0, 30.0), QPointF(0.0, 1.0), 4.5));
+        break;
+    case CursorShape::SizeNWSE:
+        path.addPath(strokedLine(QPointF(7.0, 7.0), QPointF(25.0, 25.0), 4.0));
+        path.addPolygon(arrowHead(QPointF(3.0, 3.0), QPointF(-1.0, -1.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(29.0, 29.0), QPointF(1.0, 1.0), 4.5));
+        break;
+    case CursorShape::SizeNESW:
+        path.addPath(strokedLine(QPointF(25.0, 7.0), QPointF(7.0, 25.0), 4.0));
+        path.addPolygon(arrowHead(QPointF(29.0, 3.0), QPointF(1.0, -1.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(3.0, 29.0), QPointF(-1.0, 1.0), 4.5));
+        break;
+    case CursorShape::SizeWE:
+        path.addPath(strokedLine(QPointF(7.0, 16.0), QPointF(25.0, 16.0), 4.0));
+        path.addPolygon(arrowHead(QPointF(2.0, 16.0), QPointF(-1.0, 0.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(30.0, 16.0), QPointF(1.0, 0.0), 4.5));
+        break;
+    case CursorShape::SizeNS:
+        path.addPath(strokedLine(QPointF(16.0, 7.0), QPointF(16.0, 25.0), 4.0));
+        path.addPolygon(arrowHead(QPointF(16.0, 2.0), QPointF(0.0, -1.0), 4.5));
+        path.addPolygon(arrowHead(QPointF(16.0, 30.0), QPointF(0.0, 1.0), 4.5));
+        break;
+    case CursorShape::NotAllowed:
+        path.setFillRule(Qt::OddEvenFill);
+        path.addEllipse(QRectF(3.0, 3.0, 26.0, 26.0));
+        path.addEllipse(QRectF(8.0, 8.0, 16.0, 16.0));
+        break;
+    }
+    return path;
+}
+
 } // namespace
 
 ViewerCanvas::ViewerCanvas(QWidget *parent)
@@ -227,10 +360,34 @@ void ViewerCanvas::clearFrame()
 {
     frame_ = QImage();
     presentedFrame_ = QImage();
+    clearRemoteCursor();
     if (presentation_) {
         presentation_->clear();
     }
     update();
+}
+
+void ViewerCanvas::setRemoteCursor(const CursorPacket &cursor)
+{
+    if (!cursor.visible || frame_.isNull()) {
+        clearRemoteCursor();
+        return;
+    }
+    remoteCursor_ = cursor;
+    hasRemoteCursor_ = true;
+    applyCursorShape();
+    update();
+}
+
+void ViewerCanvas::clearRemoteCursor()
+{
+    const bool hadCursor = hasRemoteCursor_;
+    remoteCursor_ = {};
+    hasRemoteCursor_ = false;
+    applyCursorShape();
+    if (hadCursor) {
+        update();
+    }
 }
 
 QString ViewerCanvas::presentationThreadName() const
@@ -285,8 +442,7 @@ void ViewerCanvas::setInputEnabled(bool enabled)
         return;
     }
     inputEnabled_ = enabled;
-    setCursor(
-        relativeMouseMode_ ? Qt::BlankCursor : Qt::ArrowCursor);
+    applyCursorShape();
     if (enabled) {
         setFocus(Qt::OtherFocusReason);
     }
@@ -308,13 +464,11 @@ void ViewerCanvas::setRelativeMouseMode(bool enabled)
     relativeTimer_->stop();
     if (enabled) {
         if (inputEnabled_) {
-            setCursor(Qt::BlankCursor);
             setFocus(Qt::OtherFocusReason);
         }
         relativeCenter_ = mapToGlobal(rect().center());
-    } else {
-        setCursor(Qt::ArrowCursor);
     }
+    applyCursorShape();
     emit relativeMouseModeChanged(enabled);
 }
 
@@ -376,6 +530,47 @@ void ViewerCanvas::paintEvent(QPaintEvent *event)
         return;
     }
     painter.drawImage(target, presentedFrame_);
+    if (!hasRemoteCursor_) {
+        return;
+    }
+
+    const qreal nx = std::clamp(remoteCursor_.x / 65535.0, 0.0, 1.0);
+    const qreal ny = std::clamp(remoteCursor_.y / 65535.0, 0.0, 1.0);
+    const qreal hx = std::clamp(
+        remoteCursor_.hotspotX / 65535.0,
+        0.0,
+        1.0);
+    const qreal hy = std::clamp(
+        remoteCursor_.hotspotY / 65535.0,
+        0.0,
+        1.0);
+    const QPointF topLeft(
+        target.left() + nx * target.width() - hx * target.width(),
+        target.top() + ny * target.height() - hy * target.height());
+    const qreal scale = std::clamp(
+        target.width() / std::max(1, frame_.width()),
+        0.35,
+        2.5);
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.translate(topLeft);
+    painter.scale(scale, scale);
+    painter.setBrush(Qt::white);
+    painter.setPen(QPen(
+        Qt::black,
+        1.35 / scale,
+        Qt::SolidLine,
+        Qt::RoundCap,
+        Qt::RoundJoin));
+    painter.drawPath(cursorPath(remoteCursor_.shape));
+    if (remoteCursor_.shape == CursorShape::NotAllowed) {
+        const QPainterPath slash =
+            strokedLine(QPointF(8.0, 8.0), QPointF(24.0, 24.0), 4.0);
+        painter.setPen(Qt::NoPen);
+        painter.fillPath(slash, Qt::black);
+    }
+    painter.restore();
 }
 
 void ViewerCanvas::resizeEvent(QResizeEvent *event)
@@ -683,6 +878,14 @@ void ViewerCanvas::submitPresentFrame()
     if (!frame_.isNull()) {
         presentation_->setFrame(frame_);
     }
+}
+
+void ViewerCanvas::applyCursorShape()
+{
+    setCursor(
+        relativeMouseMode_ || hasRemoteCursor_
+            ? Qt::BlankCursor
+            : Qt::ArrowCursor);
 }
 
 void ViewerCanvas::flushWheel()
@@ -1465,6 +1668,11 @@ void ViewerPage::connectSignals()
         &ViewerController::inputReleaseRequested,
         canvas_,
         &ViewerCanvas::releaseInputs);
+    connect(
+        controller_,
+        &ViewerController::remoteCursorChanged,
+        canvas_,
+        &ViewerCanvas::setRemoteCursor);
     connect(
         controller_,
         &ViewerController::peerChanged,
@@ -2578,6 +2786,7 @@ void ViewerPage::showReconnecting()
     fileRetryButton_->hide();
     canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
+    canvas_->clearRemoteCursor();
     canvas_->releaseInputs();
     linkState_ = QStringLiteral("reconnecting");
     updateLinkUi();
@@ -2595,6 +2804,7 @@ void ViewerPage::showFailed(const QString &reason)
     live_ = false;
     demoMode_ = false;
     demoBadge_->hide();
+    canvas_->clearRemoteCursor();
     canvas_->setRelativeMouseMode(false);
     canvas_->setInputEnabled(false);
     canvas_->releaseInputs();

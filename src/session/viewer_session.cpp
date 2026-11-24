@@ -44,6 +44,7 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
     , fileTransfer_(defaultReceiveDirectory())
 {
     qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
+    qRegisterMetaType<pd::CursorPacket>("pd::CursorPacket");
     if (link_) {
         connect(
             link_,
@@ -60,6 +61,11 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
             &PeerLink::audioReceived,
             this,
             &ViewerSession::onAudioPacket);
+        connect(
+            link_,
+            &PeerLink::cursorReceived,
+            this,
+            &ViewerSession::onCursorPacket);
         connect(
             link_,
             &PeerLink::controlMessageReceived,
@@ -191,6 +197,7 @@ void ViewerSession::start()
 void ViewerSession::suspend()
 {
     started_ = false;
+    resetRemoteCursor(true);
     video_.stop();
     audio_.stop();
     (void)fileTransfer_.interruptSend(QStringLiteral("interrupted"));
@@ -619,6 +626,37 @@ void ViewerSession::onAudioPacket(const QByteArray &payload)
         return;
     }
     audio_.submit(payload);
+}
+
+void ViewerSession::onCursorPacket(const QByteArray &payload)
+{
+    if (!started_) {
+        return;
+    }
+    const auto packet = unpackCursor(payload);
+    if (!packet.has_value()) {
+        emit logMessage(QStringLiteral("忽略无效的远程光标数据"));
+        return;
+    }
+    if (cursorSeen_
+        && static_cast<qint32>(packet->sequence - cursorSequence_) <= 0) {
+        return;
+    }
+    cursorSeen_ = true;
+    cursorSequence_ = packet->sequence;
+    emit remoteCursorChanged(*packet);
+}
+
+void ViewerSession::resetRemoteCursor(bool notify)
+{
+    const bool hadCursor = cursorSeen_;
+    cursorSeen_ = false;
+    cursorSequence_ = 0;
+    if (notify && hadCursor) {
+        CursorPacket hidden;
+        hidden.shape = CursorShape::Arrow;
+        emit remoteCursorChanged(hidden);
+    }
 }
 
 void ViewerSession::dispatch(const QJsonObject &message)

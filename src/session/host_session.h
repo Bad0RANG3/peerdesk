@@ -101,6 +101,7 @@ private:
     void stopAudio();
     void broadcastAudioState();
     void pollAudio();
+    void sendCursorState();
 
     void pushStats();
     void pollClipboard();
@@ -140,6 +141,7 @@ private:
 
     PeerLink *link_ = nullptr;
     VideoPipeline videoPipeline_;
+    std::shared_ptr<IScreenSource> screenSource_;
     std::shared_ptr<IAudioSource> audioSource_;
     std::shared_ptr<IClipboard> clipboard_;
     HostInputPipeline inputPipeline_;
@@ -162,11 +164,13 @@ private:
     AdaptiveVideoRateController adaptiveRate_;
 
     QTimer *audioTimer_ = nullptr;
+    QTimer *cursorTimer_ = nullptr;
     QTimer *statsTimer_ = nullptr;
     QTimer *clipboardTimer_ = nullptr;
     QElapsedTimer statsClock_;
     QElapsedTimer adaptiveClock_;
     int lossKeyframeRequests_ = 0;
+    quint32 cursorSequence_ = 0;
     qint64 sentFrames_ = 0;
     qint64 statsLastFrames_ = 0;
     double lastStatsFps_ = 0.0;

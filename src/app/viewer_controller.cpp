@@ -130,6 +130,11 @@ void ViewerController::connectComponents()
         &ViewerController::frameDecoded);
     connect(
         session_,
+        &ViewerSession::remoteCursorChanged,
+        this,
+        &ViewerController::remoteCursorChanged);
+    connect(
+        session_,
         &ViewerSession::audioReceived,
         this,
         &ViewerController::onAudio);

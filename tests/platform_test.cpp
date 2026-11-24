@@ -337,6 +337,18 @@ private slots:
         QVERIFY(captured.image.width() <= 320);
         QVERIFY(captured.image.height() > 0);
     }
+
+    void screenSourceSamplesCursorWithoutCrashing()
+    {
+        WindowsScreenSource source;
+        const CursorSample sample = source.cursorSample();
+        if (sample.visible) {
+            QVERIFY(
+                static_cast<quint8>(sample.shape)
+                <= static_cast<quint8>(CursorShape::NotAllowed));
+            QVERIFY(source.cursorSample().screenPosition.x() >= -32768);
+        }
+    }
 };
 
 QTEST_MAIN(PlatformTest)

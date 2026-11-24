@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QList>
+#include <QPoint>
 #include <QRect>
 #include <QString>
 
@@ -24,6 +25,13 @@ struct CaptureResult {
     [[nodiscard]] bool ok() const { return !image.isNull(); }
 };
 
+struct CursorSample {
+    bool visible = false;
+    QPoint screenPosition;
+    QPoint hotspot;
+    CursorShape shape = CursorShape::Arrow;
+};
+
 class IScreenSource {
 public:
     virtual ~IScreenSource() = default;
@@ -31,6 +39,7 @@ public:
     [[nodiscard]] virtual QString backend() const = 0;
     [[nodiscard]] virtual QList<MonitorInfo> monitors() const = 0;
     virtual CaptureResult capture(const CaptureRequest &request) = 0;
+    [[nodiscard]] virtual CursorSample cursorSample() const { return {}; }
     virtual void close() {}
 };
 
@@ -87,14 +96,17 @@ public:
     [[nodiscard]] QString backend() const override;
     [[nodiscard]] QList<MonitorInfo> monitors() const override;
     CaptureResult capture(const CaptureRequest &request) override;
+    [[nodiscard]] CursorSample cursorSample() const override;
 
     void setStatic(bool isStatic) { static_ = isStatic; }
     void reset() { frame_ = 0; }
+    void setCursorSample(const CursorSample &sample) { cursor_ = sample; }
 
 private:
     QList<MonitorInfo> monitors_;
     int frame_ = 0;
     bool static_ = false;
+    CursorSample cursor_;
     QElapsedTimer clock_;
 };
 

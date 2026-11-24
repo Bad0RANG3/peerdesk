@@ -97,6 +97,7 @@ public:
         bool keyframe = false,
         VideoCodec codec = VideoCodec::Jpeg);
     void sendAudio(const QByteArray &payload);
+    void sendCursor(const QByteArray &payload);
 
     [[nodiscard]] bool established() const { return established_; }
     [[nodiscard]] bool isHost() const { return isHost_; }
@@ -123,6 +124,7 @@ signals:
         bool keyframe,
         pd::VideoCodec codec);
     void audioReceived(const QByteArray &payload);
+    void cursorReceived(const QByteArray &payload);
     void peerHello(const QString &deviceId, const QString &sessionId);
     void reflexiveDiscoveryFinished(bool found, const QString &host, quint16 port);
     void logMessage(const QString &message);

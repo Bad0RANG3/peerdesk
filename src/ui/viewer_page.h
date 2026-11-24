@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/protocol.h"
 #include "ui/outgoing_file_queue.h"
 
 #include <QImage>
@@ -52,6 +53,13 @@ public:
 
     void setFrame(const QImage &frame);
     void clearFrame();
+    void setRemoteCursor(const pd::CursorPacket &cursor);
+    void clearRemoteCursor();
+    [[nodiscard]] bool hasRemoteCursor() const { return hasRemoteCursor_; }
+    [[nodiscard]] const pd::CursorPacket &remoteCursor() const
+    {
+        return remoteCursor_;
+    }
     [[nodiscard]] bool hasFrame() const { return !frame_.isNull(); }
     [[nodiscard]] const QImage &frame() const { return frame_; }
     [[nodiscard]] const QImage &presentedFrame() const
@@ -113,6 +121,7 @@ private:
     void scheduleWheel();
     void flushWheel();
     void submitPresentFrame();
+    void applyCursorShape();
     void sendKeyDown(const QString &code);
     void sendKeyUp(const QString &code);
     [[nodiscard]] QString buttonName(Qt::MouseButton button) const;
@@ -120,8 +129,10 @@ private:
 
     QImage frame_;
     QImage presentedFrame_;
+    pd::CursorPacket remoteCursor_;
     ViewerFramePipeline *presentation_ = nullptr;
     bool inputEnabled_ = false;
+    bool hasRemoteCursor_ = false;
     QPointF pendingMove_;
     bool moveScheduled_ = false;
     int pendingWheelY_ = 0;

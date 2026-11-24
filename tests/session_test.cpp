@@ -2598,6 +2598,111 @@ private slots:
         QCOMPARE(viewerFiles.size(), 1);
     }
 
+    void viewerReceivesAndResetsRemoteCursor()
+    {
+        const QByteArray psk =
+            QByteArrayLiteral("session-cursor-secret");
+        PeerLink hostLink(true, psk);
+        PeerLink viewerLink(false, psk);
+        hostLink.setLabel(QStringLiteral("cursor-host"));
+        viewerLink.setLabel(QStringLiteral("cursor-viewer"));
+        hostLink.setDeviceId(QStringLiteral("cursor-host-device"));
+        viewerLink.setDeviceId(QStringLiteral("cursor-viewer-device"));
+
+        QString error;
+        QVERIFY2(
+            hostLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+        QVERIFY2(
+            viewerLink.start(QStringLiteral("127.0.0.1"), 0, &error),
+            qPrintable(error));
+
+        auto screen =
+            std::make_shared<SyntheticScreenSource>(1280, 720, false);
+        CursorSample sample;
+        sample.visible = true;
+        sample.screenPosition = QPoint(640, 360);
+        sample.hotspot = QPoint(7, 9);
+        sample.shape = CursorShape::Hand;
+        screen->setCursorSample(sample);
+
+        HostSession host(&hostLink);
+        ViewerSession viewer(&viewerLink);
+        host.setScreenSource(screen);
+        QList<CursorPacket> cursors;
+        connect(
+            &viewer,
+            &ViewerSession::remoteCursorChanged,
+            [&cursors](const CursorPacket &cursor) {
+                cursors.append(cursor);
+            });
+
+        hostLink.addCandidates(viewerLink.localCandidates());
+        viewerLink.addCandidates(hostLink.localCandidates());
+        hostLink.beginHandshake();
+        viewerLink.beginHandshake();
+        QVERIFY(waitUntil(
+            [&]() {
+                return hostLink.established() && viewerLink.established()
+                    && hostLink.state() == QStringLiteral("direct")
+                    && viewerLink.state() == QStringLiteral("direct");
+            },
+            7000));
+
+        viewer.start();
+        QVERIFY(host.start());
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.running() && viewer.active()
+                    && !cursors.isEmpty();
+            },
+            5000));
+        const CursorPacket visible = cursors.constFirst();
+        QVERIFY(visible.visible);
+        QCOMPARE(visible.shape, CursorShape::Hand);
+        QCOMPARE(visible.x, quint16(32767));
+        QCOMPARE(visible.y, quint16(32767));
+        QCOMPARE(visible.hotspotX, quint16(358));
+        QCOMPARE(visible.hotspotY, quint16(819));
+
+        cursors.clear();
+        sample.screenPosition = QPoint(1280, 50);
+        screen->setCursorSample(sample);
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    cursors.cbegin(),
+                    cursors.cend(),
+                    [](const CursorPacket &cursor) {
+                        return !cursor.visible;
+                    });
+            },
+            3000));
+
+        cursors.clear();
+        viewer.stop();
+        QCOMPARE(cursors.size(), 1);
+        QVERIFY(!cursors.constFirst().visible);
+
+        cursors.clear();
+        sample.screenPosition = QPoint(640, 360);
+        screen->setCursorSample(sample);
+        viewer.start();
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    cursors.cbegin(),
+                    cursors.cend(),
+                    [](const CursorPacket &cursor) {
+                        return cursor.visible;
+                    });
+            },
+            3000));
+
+        viewer.stop();
+        host.stop();
+    }
+
     void directSessionEndToEnd()
     {
         const QByteArray psk = QByteArrayLiteral("session-direct-secret");

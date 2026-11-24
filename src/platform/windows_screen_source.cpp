@@ -61,6 +61,34 @@ BOOL CALLBACK collectMonitor(
     return TRUE;
 }
 
+CursorShape standardCursorShape(HCURSOR cursor)
+{
+    struct ShapeMap {
+        LPCWSTR id;
+        CursorShape shape;
+    };
+    static const ShapeMap shapes[] = {
+        {IDC_ARROW, CursorShape::Arrow},
+        {IDC_IBEAM, CursorShape::IBeam},
+        {IDC_HAND, CursorShape::Hand},
+        {IDC_CROSS, CursorShape::Crosshair},
+        {IDC_WAIT, CursorShape::Wait},
+        {IDC_APPSTARTING, CursorShape::Wait},
+        {IDC_SIZEALL, CursorShape::SizeAll},
+        {IDC_SIZENWSE, CursorShape::SizeNWSE},
+        {IDC_SIZENESW, CursorShape::SizeNESW},
+        {IDC_SIZEWE, CursorShape::SizeWE},
+        {IDC_SIZENS, CursorShape::SizeNS},
+        {IDC_NO, CursorShape::NotAllowed},
+    };
+    for (const ShapeMap &entry : shapes) {
+        if (LoadCursorW(nullptr, entry.id) == cursor) {
+            return entry.shape;
+        }
+    }
+    return CursorShape::Arrow;
+}
+
 } // namespace
 
 struct WindowsScreenSource::Impl {
@@ -314,6 +342,37 @@ CaptureResult WindowsScreenSource::capture(const CaptureRequest &request)
         result.error = QStringLiteral("无法创建抓屏图像");
     }
     return result;
+}
+
+CursorSample WindowsScreenSource::cursorSample() const
+{
+    CURSORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetCursorInfo(&info) || info.hCursor == nullptr
+        || (info.flags & CURSOR_SHOWING) == 0) {
+        return {};
+    }
+
+    CursorSample sample;
+    sample.visible = true;
+    sample.screenPosition = QPoint(
+        info.ptScreenPos.x,
+        info.ptScreenPos.y);
+    sample.shape = standardCursorShape(info.hCursor);
+
+    ICONINFO icon{};
+    if (GetIconInfo(info.hCursor, &icon)) {
+        sample.hotspot = QPoint(
+            static_cast<int>(icon.xHotspot),
+            static_cast<int>(icon.yHotspot));
+        if (icon.hbmMask != nullptr) {
+            DeleteObject(icon.hbmMask);
+        }
+        if (icon.hbmColor != nullptr) {
+            DeleteObject(icon.hbmColor);
+        }
+    }
+    return sample;
 }
 
 void WindowsScreenSource::close()

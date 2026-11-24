@@ -2,6 +2,7 @@
 
 #include "app/preferences.h"
 #include "client/signaling_client.h"
+#include "core/protocol.h"
 
 #include <QByteArray>
 #include <QImage>
@@ -119,6 +120,7 @@ signals:
     void errorOccurred(const QString &message);
     void peerChanged(const QString &name, bool connected);
     void frameDecoded(const QImage &image, bool keyframe);
+    void remoteCursorChanged(const pd::CursorPacket &cursor);
     void audioEnabledChanged(bool enabled);
     void audioStateChanged(const QJsonObject &state);
     void infoChanged(const QJsonObject &info);

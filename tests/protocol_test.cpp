@@ -155,6 +155,52 @@ private slots:
         QCOMPARE(decoded->current, packet.current);
     }
 
+    void cursorRoundTrip()
+    {
+        for (quint8 shape = 0;
+             shape <= static_cast<quint8>(CursorShape::NotAllowed);
+             ++shape) {
+            CursorPacket packet;
+            packet.sequence = 0x89ABCDEFU;
+            packet.x = 0xFFFF;
+            packet.y = 0x8000;
+            packet.hotspotX = 17;
+            packet.hotspotY = 4096;
+            packet.visible = (shape % 2) == 0;
+            packet.shape = static_cast<CursorShape>(shape);
+
+            const QByteArray payload = packCursor(packet);
+            QCOMPARE(payload.size(), kCursorPayloadLen);
+            const auto decoded = unpackCursor(payload);
+            QVERIFY(decoded.has_value());
+            QCOMPARE(decoded->sequence, packet.sequence);
+            QCOMPARE(decoded->x, packet.x);
+            QCOMPARE(decoded->y, packet.y);
+            QCOMPARE(decoded->hotspotX, packet.hotspotX);
+            QCOMPARE(decoded->hotspotY, packet.hotspotY);
+            QCOMPARE(decoded->visible, packet.visible);
+            QCOMPARE(
+                static_cast<int>(decoded->shape),
+                static_cast<int>(packet.shape));
+        }
+    }
+
+    void cursorRejectsMalformedPayloads()
+    {
+        const QByteArray valid = packCursor(CursorPacket{});
+        QVERIFY(!unpackCursor(valid.left(kCursorPayloadLen - 1)).has_value());
+        QVERIFY(!unpackCursor(valid + QByteArray(1, '\0')).has_value());
+
+        QByteArray reservedFlags = valid;
+        reservedFlags[12] = '\x02';
+        QVERIFY(!unpackCursor(reservedFlags).has_value());
+
+        QByteArray invalidShape = valid;
+        invalidShape[13] = static_cast<char>(
+            static_cast<quint8>(CursorShape::NotAllowed) + 1);
+        QVERIFY(!unpackCursor(invalidShape).has_value());
+    }
+
     void controlFragmentsRoundTrip()
     {
         QByteArray body = "{\"t\":\"file_data\",\"d\":\"";

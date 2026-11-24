@@ -128,6 +128,9 @@ public:
         case PacketType::Audio:
             emit audioReady(generation_, payload, threadName);
             break;
+        case PacketType::Cursor:
+            emit cursorReady(generation_, payload, threadName);
+            break;
         case PacketType::Ack: {
             const auto ack = unpackAck(payload);
             if (ack) {
@@ -235,6 +238,10 @@ signals:
         pd::VideoCodec codec,
         const QString &threadName);
     void audioReady(
+        quint64 generation,
+        const QByteArray &payload,
+        const QString &threadName);
+    void cursorReady(
         quint64 generation,
         const QByteArray &payload,
         const QString &threadName);
@@ -417,6 +424,20 @@ AuthenticatedPacketPipeline::AuthenticatedPacketPipeline(QObject *parent)
             }
             observeWorker(generation, threadName);
             emit audioReceived(payload);
+        });
+    connect(
+        worker_,
+        &AuthenticatedPacketWorker::cursorReady,
+        this,
+        [this](
+            quint64 generation,
+            const QByteArray &payload,
+            const QString &threadName) {
+            if (!running_ || generation != generation_) {
+                return;
+            }
+            observeWorker(generation, threadName);
+            emit cursorDataReceived(payload);
         });
     connect(
         worker_,

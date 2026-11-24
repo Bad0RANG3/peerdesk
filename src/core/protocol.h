@@ -35,6 +35,7 @@ enum class PacketType : quint8 {
     Pong = 11,
     Bye = 12,
     Audio = 13,
+    Cursor = 14,
 };
 
 enum class StreamKind : quint8 {
@@ -43,6 +44,7 @@ enum class StreamKind : quint8 {
     File = 2,
     Stats = 3,
     Audio = 4,
+    Cursor = 5,
 };
 
 enum class VideoCodec : quint8 {
@@ -120,6 +122,35 @@ struct AudioPacket {
 [[nodiscard]] QByteArray packAudio(const AudioPacket &packet);
 [[nodiscard]] std::optional<AudioPacket> unpackAudio(const QByteArray &payload);
 
+enum class CursorShape : quint8 {
+    Arrow = 0,
+    IBeam = 1,
+    Hand = 2,
+    Crosshair = 3,
+    Wait = 4,
+    SizeAll = 5,
+    SizeNWSE = 6,
+    SizeNESW = 7,
+    SizeWE = 8,
+    SizeNS = 9,
+    NotAllowed = 10,
+};
+
+struct CursorPacket {
+    quint32 sequence = 0;
+    quint16 x = 0;
+    quint16 y = 0;
+    quint16 hotspotX = 0;
+    quint16 hotspotY = 0;
+    bool visible = false;
+    CursorShape shape = CursorShape::Arrow;
+};
+
+inline constexpr int kCursorPayloadLen = 14;
+
+[[nodiscard]] QByteArray packCursor(const CursorPacket &packet);
+[[nodiscard]] std::optional<CursorPacket> unpackCursor(const QByteArray &payload);
+
 class FragmentAssembler {
 public:
     explicit FragmentAssembler(int fragmentCount, int maxBytes = 32 * 1024 * 1024);
@@ -166,3 +197,4 @@ private:
 } // namespace pd
 
 Q_DECLARE_METATYPE(pd::VideoCodec)
+Q_DECLARE_METATYPE(pd::CursorPacket)

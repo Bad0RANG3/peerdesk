@@ -14,6 +14,7 @@ public:
     [[nodiscard]] QString backend() const override;
     [[nodiscard]] QList<MonitorInfo> monitors() const override;
     CaptureResult capture(const CaptureRequest &request) override;
+    [[nodiscard]] CursorSample cursorSample() const override;
     void close() override;
 
 private:

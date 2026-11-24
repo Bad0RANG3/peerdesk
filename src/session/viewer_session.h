@@ -104,6 +104,7 @@ signals:
         const QByteArray &pcm16,
         quint32 sequence,
         quint32 timestampMs);
+    void remoteCursorChanged(const pd::CursorPacket &cursor);
     void eventReceived(const QJsonObject &message);
     void infoChanged(const QJsonObject &info);
     void statsChanged(const QJsonObject &stats);
@@ -132,6 +133,8 @@ private:
         bool keyframe,
         VideoCodec codec);
     void onAudioPacket(const QByteArray &payload);
+    void onCursorPacket(const QByteArray &payload);
+    void resetRemoteCursor(bool notify);
     void dispatch(const QJsonObject &message);
     void handleRemoteFileResult(const QJsonObject &message);
     void onIncomingFileStarted(
@@ -165,6 +168,8 @@ private:
     QJsonObject audioState_;
     quint32 videoSequence_ = 0;
     quint64 audioFrames_ = 0;
+    quint32 cursorSequence_ = 0;
+    bool cursorSeen_ = false;
 
     FileTransferPipeline fileTransfer_;
     ViewerVideoPipeline video_;
