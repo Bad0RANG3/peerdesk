@@ -54,6 +54,7 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
     , feedback_(&udpIo_, &authenticatedPackets_)
 {
     qRegisterMetaType<pd::LinkStats>("pd::LinkStats");
+    qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
 
     connect(
         &videoSend_,
@@ -100,15 +101,18 @@ PeerLink::PeerLink(bool isHost, const QByteArray &psk, QObject *parent)
         &authenticatedPackets_,
         &AuthenticatedPacketPipeline::videoDataReceived,
         this,
-        [this](const QByteArray &payload, bool keyframe) {
-            videoReceive_.submitData(payload, keyframe);
+        [this](
+            const QByteArray &payload,
+            bool keyframe,
+            VideoCodec codec) {
+            videoReceive_.submitData(payload, keyframe, codec);
         });
     connect(
         &authenticatedPackets_,
         &AuthenticatedPacketPipeline::videoParityReceived,
         this,
-        [this](const QByteArray &payload) {
-            videoReceive_.submitParity(payload);
+        [this](const QByteArray &payload, VideoCodec codec) {
+            videoReceive_.submitParity(payload, codec);
         });
     connect(
         &authenticatedPackets_,
@@ -436,12 +440,15 @@ void PeerLink::sendControl(const QJsonObject &message)
     authenticatedPackets_.sendControl(message);
 }
 
-void PeerLink::sendVideo(const QByteArray &jpeg, bool keyframe)
+void PeerLink::sendVideo(
+    const QByteArray &data,
+    bool keyframe,
+    VideoCodec codec)
 {
     if (!sessionReady_ || !established_) {
         return;
     }
-    videoSend_.submit(jpeg, keyframe);
+    videoSend_.submit(data, keyframe, codec);
 }
 
 void PeerLink::sendAudio(const QByteArray &payload)
@@ -860,13 +867,14 @@ void PeerLink::handleAuthenticated(
 
 void PeerLink::onVideoFrameReady(
     const QByteArray &frame,
-    bool keyframe)
+    bool keyframe,
+    VideoCodec codec)
 {
     if (closing_ || !sessionReady_ || !established_) {
         return;
     }
     recvFramesWindow_.append(ReliableStream::currentTimeSeconds());
-    emit videoFrameReceived(frame, keyframe);
+    emit videoFrameReceived(frame, keyframe, codec);
 }
 
 void PeerLink::onVideoPacketsReady(const VideoPacketBatch &batch)

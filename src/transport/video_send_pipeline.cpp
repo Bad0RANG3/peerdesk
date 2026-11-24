@@ -31,10 +31,11 @@ public:
 
     void submit(
         quint64 generation,
-        const QByteArray &jpeg,
-        bool keyframe)
+        const QByteArray &data,
+        bool keyframe,
+        VideoCodec codec)
     {
-        if (jpeg.isEmpty()) {
+        if (data.isEmpty()) {
             return;
         }
         bool schedule = false;
@@ -48,7 +49,7 @@ public:
                 && !keyframe) {
                 return;
             }
-            pending_ = Pending{generation, jpeg, keyframe};
+            pending_ = Pending{generation, data, keyframe, codec};
             if (!scheduled_) {
                 scheduled_ = true;
                 schedule = true;
@@ -80,9 +81,11 @@ public:
         if (packets.isEmpty()) {
             return;
         }
+        const VideoCodec codec =
+            sender_.cachedCodec(frameId).value_or(VideoCodec::Jpeg);
         emit packetsReady(
             generation,
-            VideoPacketBatch{frameId, false, true, packets},
+            VideoPacketBatch{frameId, false, true, codec, packets},
             threadName);
     }
 
@@ -96,8 +99,9 @@ signals:
 private:
     struct Pending {
         quint64 generation = 0;
-        QByteArray jpeg;
+        QByteArray data;
         bool keyframe = false;
+        VideoCodec codec = VideoCodec::Jpeg;
     };
 
     void packetizePending()
@@ -117,8 +121,9 @@ private:
             }
 
             const QList<WirePacket> packets = sender_.build(
-                pending.jpeg,
-                pending.keyframe);
+                pending.data,
+                pending.keyframe,
+                pending.codec);
             if (packets.isEmpty()) {
                 emit failed(
                     pending.generation,
@@ -131,6 +136,7 @@ private:
                     sender_.frameId(),
                     pending.keyframe,
                     false,
+                    pending.codec,
                     packets,
                 },
                 threadName);
@@ -149,6 +155,7 @@ VideoSendPipeline::VideoSendPipeline(QObject *parent)
     : QObject(parent)
 {
     qRegisterMetaType<pd::VideoPacketBatch>("pd::VideoPacketBatch");
+    qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
 
     worker_ = new VideoSendWorker;
     worker_->moveToThread(&thread_);
@@ -213,12 +220,15 @@ void VideoSendPipeline::stop()
     }
 }
 
-void VideoSendPipeline::submit(const QByteArray &jpeg, bool keyframe)
+void VideoSendPipeline::submit(
+    const QByteArray &data,
+    bool keyframe,
+    VideoCodec codec)
 {
     if (!running_ || !worker_) {
         return;
     }
-    worker_->submit(generation_, jpeg, keyframe);
+    worker_->submit(generation_, data, keyframe, codec);
 }
 
 void VideoSendPipeline::retransmit(

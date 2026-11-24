@@ -67,10 +67,10 @@
 | --- | --- |
 | `peerdesk-core` | 包头、JSON、分片、FEC、音频载荷和基础工具 |
 | `peerdesk-crypto` | X25519、派生、AEAD、nonce、重放窗口 |
-| `peerdesk-transport` | 视频重组、NACK、控制流和 ACK 语义 |
+| `peerdesk-transport` | 视频重组、codec 元数据、NACK、控制流和 ACK 语义 |
 | `peerdesk-stun` | Binding Request/Success、地址解析和 XOR 地址 |
 | `peerdesk-server` | 信令、注册、配对、令牌、限流、STUN、中继 |
-| `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态、视频收发、UDP 收写、反馈限频/线程归属、接收认证和代际隔离 |
+| `peerdesk-peer-link` | 握手、候选、直连/中继、保活、链路状态、带 codec 元数据的视频收发、UDP 收写、反馈限频/线程归属、接收认证和代际隔离 |
 | `peerdesk-session` | 被控/控制会话、独立音视频编解码线程、网络反馈速率自适应、设置、音频、文件和输入事件 |
 | `peerdesk-signaling-client` | TCP JSON Lines、重连策略和消息映射 |
 | `peerdesk-app-controller` | 控制器生命周期、偏好、最近连接持久化、错误和 UI 门面 |
@@ -150,8 +150,9 @@ CI 命令使用对应 preset，并要求全部 15 个套件通过。回环测试
 ### P2：媒体与输入升级
 
 - `[进行中]` H.264：Windows Media Foundation 编解码封装已完成 Annex B 回环、强制 IDR、
-  动态码率和 NV12/RGB32 转换，但尚未接入 PDTP codec 元数据、会话协商、FEC/NACK 重传
-  与 JPEG 自动回退；产品路径仍使用整帧 JPEG。
+  动态码率和 NV12/RGB32 转换；PDTP DATA/PARITY 标志、NACK 重传和接收信号已贯通
+  codec 元数据，但尚未接入会话协商、产品编解码路径与 JPEG 自动回退；产品路径仍使用
+  整帧 JPEG。
 - `[待开始]` Opus 音频，保留 G.711 兼容回退。
 - `[进行中]` 媒体线程与流水线拆解：抓屏、缩放、静帧检测和 JPEG 编码已迁入
   `PeerDeskVideo`，Viewer JPEG 解码已迁入 `PeerDeskViewerVideo`，画面等比缩放已迁入

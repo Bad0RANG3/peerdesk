@@ -8,6 +8,7 @@
 #include <QList>
 
 #include <functional>
+#include <optional>
 
 namespace pd {
 
@@ -23,18 +24,29 @@ public:
 
     explicit VideoSender(int mtu = kVideoPayloadMtu, int cacheFrames = 10);
 
-    [[nodiscard]] QList<WirePacket> build(const QByteArray &data, bool keyframe);
+    [[nodiscard]] QList<WirePacket> build(
+        const QByteArray &data,
+        bool keyframe,
+        VideoCodec codec = VideoCodec::Jpeg);
     [[nodiscard]] QList<WirePacket> retransmit(
         quint32 frameId, const QList<quint16> &missing) const;
+    [[nodiscard]] std::optional<VideoCodec> cachedCodec(
+        quint32 frameId) const;
     void reset();
 
     [[nodiscard]] quint32 frameId() const { return frameId_; }
 
 private:
+    struct CachedFrame {
+        QList<QByteArray> fragments;
+        bool keyframe = false;
+        VideoCodec codec = VideoCodec::Jpeg;
+    };
+
     int mtu_;
     int cacheFrames_;
     quint32 frameId_ = 0;
-    QHash<quint32, QList<QByteArray>> cache_;
+    QHash<quint32, CachedFrame> cache_;
     QList<quint32> order_;
 };
 
@@ -45,7 +57,8 @@ struct VideoNack {
 
 class VideoReceiver {
 public:
-    using FrameHandler = std::function<void(const QByteArray &, bool)>;
+    using FrameHandler =
+        std::function<void(const QByteArray &, bool, VideoCodec)>;
     using KeyframeHandler = std::function<void()>;
 
     VideoReceiver(
@@ -59,12 +72,14 @@ public:
         quint16 count,
         const QByteArray &data,
         bool keyframe,
+        VideoCodec codec,
         double now = ReliableStream::currentTimeSeconds());
     void onParity(
         quint32 frameId,
         quint8 groupIndex,
         quint8 shards,
-        const QByteArray &data);
+        const QByteArray &data,
+        VideoCodec codec = VideoCodec::Jpeg);
     [[nodiscard]] QList<VideoNack> tick(double now);
     void reset();
 
@@ -77,6 +92,7 @@ private:
         quint16 count = 0;
         FragmentAssembler assembler;
         bool keyframe = false;
+        VideoCodec codec = VideoCodec::Jpeg;
         double created = 0;
         double lastNack = 0;
 

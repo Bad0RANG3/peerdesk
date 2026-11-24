@@ -362,6 +362,7 @@ VideoPipeline::VideoPipeline(QObject *parent)
     : QObject(parent)
 {
     qRegisterMetaType<pd::EncodedVideoFrame>("pd::EncodedVideoFrame");
+    qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
 
     worker_ = new VideoCaptureWorker;
     worker_->moveToThread(&thread_);

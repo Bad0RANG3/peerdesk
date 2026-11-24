@@ -15,7 +15,7 @@ TCP JSON Lines       注册、配对、候选、令牌、中继入口
         │
         ▼
 UDP PDTP/1           20 字节明文头 + AEAD 体
-        ├─ Video     整帧 JPEG 分片、XOR FEC、NACK、关键帧请求
+        ├─ Video     整帧视频分片（JPEG/H.264 标志）、XOR FEC、NACK、关键帧请求
         ├─ Control   独立可靠流、累积 ACK、应用消息
         ├─ Audio     G.711 µ-law，不可靠，当前帧 + 上一帧冗余
         ├─ Stats     统计流枚举
@@ -101,6 +101,7 @@ UDP PDTP/1           20 字节明文头 + AEAD 体
 | `0x01` | `KEYFRAME` | 当前视频帧是完整关键帧 |
 | `0x02` | `LAST_FRAGMENT` | 当前视频分片是本帧最后一片 |
 | `0x04` | `RELIABLE` | 控制消息走可靠重传 |
+| `0x08` | `H264` | 视频帧载荷是 H.264；清零时表示 JPEG |
 
 ### 2.6 尺寸常量
 
@@ -187,12 +188,16 @@ extract-then-expand 派生。共享秘密为全零时派生必须失败。
 视频帧按最多 1296 字节切成 `DATA` 包。每个视频载荷先放 8 字节分片头：
 
 ```text
-frameId u32 LE + index u16 LE + count u16 LE + JPEG bytes
+frameId u32 LE + index u16 LE + count u16 LE + encoded frame bytes
 ```
 
 - `frameId` 由发送端递增，用于重组、NACK 和 FEC。
 - `index` 从 0 开始，`count` 是整帧分片数。
 - 最后一片设置 `LAST_FRAGMENT`；关键帧的每一片都设置 `KEYFRAME`。
+- 每个 DATA 分片只在 `H264` 标志中携带 codec；清零表示 JPEG。PARITY 也带相同标志，
+  NACK 重传必须保留 `KEYFRAME` 和 `H264`，并按原分片位置设置 `LAST_FRAGMENT`。
+- 当前产品发送端只生成 JPEG；H.264 标志和数据通路已实现，但会话协商、产品编码/解码
+  和自动回退尚未接入。
 
 ### 4.2 XOR FEC
 

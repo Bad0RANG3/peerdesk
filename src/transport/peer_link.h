@@ -92,7 +92,10 @@ public:
         int timeoutMs = 2500);
 
     void sendControl(const QJsonObject &message);
-    void sendVideo(const QByteArray &jpeg, bool keyframe = false);
+    void sendVideo(
+        const QByteArray &data,
+        bool keyframe = false,
+        VideoCodec codec = VideoCodec::Jpeg);
     void sendAudio(const QByteArray &payload);
 
     [[nodiscard]] bool established() const { return established_; }
@@ -115,7 +118,10 @@ signals:
     void stateChanged(const QString &state);
     void statsChanged(const pd::LinkStats &stats);
     void controlMessageReceived(const QJsonObject &message);
-    void videoFrameReceived(const QByteArray &frame, bool keyframe);
+    void videoFrameReceived(
+        const QByteArray &frame,
+        bool keyframe,
+        pd::VideoCodec codec);
     void audioReceived(const QByteArray &payload);
     void peerHello(const QString &deviceId, const QString &sessionId);
     void reflexiveDiscoveryFinished(bool found, const QString &host, quint16 port);
@@ -153,7 +159,10 @@ private:
         std::optional<quint64> sequence = std::nullopt);
 
     void sendPing();
-    void onVideoFrameReady(const QByteArray &frame, bool keyframe);
+    void onVideoFrameReady(
+        const QByteArray &frame,
+        bool keyframe,
+        VideoCodec codec);
     void onVideoPacketsReady(const VideoPacketBatch &batch);
 
     void updateFeedbackRoute();

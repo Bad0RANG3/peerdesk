@@ -17,11 +17,15 @@ public:
     explicit VideoReceiveWorker(QObject *parent = nullptr)
         : QObject(parent)
         , receiver_(
-              [this](const QByteArray &frame, bool keyframe) {
+              [this](
+                  const QByteArray &frame,
+                  bool keyframe,
+                  VideoCodec codec) {
                   emit frameDecoded(
                       generation_,
                       frame,
                       keyframe,
+                      codec,
                       QThread::currentThread()->objectName());
               },
               [this]() {
@@ -65,7 +69,8 @@ public:
     void submitData(
         quint64 generation,
         const QByteArray &payload,
-        bool keyframe)
+        bool keyframe,
+        VideoCodec codec)
     {
         if (!accepting_ || generation != generation_) {
             return;
@@ -80,10 +85,14 @@ public:
             fragment->count,
             fragment->data,
             keyframe,
+            codec,
             ReliableStream::currentTimeSeconds());
     }
 
-    void submitParity(quint64 generation, const QByteArray &payload)
+    void submitParity(
+        quint64 generation,
+        const QByteArray &payload,
+        VideoCodec codec)
     {
         if (!accepting_ || generation != generation_) {
             return;
@@ -96,7 +105,8 @@ public:
             parity->frameId,
             parity->groupIndex,
             parity->shards,
-            parity->data);
+            parity->data,
+            codec);
     }
 
 signals:
@@ -104,6 +114,7 @@ signals:
         quint64 generation,
         const QByteArray &frame,
         bool keyframe,
+        pd::VideoCodec codec,
         const QString &threadName);
     void nackDecided(
         quint64 generation,
@@ -140,6 +151,7 @@ VideoReceivePipeline::VideoReceivePipeline(QObject *parent)
     : QObject(parent)
 {
     qRegisterMetaType<QList<quint16>>("QList<quint16>");
+    qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
 
     worker_ = new VideoReceiveWorker;
     worker_->moveToThread(&thread_);
@@ -225,7 +237,8 @@ void VideoReceivePipeline::resetSession()
 
 void VideoReceivePipeline::submitData(
     const QByteArray &payload,
-    bool keyframe)
+    bool keyframe,
+    VideoCodec codec)
 {
     if (!running_ || !worker_) {
         return;
@@ -233,13 +246,15 @@ void VideoReceivePipeline::submitData(
     const quint64 generation = generation_;
     QMetaObject::invokeMethod(
         worker_,
-        [worker = worker_, generation, payload, keyframe]() {
-            worker->submitData(generation, payload, keyframe);
+        [worker = worker_, generation, payload, keyframe, codec]() {
+            worker->submitData(generation, payload, keyframe, codec);
         },
         Qt::QueuedConnection);
 }
 
-void VideoReceivePipeline::submitParity(const QByteArray &payload)
+void VideoReceivePipeline::submitParity(
+    const QByteArray &payload,
+    VideoCodec codec)
 {
     if (!running_ || !worker_) {
         return;
@@ -247,8 +262,8 @@ void VideoReceivePipeline::submitParity(const QByteArray &payload)
     const quint64 generation = generation_;
     QMetaObject::invokeMethod(
         worker_,
-        [worker = worker_, generation, payload]() {
-            worker->submitParity(generation, payload);
+        [worker = worker_, generation, payload, codec]() {
+            worker->submitParity(generation, payload, codec);
         },
         Qt::QueuedConnection);
 }
@@ -262,13 +277,14 @@ void VideoReceivePipeline::onWorkerFrame(
     quint64 generation,
     const QByteArray &frame,
     bool keyframe,
+    pd::VideoCodec codec,
     const QString &threadName)
 {
     if (!running_ || generation != generation_) {
         return;
     }
     reassemblerThreadName_ = threadName;
-    emit frameReady(frame, keyframe);
+    emit frameReady(frame, keyframe, codec);
 }
 
 void VideoReceivePipeline::onWorkerNack(

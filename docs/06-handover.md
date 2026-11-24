@@ -39,9 +39,11 @@ Qt 6.8、CMake 和 Ninja。
 视频分片、XOR FEC 生成和 NACK 重传缓存检索运行在 `PeerDeskVideoSend` 工作线程，
 待发送帧同样采用最新值覆盖并保护待处理关键帧；入站分片解析、重组、XOR FEC 缺片恢复、
 超时丢帧和 NACK 判定运行在 `PeerDeskVideoReceive` 工作线程，结果排队回主线程后由
-`PeerLink` 更新统计并发布反馈路由快照。`PeerDeskLinkFeedback` 工作线程异步发送
-NACK、Pong、ACK 和控制 DATA，关键帧请求经认证可靠控制流提交并限制为每 200 ms
-一次。`PeerDeskUdpIo` 工作线程独占 UDP socket 和唯一加密上下文，完成绑定/关闭、
+`PeerLink` 更新统计并发布反馈路由快照。视频 DATA/PARITY 用 `FlagH264` 区分
+JPEG/H.264，NACK 重传保留 codec 与关键帧标志，跨线程发送/重组和 Viewer 帧信号也
+携带 codec；产品发送仍固定为 JPEG。`PeerDeskLinkFeedback` 工作线程异步发送 NACK、
+Pong、ACK 和控制 DATA，关键帧请求经认证可靠控制流提交并限制为每 200 ms 一次。
+`PeerDeskUdpIo` 工作线程独占 UDP socket 和唯一加密上下文，完成绑定/关闭、
 入站类型识别、RLY1 解包、包头解析、接收侧 AEAD/重放检查、发送侧 AEAD、发送序号、
 RLY1 封装、实际收写和原子发送统计。只有已认证包会回到主线程，`PeerLink` 完成路径
 锁定、统计和会话衔接后，把已认证包排队交给 `PeerDeskPeerLinkRx`。该 worker 独占
@@ -59,9 +61,9 @@ RLY1 封装、实际收写和原子发送统计。只有已认证包会回到主
 文件发送分块、接收 Base64 解码/校验、临时文件读写与提交由 `PeerDeskFileTransfer`
 工作线程串行处理，UI 线程只选择文件、展示进度并排队提交控制消息；WASAPI loopback
 另有采集线程。`src/codec/` 已有 Windows Media Foundation H.264 Annex B 编解码封装，
-并通过关键帧、动态码率和 RGB32/NV12 转换回环测试；它尚未接入 PDTP 分片、FEC/NACK、
-会话协商或 Viewer 解码线程，产品路径仍使用 JPEG。尚未接入 GPU 抓屏、脏矩形、硬件编码
-或 Opus。
+并通过关键帧、动态码率和 RGB32/NV12 转换回环测试；PDTP codec 元数据、FEC/NACK
+重传和接收信号已接通，但会话协商、产品 H.264 编解码和 JPEG 自动回退仍未接入。
+尚未接入 GPU 抓屏、脏矩形、硬件编码或 Opus。
 
 文件发送支持主动取消：发送端最多发出一次 `file_cancel`，接收端回滚临时文件并回执
 `file_cancelled`。接收失败、本地读写失败与断链中断使用不同事件；断链只清理本机状态，
@@ -354,7 +356,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `src/transport/` | `PeerLink` 握手、打洞、直连/中继、UDP I/O、已认证包处理、链路统计和视频发送/接收流水线 |
 | `src/server/` | TCP 信令、UDP 中继、STUN、令牌、频次限制与中继限速 |
 | `src/client/` | TCP JSON Lines 信令客户端 |
-| `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入会话） |
+| `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入产品会话编解码） |
 | `src/session/` | 被控/Viewer 会话、`VideoPipeline` 媒体线程、`HostInputPipeline` 输入线程、音视频处理和文件传输 |
 | `src/app/` | 页面控制器、偏好、最近连接、单实例守卫、画质决策、音频播放和错误状态 |
 | `src/diagnostics/` | 文件日志、轮转、脱敏、运行标记、诊断服务和无压缩 ZIP 打包 |
@@ -430,8 +432,8 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
    优化顺序；评估渲染线程和线程池的收益与队列边界。
 4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证，以及在现有
    诊断包之上评估 minidump 与远程诊断。
-5. 媒体升级：先把现有 Media Foundation H.264 封装接入协议、传输、会话和 JPEG 回退，
-   再接 Opus；失败时始终保留整帧 JPEG 与 G.711 回退。
+5. 媒体升级：在已贯通的 PDTP codec 元数据之上接入会话协商、真实 H.264 编解码和 JPEG
+   自动回退，再接 Opus；失败时始终保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID、真实游戏兼容性与真实弱网
    下的拥塞参数校准。
 7. 交互低摩擦入口：在本地历史之上评估收藏、二维码和账号云同步，明确隐私边界后再实现。

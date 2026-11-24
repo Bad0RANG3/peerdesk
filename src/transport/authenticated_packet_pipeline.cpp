@@ -98,10 +98,15 @@ public:
         switch (header.type) {
         case PacketType::Data:
             if (header.stream == static_cast<quint8>(StreamKind::Video)) {
+                const VideoCodec codec =
+                    (header.flags & FlagH264) != 0
+                    ? VideoCodec::H264
+                    : VideoCodec::Jpeg;
                 emit videoDataReady(
                     generation_,
                     payload,
                     (header.flags & FlagKeyframe) != 0,
+                    codec,
                     threadName);
             } else if (header.stream == static_cast<quint8>(StreamKind::Control)
                        && payload.size() >= 4) {
@@ -111,9 +116,15 @@ public:
                 maybeAck(ReliableStream::currentTimeSeconds());
             }
             break;
-        case PacketType::Parity:
-            emit videoParityReady(generation_, payload, threadName);
+        case PacketType::Parity: {
+            const VideoCodec codec =
+                (header.flags & FlagH264) != 0
+                ? VideoCodec::H264
+                : VideoCodec::Jpeg;
+            emit videoParityReady(
+                generation_, payload, codec, threadName);
             break;
+        }
         case PacketType::Audio:
             emit audioReady(generation_, payload, threadName);
             break;
@@ -216,10 +227,12 @@ signals:
         quint64 generation,
         const QByteArray &payload,
         bool keyframe,
+        pd::VideoCodec codec,
         const QString &threadName);
     void videoParityReady(
         quint64 generation,
         const QByteArray &payload,
+        pd::VideoCodec codec,
         const QString &threadName);
     void audioReady(
         quint64 generation,
@@ -335,6 +348,7 @@ AuthenticatedPacketPipeline::AuthenticatedPacketPipeline(QObject *parent)
     : QObject(parent)
 {
     qRegisterMetaType<pd::LinkWireCommand>("pd::LinkWireCommand");
+    qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
     qRegisterMetaType<QList<quint16>>("QList<quint16>");
 
     worker_ = new AuthenticatedPacketWorker;
@@ -367,12 +381,13 @@ AuthenticatedPacketPipeline::AuthenticatedPacketPipeline(QObject *parent)
             quint64 generation,
             const QByteArray &payload,
             bool keyframe,
+            pd::VideoCodec codec,
             const QString &threadName) {
             if (!running_ || generation != generation_) {
                 return;
             }
             observeWorker(generation, threadName);
-            emit videoDataReceived(payload, keyframe);
+            emit videoDataReceived(payload, keyframe, codec);
         });
     connect(
         worker_,
@@ -381,12 +396,13 @@ AuthenticatedPacketPipeline::AuthenticatedPacketPipeline(QObject *parent)
         [this](
             quint64 generation,
             const QByteArray &payload,
+            pd::VideoCodec codec,
             const QString &threadName) {
             if (!running_ || generation != generation_) {
                 return;
             }
             observeWorker(generation, threadName);
-            emit videoParityReceived(payload);
+            emit videoParityReceived(payload, codec);
         });
     connect(
         worker_,

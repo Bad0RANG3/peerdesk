@@ -10,7 +10,10 @@ VideoSender::VideoSender(int mtu, int cacheFrames)
 {
 }
 
-QList<WirePacket> VideoSender::build(const QByteArray &data, bool keyframe)
+QList<WirePacket> VideoSender::build(
+    const QByteArray &data,
+    bool keyframe,
+    VideoCodec codec)
 {
     ++frameId_;
     const quint32 currentFrame = frameId_;
@@ -22,6 +25,9 @@ QList<WirePacket> VideoSender::build(const QByteArray &data, bool keyframe)
         quint8 flags = index == fragments.size() - 1 ? FlagLastFragment : 0;
         if (keyframe) {
             flags = static_cast<quint8>(flags | FlagKeyframe);
+        }
+        if (codec == VideoCodec::H264) {
+            flags = static_cast<quint8>(flags | FlagH264);
         }
         VideoFragment part;
         part.frameId = currentFrame;
@@ -49,12 +55,20 @@ QList<WirePacket> VideoSender::build(const QByteArray &data, bool keyframe)
             parity.groupIndex = static_cast<quint8>(group);
             parity.shards = static_cast<quint8>(shards.size());
             parity.data = xorBytes(shards, paritySize);
+            const quint8 parityFlags =
+                codec == VideoCodec::H264 ? FlagH264 : 0;
             output.append(
-                WirePacket{PacketType::Parity, 0, packParityFragment(parity)});
+                WirePacket{
+                    PacketType::Parity,
+                    parityFlags,
+                    packParityFragment(parity),
+                });
         }
     }
 
-    cache_.insert(currentFrame, fragments);
+    cache_.insert(
+        currentFrame,
+        CachedFrame{fragments, keyframe, codec});
     order_.append(currentFrame);
     while (order_.size() > cacheFrames_) {
         cache_.remove(order_.takeFirst());
@@ -69,7 +83,7 @@ QList<WirePacket> VideoSender::retransmit(
     if (it == cache_.constEnd()) {
         return {};
     }
-    const QList<QByteArray> &fragments = *it;
+    const QList<QByteArray> &fragments = it->fragments;
     QList<WirePacket> output;
     for (const quint16 index : missing) {
         if (index >= fragments.size()) {
@@ -80,13 +94,28 @@ QList<WirePacket> VideoSender::retransmit(
         part.index = index;
         part.count = static_cast<quint16>(fragments.size());
         part.data = fragments[index];
-        const quint8 flags = index == fragments.size() - 1
+        quint8 flags = index == fragments.size() - 1
             ? FlagLastFragment
             : 0;
+        if (it->keyframe) {
+            flags = static_cast<quint8>(flags | FlagKeyframe);
+        }
+        if (it->codec == VideoCodec::H264) {
+            flags = static_cast<quint8>(flags | FlagH264);
+        }
         output.append(
             WirePacket{PacketType::Data, flags, packVideoFragment(part)});
     }
     return output;
+}
+
+std::optional<VideoCodec> VideoSender::cachedCodec(quint32 frameId) const
+{
+    const auto it = cache_.constFind(frameId);
+    if (it == cache_.constEnd()) {
+        return std::nullopt;
+    }
+    return it->codec;
 }
 
 void VideoSender::reset()
@@ -110,6 +139,7 @@ void VideoReceiver::onFragment(
     quint16 count,
     const QByteArray &data,
     bool keyframe,
+    VideoCodec codec,
     double now)
 {
     auto it = frames_.find(frameId);
@@ -120,8 +150,16 @@ void VideoReceiver::onFragment(
         FrameState state(count);
         state.count = count;
         state.keyframe = keyframe;
+        state.codec = codec;
         state.created = now;
         it = frames_.insert(frameId, state);
+    } else {
+        if (keyframe) {
+            it->keyframe = true;
+        }
+        if (codec == VideoCodec::H264) {
+            it->codec = codec;
+        }
     }
     (void)it->assembler.add(index, data);
     if (it->assembler.complete()) {
@@ -133,12 +171,16 @@ void VideoReceiver::onParity(
     quint32 frameId,
     quint8 groupIndex,
     quint8 shards,
-    const QByteArray &data)
+    const QByteArray &data,
+    VideoCodec codec)
 {
     Q_UNUSED(shards);
     auto it = frames_.find(frameId);
     if (it == frames_.end()) {
         return;
+    }
+    if (codec == VideoCodec::H264) {
+        it->codec = codec;
     }
     const int start = static_cast<int>(groupIndex) * fecK_;
     const int end = std::min(start + fecK_, static_cast<int>(it->count));
@@ -193,10 +235,11 @@ void VideoReceiver::deliver(quint32 frameId, FrameState &state)
 {
     const QByteArray frame = state.assembler.assemble();
     const bool keyframe = state.keyframe;
+    const VideoCodec codec = state.codec;
     frames_.remove(frameId);
     lastDelivered_ = frameId;
     if (onFrame_) {
-        onFrame_(frame, keyframe);
+        onFrame_(frame, keyframe, codec);
     }
 }
 

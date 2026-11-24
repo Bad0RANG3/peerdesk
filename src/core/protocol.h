@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QList>
+#include <QMetaType>
 #include <QString>
 
 #include <optional>
@@ -44,10 +45,16 @@ enum class StreamKind : quint8 {
     Audio = 4,
 };
 
+enum class VideoCodec : quint8 {
+    Jpeg = 0,
+    H264 = 1,
+};
+
 enum PacketFlags : quint8 {
     FlagKeyframe = 0x01,
     FlagLastFragment = 0x02,
     FlagReliable = 0x04,
+    FlagH264 = 0x08,
 };
 
 struct Header {
@@ -157,3 +164,5 @@ private:
 [[nodiscard]] std::optional<QPair<quint32, QByteArray>> unwrapRelay(const QByteArray &datagram);
 
 } // namespace pd
+
+Q_DECLARE_METATYPE(pd::VideoCodec)

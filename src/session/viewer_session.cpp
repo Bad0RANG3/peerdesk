@@ -29,6 +29,7 @@ ViewerSession::ViewerSession(PeerLink *link, QObject *parent)
     , link_(link)
     , fileTransfer_(defaultReceiveDirectory())
 {
+    qRegisterMetaType<pd::VideoCodec>("pd::VideoCodec");
     if (link_) {
         connect(
             link_,
@@ -562,15 +563,16 @@ void ViewerSession::onLinkStateChanged(const QString &state)
 }
 
 void ViewerSession::onVideoFrame(
-    const QByteArray &jpeg,
-    bool keyframe)
+    const QByteArray &data,
+    bool keyframe,
+    VideoCodec codec)
 {
-    if (!started_ || jpeg.isEmpty()) {
+    if (!started_ || data.isEmpty()) {
         return;
     }
     ++videoSequence_;
-    emit videoFrameReceived(jpeg, videoSequence_, keyframe);
-    video_.submit(jpeg, videoSequence_, keyframe);
+    emit videoFrameReceived(data, videoSequence_, keyframe, codec);
+    video_.submit(data, videoSequence_, keyframe);
 }
 
 void ViewerSession::onAudioPacket(const QByteArray &payload)

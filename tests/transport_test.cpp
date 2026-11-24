@@ -292,18 +292,27 @@ private slots:
             }
         }
         VideoSender sender(1000);
-        const auto packets = sender.build(payload, true);
-        QList<QPair<QByteArray, bool>> frames;
+        const auto packets =
+            sender.build(payload, true, VideoCodec::H264);
+        QList<QByteArray> frames;
+        QList<bool> keyframes;
+        QList<VideoCodec> codecs;
         QList<int> keyframeRequests;
         VideoReceiver receiver(
-            [&frames](const QByteArray &data, bool keyframe) {
-                frames.append(qMakePair(data, keyframe));
+            [&frames, &keyframes, &codecs](
+                const QByteArray &data,
+                bool keyframe,
+                VideoCodec codec) {
+                frames.append(data);
+                keyframes.append(keyframe);
+                codecs.append(codec);
             },
             [&keyframeRequests]() { keyframeRequests.append(1); });
 
         bool dropped = false;
         for (const auto &packet : packets) {
             if (packet.type == PacketType::Data) {
+                QVERIFY((packet.flags & FlagH264) != 0);
                 const auto part = unpackVideoFragment(packet.payload);
                 QVERIFY(part.has_value());
                 if (part->index == 3 && !dropped) {
@@ -316,21 +325,30 @@ private slots:
                     part->count,
                     part->data,
                     (packet.flags & FlagKeyframe) != 0,
+                    (packet.flags & FlagH264) != 0
+                        ? VideoCodec::H264
+                        : VideoCodec::Jpeg,
                     0.0);
             } else {
+                QCOMPARE(packet.type, PacketType::Parity);
+                QVERIFY((packet.flags & FlagH264) != 0);
                 const auto parity = unpackParityFragment(packet.payload);
                 QVERIFY(parity.has_value());
                 receiver.onParity(
                     parity->frameId,
                     parity->groupIndex,
                     parity->shards,
-                    parity->data);
+                    parity->data,
+                    (packet.flags & FlagH264) != 0
+                        ? VideoCodec::H264
+                        : VideoCodec::Jpeg);
             }
         }
         QVERIFY(dropped);
         QCOMPARE(frames.size(), 1);
-        QCOMPARE(frames.front().first, payload);
-        QVERIFY(frames.front().second);
+        QCOMPARE(frames.front(), payload);
+        QVERIFY(keyframes.front());
+        QCOMPARE(codecs.front(), VideoCodec::H264);
         QVERIFY(keyframeRequests.isEmpty());
     }
 
@@ -338,17 +356,26 @@ private slots:
     {
         const QByteArray payload(5000, 'Z');
         VideoSender sender(1000);
-        const auto packets = sender.build(payload, false);
-        QList<QPair<QByteArray, bool>> frames;
+        const auto packets =
+            sender.build(payload, true, VideoCodec::H264);
+        QList<QByteArray> frames;
+        QList<bool> keyframes;
+        QList<VideoCodec> codecs;
         VideoReceiver receiver(
-            [&frames](const QByteArray &data, bool keyframe) {
-                frames.append(qMakePair(data, keyframe));
+            [&frames, &keyframes, &codecs](
+                const QByteArray &data,
+                bool keyframe,
+                VideoCodec codec) {
+                frames.append(data);
+                keyframes.append(keyframe);
+                codecs.append(codec);
             },
             []() {});
         QList<VideoFragment> held;
 
         for (const auto &packet : packets) {
             if (packet.type == PacketType::Data) {
+                QVERIFY((packet.flags & FlagH264) != 0);
                 const auto part = unpackVideoFragment(packet.payload);
                 QVERIFY(part.has_value());
                 if (part->index == 1 || part->index == 2) {
@@ -361,15 +388,23 @@ private slots:
                     part->count,
                     part->data,
                     false,
+                    (packet.flags & FlagH264) != 0
+                        ? VideoCodec::H264
+                        : VideoCodec::Jpeg,
                     0.0);
             } else {
+                QCOMPARE(packet.type, PacketType::Parity);
+                QVERIFY((packet.flags & FlagH264) != 0);
                 const auto parity = unpackParityFragment(packet.payload);
                 QVERIFY(parity.has_value());
                 receiver.onParity(
                     parity->frameId,
                     parity->groupIndex,
                     parity->shards,
-                    parity->data);
+                    parity->data,
+                    (packet.flags & FlagH264) != 0
+                        ? VideoCodec::H264
+                        : VideoCodec::Jpeg);
             }
         }
         QVERIFY(frames.isEmpty());
@@ -379,6 +414,9 @@ private slots:
         const auto repaired = sender.retransmit(
             requests.front().frameId, requests.front().missing);
         for (const auto &packet : repaired) {
+            QCOMPARE(packet.type, PacketType::Data);
+            QVERIFY((packet.flags & FlagKeyframe) != 0);
+            QVERIFY((packet.flags & FlagH264) != 0);
             const auto part = unpackVideoFragment(packet.payload);
             QVERIFY(part.has_value());
             receiver.onFragment(
@@ -386,11 +424,16 @@ private slots:
                 part->index,
                 part->count,
                 part->data,
-                false,
+                (packet.flags & FlagKeyframe) != 0,
+                (packet.flags & FlagH264) != 0
+                    ? VideoCodec::H264
+                    : VideoCodec::Jpeg,
                 0.1);
         }
         QCOMPARE(frames.size(), 1);
-        QCOMPARE(frames.front().first, payload);
+        QCOMPARE(frames.front(), payload);
+        QVERIFY(keyframes.front());
+        QCOMPARE(codecs.front(), VideoCodec::H264);
     }
 
     void videoKeyframeTimeoutRequestsNewFrame()
@@ -399,12 +442,20 @@ private slots:
         const auto packets = sender.build(QByteArray(4000, 'K'), true);
         int requested = 0;
         VideoReceiver receiver(
-            [](const QByteArray &, bool) {},
+            [](const QByteArray &, bool, VideoCodec) {},
             [&requested]() { ++requested; });
         const auto part = unpackVideoFragment(packets.front().payload);
         QVERIFY(part.has_value());
+        QCOMPARE(packets.front().type, PacketType::Data);
+        QCOMPARE(packets.front().flags & FlagH264, quint8(0));
         receiver.onFragment(
-            part->frameId, part->index, part->count, part->data, true, 0.0);
+            part->frameId,
+            part->index,
+            part->count,
+            part->data,
+            true,
+            VideoCodec::Jpeg,
+            0.0);
         (void)receiver.tick(1e9);
         QCOMPARE(requested, 1);
         QCOMPARE(receiver.lostFrames(), 1);

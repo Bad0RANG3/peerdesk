@@ -15,6 +15,7 @@ struct VideoPacketBatch {
     quint32 frameId = 0;
     bool keyframe = false;
     bool retransmit = false;
+    VideoCodec codec = VideoCodec::Jpeg;
     QList<WirePacket> packets;
 };
 
@@ -29,7 +30,10 @@ public:
 
     void start();
     void stop();
-    void submit(const QByteArray &jpeg, bool keyframe);
+    void submit(
+        const QByteArray &data,
+        bool keyframe,
+        VideoCodec codec = VideoCodec::Jpeg);
     void retransmit(quint32 frameId, const QList<quint16> &missing);
 
     [[nodiscard]] QString packetizerThreadName() const;

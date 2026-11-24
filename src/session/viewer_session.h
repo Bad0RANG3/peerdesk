@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/protocol.h"
 #include "session/file_transfer_pipeline.h"
 #include "session/session_types.h"
 #include "session/viewer_audio_pipeline.h"
@@ -93,9 +94,10 @@ public:
 
 signals:
     void videoFrameReceived(
-        const QByteArray &jpeg,
+        const QByteArray &data,
         quint32 sequence,
-        bool keyframe);
+        bool keyframe,
+        pd::VideoCodec codec);
     void frameDecoded(const QImage &image, bool keyframe);
     void audioReceived(
         const QByteArray &pcm16,
@@ -123,7 +125,10 @@ signals:
 
 private:
     void onLinkStateChanged(const QString &state);
-    void onVideoFrame(const QByteArray &jpeg, bool keyframe);
+    void onVideoFrame(
+        const QByteArray &data,
+        bool keyframe,
+        VideoCodec codec);
     void onAudioPacket(const QByteArray &payload);
     void dispatch(const QJsonObject &message);
     void handleRemoteFileResult(const QJsonObject &message);

@@ -41,7 +41,7 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 | 路径 | 职责 |
 | --- | --- |
 | `src/core/` | 20 字节报文头、JSON 载荷、视频/控制分片、XOR FEC、可靠流、STUN、X25519/HKDF/AEAD、重放窗口 |
-| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态，以及 UDP I/O、已认证包和视频发送/接收流水线 |
+| `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态，以及 UDP I/O、已认证包和带 codec 元数据的视频发送/接收流水线 |
 | `src/server/` | TCP JSON Lines 信令、UDP 中继、STUN、连接频次限制和每会话令牌桶 |
 | `src/client/` | TCP 信令客户端、注册/配对、候选更新和错误映射 |
 | `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入会话媒体路径） |
@@ -143,10 +143,12 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
 
 - `VideoPipeline` 在独立的 `PeerDeskVideo` 线程中执行抓屏、缩放、静帧指纹和 JPEG
   编码，并用单次定时器在每帧编码完成后串行调度下一帧。
-- `HostSession` 在主线程接收编码完成的帧并交给 `PeerLink`；`PeerLink` 把 JPEG 提交到
-  `PeerDeskVideoSend`，由该线程独占 `VideoSender` 并完成分片、XOR FEC 和 NACK 重传
-  缓存检索。批次以排队信号回到主线程；`PeerLink` 选定路径后，把包头构造、AEAD 加密、
-  发送序号和 UDP 写入排队交给 `PeerDeskUdpIo` 线程。
+- `HostSession` 在主线程接收编码完成的帧并交给 `PeerLink`；`PeerLink` 把帧数据和
+  codec 提交到 `PeerDeskVideoSend`，由该线程独占 `VideoSender` 并完成分片、XOR FEC
+  和 NACK 重传缓存检索。DATA 与 PARITY 使用 `FlagH264` 区分 JPEG/H.264，重传继续
+  保留 codec 和关键帧标志，并按原分片位置设置末片标志。批次以排队信号回到主线程；
+  `PeerLink` 选定路径后，把包头构造、AEAD 加密、发送序号和 UDP 写入排队交给
+  `PeerDeskUdpIo` 线程。
 - `FramePacer` 根据实际帧大小调整 JPEG 质量，带宽上限同时影响质量预算和有效发帧率。
   `HostSession` 每秒把链路 RTT、NACK 帧/分片计数和带 `loss: true` 的自动关键帧请求
   交给 `AdaptiveVideoRateController`。控制器以 0.9 秒为最小调整间隔，在拥塞时同时
@@ -159,11 +161,12 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   路由快照；NACK 由 `PeerDeskLinkFeedback` 异步发送，关键帧请求经
   `PeerDeskPeerLinkRx` 的可靠控制流生成 DATA，并在反馈线程限制为每 200 ms 一次。
   重传包由 `PeerDeskVideoSend` 检索缓存并构造；关键帧丢失仍会触发刷新请求。
-- Viewer 把收到的 JPEG 交给 `PeerDeskViewerVideo` 线程解码；解码慢时只保留最新帧，
-  尚未交付的关键帧不会被普通帧覆盖。解码完成的 `QImage` 再交给
-  `PeerDeskViewerPresent` 线程，按当前窗口与 `devicePixelRatio` 生成等比缩放后的
-  物理像素图像；缩放同样只保留最新请求。主线程画布只执行最终 `drawImage`，输入坐标
-  仍按源图对应的实际画面矩形归一化。
+- Viewer 当前把产品路径收到的 JPEG 交给 `PeerDeskViewerVideo` 线程解码；解码慢时只
+  保留最新帧，尚未交付的关键帧不会被普通帧覆盖。视频重组和会话信号已经携带 codec
+  元数据，但 Viewer 尚未接入 H.264 解码，不能把带 H.264 标志的数据视为可播放的端到端
+  路径。解码完成的 `QImage` 再交给 `PeerDeskViewerPresent` 线程，按当前窗口与
+  `devicePixelRatio` 生成等比缩放后的物理像素图像；缩放同样只保留最新请求。主线程
+  画布只执行最终 `drawImage`，输入坐标仍按源图对应的实际画面矩形归一化。
 
 `src/codec/` 另提供 Windows Media Foundation H.264 底层封装：
 
@@ -171,8 +174,9 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   动态码率，并在关键帧中携带 SPS/PPS。
 - `H264Decoder` 从 Annex B 输入自动协商 NV12 输出，处理流格式变化并转换为 RGB32。
 - 编解码回环、关键帧刷新、非法输入和码率更新已有 Windows 自动化测试。
-- 该封装尚未接入 PDTP codec 元数据、FEC/NACK 重传、会话协商、JPEG 自动回退或 Viewer
-  解码线程；当前实况视频仍全部使用 JPEG。
+- PDTP DATA/PARITY 标志、NACK 重传、跨线程发送/接收信号和 `HostSession` 已贯通 codec
+  元数据；该封装尚未接入会话协商、产品编解码路径、JPEG 自动回退或 Viewer H.264
+  解码，当前实况视频仍全部使用 JPEG。
 
 ### 3.4 音频数据流
 
@@ -416,7 +420,8 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 ## 8. 当前架构限制
 
 - 实况视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码；Media Foundation H.264
-  封装虽已通过底层回环，但尚未接入协议和会话。
+  封装虽已通过底层回环，codec 元数据也已贯通协议、分片、FEC/NACK 重传和接收信号，
+  但尚未接入会话协商、产品编解码和自动回退。
 - 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、JPEG 编码、Viewer
   解码与呈现、视频发送分片/FEC/NACK 缓存检索、入站视频重组/FEC/NACK 判定已移至
   独立线程，音频包校验和 µ-law 解码也已移至 FIFO 工作线程，抖动缓冲和 `QAudioSink`

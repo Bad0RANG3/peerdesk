@@ -51,8 +51,13 @@ public:
 
 signals:
     void controlMessageReceived(const QJsonObject &message);
-    void videoDataReceived(const QByteArray &payload, bool keyframe);
-    void videoParityReceived(const QByteArray &payload);
+    void videoDataReceived(
+        const QByteArray &payload,
+        bool keyframe,
+        pd::VideoCodec codec);
+    void videoParityReceived(
+        const QByteArray &payload,
+        pd::VideoCodec codec);
     void audioReceived(const QByteArray &payload);
     void videoRetransmitRequested(
         quint32 frameId,

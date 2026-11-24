@@ -321,7 +321,7 @@ void HostSession::onVideoFrame(const EncodedVideoFrame &frame)
         || frame.data.isEmpty()) {
         return;
     }
-    link_->sendVideo(frame.data, frame.keyframe);
+    link_->sendVideo(frame.data, frame.keyframe, frame.codec);
     ++sentFrames_;
     lastFrameBytes_ = frame.data.size();
     lastFrameQuality_ = frame.quality;

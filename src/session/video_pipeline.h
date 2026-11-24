@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/protocol.h"
 #include "session/media_sources.h"
 #include "session/session_types.h"
 
@@ -19,6 +20,7 @@ struct EncodedVideoFrame {
     int effectiveFps = 0;
     qint64 captureMs = 0;
     qint64 encodeMs = 0;
+    VideoCodec codec = VideoCodec::Jpeg;
 };
 
 class VideoCaptureWorker;

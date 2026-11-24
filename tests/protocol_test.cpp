@@ -17,7 +17,7 @@ private slots:
         header.seq = 4321;
         header.tsMs = 1700000;
         header.stream = static_cast<quint8>(StreamKind::Video);
-        header.flags = FlagKeyframe | FlagLastFragment;
+        header.flags = FlagKeyframe | FlagLastFragment | FlagH264;
         header.plen = 1200;
         header.session = 7;
 
@@ -31,7 +31,9 @@ private slots:
         QCOMPARE(parsed->seq, 4321U);
         QCOMPARE(parsed->tsMs, 1700000U);
         QCOMPARE(parsed->stream, quint8(0));
-        QCOMPARE(parsed->flags, quint8(FlagKeyframe | FlagLastFragment));
+        QCOMPARE(
+            parsed->flags,
+            quint8(FlagKeyframe | FlagLastFragment | FlagH264));
         QCOMPARE(parsed->plen, quint16(1200));
         QCOMPARE(parsed->session, 7U);
     }

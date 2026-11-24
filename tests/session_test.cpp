@@ -2452,7 +2452,8 @@ private slots:
             [&encodedFrames](
                 const QByteArray &jpeg,
                 quint32,
-                bool) {
+                bool,
+                VideoCodec) {
                 encodedFrames.append(jpeg);
             });
         connect(

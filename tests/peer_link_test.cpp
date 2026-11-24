@@ -185,6 +185,7 @@ private slots:
         QList<QJsonObject> clientControls;
         QList<QByteArray> clientFrames;
         QList<bool> clientKeyframes;
+        QList<VideoCodec> clientCodecs;
         QList<QByteArray> hostAudio;
         connect(&host, &PeerLink::controlMessageReceived,
                 [&hostControls](const QJsonObject &message) {
@@ -195,9 +196,13 @@ private slots:
                     clientControls.append(message);
                 });
         connect(&client, &PeerLink::videoFrameReceived,
-                [&clientFrames, &clientKeyframes](const QByteArray &frame, bool keyframe) {
+                [&clientFrames, &clientKeyframes, &clientCodecs](
+                    const QByteArray &frame,
+                    bool keyframe,
+                    VideoCodec codec) {
                     clientFrames.append(frame);
                     clientKeyframes.append(keyframe);
+                    clientCodecs.append(codec);
                 });
         connect(&host, &PeerLink::audioReceived,
                 [&hostAudio](const QByteArray &payload) {
@@ -238,14 +243,15 @@ private slots:
             received->value(QStringLiteral("body")).toString(),
             QString(4000, QChar(u'x')));
 
-        QByteArray jpeg(24000, '\0');
-        for (qsizetype index = 0; index < jpeg.size(); ++index) {
-            jpeg[index] = static_cast<char>((index * 31) & 0xFF);
+        QByteArray h264(24000, '\0');
+        for (qsizetype index = 0; index < h264.size(); ++index) {
+            h264[index] = static_cast<char>((index * 31) & 0xFF);
         }
-        host.sendVideo(jpeg, true);
+        host.sendVideo(h264, true, VideoCodec::H264);
         QVERIFY(waitUntil([&]() { return !clientFrames.isEmpty(); }));
-        QCOMPARE(clientFrames.constFirst(), jpeg);
+        QCOMPARE(clientFrames.constFirst(), h264);
         QCOMPARE(clientKeyframes.constFirst(), true);
+        QCOMPARE(clientCodecs.constFirst(), VideoCodec::H264);
         QCOMPARE(
             host.videoPacketizerThreadName(),
             QStringLiteral("PeerDeskVideoSend"));
@@ -477,11 +483,15 @@ private slots:
             });
         pipeline.start();
 
-        pipeline.submit(QByteArray(24000, 'v'), true);
+        pipeline.submit(
+            QByteArray(24000, 'v'),
+            true,
+            VideoCodec::H264);
         QVERIFY(waitUntil([&]() { return !batches.isEmpty(); }));
         const VideoPacketBatch original = batches.constFirst();
         QCOMPARE(original.keyframe, true);
         QCOMPARE(original.retransmit, false);
+        QCOMPARE(original.codec, VideoCodec::H264);
         QVERIFY(original.frameId > 0);
         QCOMPARE(
             pipeline.packetizerThreadName(),
@@ -506,9 +516,17 @@ private slots:
         const VideoPacketBatch retry = batches.constLast();
         QCOMPARE(retry.frameId, original.frameId);
         QCOMPARE(retry.retransmit, true);
+        QCOMPARE(retry.codec, VideoCodec::H264);
         QCOMPARE(retry.packets.size(), qsizetype(2));
         QCOMPARE(retry.packets.at(0).payload, fragments.at(0).payload);
         QCOMPARE(retry.packets.at(1).payload, fragments.at(2).payload);
+
+        const qsizetype beforeJpeg = batches.size();
+        pipeline.submit(QByteArray(4000, 'j'), false);
+        QVERIFY(waitUntil([&]() {
+            return batches.size() > beforeJpeg;
+        }));
+        QCOMPARE(batches.constLast().codec, VideoCodec::Jpeg);
     }
 
     void videoReceiverReassemblesAndRecoversOffThread()
@@ -516,16 +534,19 @@ private slots:
         VideoReceivePipeline pipeline;
         QList<QByteArray> frames;
         QList<bool> keyframes;
+        QList<VideoCodec> codecs;
         QList<VideoNack> nacks;
         int keyframeRequests = 0;
         connect(
             &pipeline,
             &VideoReceivePipeline::frameReady,
-            [&frames, &keyframes](
+            [&frames, &keyframes, &codecs](
                 const QByteArray &frame,
-                bool keyframe) {
+                bool keyframe,
+                VideoCodec codec) {
                 frames.append(frame);
                 keyframes.append(keyframe);
+                codecs.append(codec);
             });
         connect(
             &pipeline,
@@ -545,7 +566,8 @@ private slots:
         for (qsizetype index = 0; index < jpeg.size(); ++index) {
             jpeg[index] = static_cast<char>((index * 17) & 0xFF);
         }
-        const QList<WirePacket> packets = sender.build(jpeg, true);
+        const QList<WirePacket> packets =
+            sender.build(jpeg, true, VideoCodec::H264);
         QList<WirePacket> parity;
         for (const WirePacket &packet : packets) {
             if (packet.type == PacketType::Parity) {
@@ -557,15 +579,23 @@ private slots:
             if (fragment->index != 3) {
                 pipeline.submitData(
                     packet.payload,
-                    (packet.flags & FlagKeyframe) != 0);
+                    (packet.flags & FlagKeyframe) != 0,
+                    (packet.flags & FlagH264) != 0
+                        ? VideoCodec::H264
+                        : VideoCodec::Jpeg);
             }
         }
         QVERIFY(!parity.isEmpty());
-        pipeline.submitParity(parity.constFirst().payload);
+        pipeline.submitParity(
+            parity.constFirst().payload,
+            (parity.constFirst().flags & FlagH264) != 0
+                ? VideoCodec::H264
+                : VideoCodec::Jpeg);
 
         QVERIFY(waitUntil([&]() { return !frames.isEmpty(); }));
         QCOMPARE(frames.constFirst(), jpeg);
         QCOMPARE(keyframes.constFirst(), true);
+        QCOMPARE(codecs.constFirst(), VideoCodec::H264);
         QCOMPARE(
             pipeline.reassemblerThreadName(),
             QStringLiteral("PeerDeskVideoReceive"));
@@ -1186,6 +1216,7 @@ private slots:
 
         QList<QJsonObject> hostControls;
         QList<QByteArray> clientFrames;
+        QList<VideoCodec> clientCodecs;
         QList<QByteArray> hostAudio;
         connect(
             &host,
@@ -1196,8 +1227,12 @@ private slots:
         connect(
             &client,
             &PeerLink::videoFrameReceived,
-            [&clientFrames](const QByteArray &frame, bool) {
+            [&clientFrames, &clientCodecs](
+                const QByteArray &frame,
+                bool,
+                VideoCodec codec) {
                 clientFrames.append(frame);
+                clientCodecs.append(codec);
             });
         connect(
             &host,
@@ -1231,10 +1266,11 @@ private slots:
                     });
             }));
 
-        const QByteArray jpeg(18000, 'v');
-        host.sendVideo(jpeg, true);
+        const QByteArray h264(18000, 'v');
+        host.sendVideo(h264, true, VideoCodec::H264);
         QVERIFY(waitUntil([&]() { return !clientFrames.isEmpty(); }));
-        QCOMPARE(clientFrames.constFirst(), jpeg);
+        QCOMPARE(clientFrames.constFirst(), h264);
+        QCOMPARE(clientCodecs.constFirst(), VideoCodec::H264);
 
         const QByteArray audio = QByteArrayLiteral("relay-audio-frame");
         client.sendAudio(audio);
@@ -1282,7 +1318,10 @@ private slots:
         connect(
             &client,
             &PeerLink::videoFrameReceived,
-            [&frames](const QByteArray &frame, bool) {
+            [&frames](
+                const QByteArray &frame,
+                bool,
+                VideoCodec) {
                 frames.append(frame);
             });
         QVERIFY(connectPeers());

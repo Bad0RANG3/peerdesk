@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/protocol.h"
+
 #include <QByteArray>
 #include <QList>
 #include <QObject>
@@ -21,15 +23,23 @@ public:
     void stop();
     void resetSession();
 
-    void submitData(const QByteArray &payload, bool keyframe);
-    void submitParity(const QByteArray &payload);
+    void submitData(
+        const QByteArray &payload,
+        bool keyframe,
+        VideoCodec codec = VideoCodec::Jpeg);
+    void submitParity(
+        const QByteArray &payload,
+        VideoCodec codec = VideoCodec::Jpeg);
 
     [[nodiscard]] bool running() const { return running_; }
     [[nodiscard]] quint64 sessionGeneration() const { return generation_; }
     [[nodiscard]] QString reassemblerThreadName() const;
 
 signals:
-    void frameReady(const QByteArray &frame, bool keyframe);
+    void frameReady(
+        const QByteArray &frame,
+        bool keyframe,
+        pd::VideoCodec codec);
     void nackReady(quint32 frameId, const QList<quint16> &missing);
     void keyframeRequested();
 
@@ -38,6 +48,7 @@ private:
         quint64 generation,
         const QByteArray &frame,
         bool keyframe,
+        pd::VideoCodec codec,
         const QString &threadName);
     void onWorkerNack(
         quint64 generation,

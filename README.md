@@ -84,8 +84,9 @@ CI 只依赖原生工具链。
   入站解析、认证和重放检查在 UDP I/O 线程完成，接收代际隔离重置前排队的旧会话包。
 - **视频**：GDI 抓屏、多显示器、独立媒体线程内的缩放/静帧检测/JPEG 编码、网络反馈
   驱动的质量/帧率上限自适应、Viewer 独立解码与呈现线程、发送工作线程内的分片与
-  XOR FEC、缓存检索，以及接收
-  工作线程内的分片解析、重组、XOR FEC 恢复、超时丢帧和 NACK 判定；
+  XOR FEC、缓存检索，以及接收工作线程内的分片解析、重组、XOR FEC 恢复、超时丢帧和
+  NACK 判定；PDTP 的 DATA、PARITY 和 NACK 重传已携带 JPEG/H.264 codec 元数据，
+  当前产品发送仍为整帧 JPEG；
   `PeerDeskPeerLinkRx` 负责已认证包分发、控制可靠流和 ACK/PING 处理；
   `PeerDeskLinkFeedback` 异步发送 NACK、Pong、ACK 和控制 DATA，关键帧请求经认证
   可靠控制流提交并限制为每 200 ms 一次；`PeerLink` 主线程只负责路径锁定、接收统计、
@@ -316,7 +317,8 @@ Windows CI 会配置、编译并执行
   长时间会话下的阈值与恢复节奏尚未完成参数校准。
 - 真实跨机、NAT 组合、丢包、抖动和长时间会话尚未形成正式验收报告。
 - 产品视频路径仍是整帧 JPEG。仓库已具备 Windows Media Foundation H.264 编解码封装，
-  并通过 Annex B 编解码、关键帧和码率调整回环测试，但尚未接入 PDTP 分片、会话协商和
+  并通过 Annex B 编解码、关键帧和码率调整回环测试，且 PDTP 的 DATA、PARITY、NACK
+  重传和接收信号已贯通 codec 元数据；但尚未接入会话协商、产品 H.264 编解码路径和
   自动回退，因此还不能宣称端到端 H.264 或硬件编码能力。
 - 抓屏仅有 GDI 路径，每帧完整抓取/缩放/编码；被控端媒体线程、Viewer 解码与呈现线程、
   `PeerDeskVideoSend` 分片线程、`PeerDeskVideoReceive` 重组线程和 `PeerDeskUdpIo`
