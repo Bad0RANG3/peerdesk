@@ -61,6 +61,16 @@ QDateTime readDateTime(const QVariant &value)
     return result;
 }
 
+bool sameEndpoint(
+    const QString &code,
+    const QString &server,
+    const QString &otherCode,
+    const QString &otherServer)
+{
+    return code == otherCode
+        && server.compare(otherServer, Qt::CaseInsensitive) == 0;
+}
+
 } // namespace
 
 Preferences::Preferences()
@@ -433,6 +443,198 @@ void Preferences::recordRecentConnection(
 void Preferences::clearRecentConnections()
 {
     setRecentConnections({});
+}
+
+QList<FavoriteConnection> Preferences::favoriteConnections() const
+{
+    QList<FavoriteConnection> result;
+    if (!settings_) {
+        return result;
+    }
+
+    const int storedCount =
+        settings_->beginReadArray(QStringLiteral("viewer/favorites"));
+    const int count = std::min(storedCount, kFavoriteConnectionLimit);
+    result.reserve(count);
+    for (int index = 0; index < count; ++index) {
+        settings_->setArrayIndex(index);
+        FavoriteConnection entry;
+        const QString code = settings_
+            ->value(QStringLiteral("code"))
+            .toString()
+            .trimmed();
+        if (!codeIsValid(code)) {
+            continue;
+        }
+        entry.code = normalizeCode(code);
+        entry.name = cleanPeerName(
+            settings_->value(QStringLiteral("name")).toString());
+        entry.server = normalizedServer(
+            settings_->value(QStringLiteral("server")).toString());
+        if (entry.server.isEmpty()) {
+            continue;
+        }
+
+        const bool duplicate = std::any_of(
+            result.cbegin(),
+            result.cend(),
+            [&entry](const FavoriteConnection &existing) {
+                return sameEndpoint(
+                    existing.code,
+                    existing.server,
+                    entry.code,
+                    entry.server);
+            });
+        if (!duplicate) {
+            result.append(entry);
+        }
+    }
+    settings_->endArray();
+    return result;
+}
+
+void Preferences::setFavoriteConnections(
+    const QList<FavoriteConnection> &connections)
+{
+    if (!settings_) {
+        return;
+    }
+
+    QList<FavoriteConnection> normalized;
+    normalized.reserve(
+        std::min(
+            static_cast<qsizetype>(kFavoriteConnectionLimit),
+            connections.size()));
+    for (const FavoriteConnection &connection : connections) {
+        if (!codeIsValid(connection.code)) {
+            continue;
+        }
+        FavoriteConnection entry;
+        entry.code = normalizeCode(connection.code);
+        entry.name = cleanPeerName(connection.name);
+        entry.server = normalizedServer(connection.server);
+        if (entry.server.isEmpty()) {
+            continue;
+        }
+        const bool duplicate = std::any_of(
+            normalized.cbegin(),
+            normalized.cend(),
+            [&entry](const FavoriteConnection &existing) {
+                return sameEndpoint(
+                    existing.code,
+                    existing.server,
+                    entry.code,
+                    entry.server);
+            });
+        if (!duplicate) {
+            normalized.append(entry);
+        }
+        if (normalized.size() == kFavoriteConnectionLimit) {
+            break;
+        }
+    }
+
+    settings_->remove(QStringLiteral("viewer/favorites"));
+    settings_->beginWriteArray(
+        QStringLiteral("viewer/favorites"),
+        normalized.size());
+    for (int index = 0; index < normalized.size(); ++index) {
+        settings_->setArrayIndex(index);
+        const FavoriteConnection &entry = normalized.at(index);
+        settings_->setValue(QStringLiteral("code"), entry.code);
+        settings_->setValue(QStringLiteral("name"), entry.name);
+        settings_->setValue(QStringLiteral("server"), entry.server);
+    }
+    settings_->endArray();
+    settings_->sync();
+}
+
+void Preferences::recordFavoriteConnection(
+    const QString &code,
+    const QString &name,
+    const QString &server)
+{
+    FavoriteConnection entry;
+    entry.code = normalizeCode(code);
+    entry.name = cleanPeerName(name);
+    entry.server = normalizedServer(server);
+    if (!codeIsValid(entry.code) || entry.server.isEmpty()) {
+        return;
+    }
+
+    QList<FavoriteConnection> connections = favoriteConnections();
+    connections.erase(
+        std::remove_if(
+            connections.begin(),
+            connections.end(),
+            [&entry](const FavoriteConnection &existing) {
+                return sameEndpoint(
+                    existing.code,
+                    existing.server,
+                    entry.code,
+                    entry.server);
+            }),
+        connections.end());
+    connections.prepend(entry);
+    if (connections.size() > kFavoriteConnectionLimit) {
+        connections.resize(kFavoriteConnectionLimit);
+    }
+    setFavoriteConnections(connections);
+}
+
+void Preferences::removeFavoriteConnection(
+    const QString &code,
+    const QString &server)
+{
+    const QString normalizedCode = normalizeCode(code);
+    const QString normalized = normalizedServer(server);
+    if (!codeIsValid(normalizedCode) || normalized.isEmpty()) {
+        return;
+    }
+
+    QList<FavoriteConnection> connections = favoriteConnections();
+    connections.erase(
+        std::remove_if(
+            connections.begin(),
+            connections.end(),
+            [&normalizedCode, &normalized](
+                const FavoriteConnection &existing) {
+                return sameEndpoint(
+                    existing.code,
+                    existing.server,
+                    normalizedCode,
+                    normalized);
+            }),
+        connections.end());
+    setFavoriteConnections(connections);
+}
+
+bool Preferences::isFavoriteConnection(
+    const QString &code,
+    const QString &server) const
+{
+    const QString normalizedCode = normalizeCode(code);
+    const QString normalized = normalizedServer(server);
+    if (!codeIsValid(normalizedCode) || normalized.isEmpty()) {
+        return false;
+    }
+    const QList<FavoriteConnection> connections = favoriteConnections();
+    return std::any_of(
+        connections.cbegin(),
+        connections.cend(),
+        [&normalizedCode, &normalized](
+            const FavoriteConnection &existing) {
+            return sameEndpoint(
+                existing.code,
+                existing.server,
+                normalizedCode,
+                normalized);
+        });
+}
+
+void Preferences::clearFavoriteConnections()
+{
+    setFavoriteConnections({});
 }
 
 void Preferences::sync()

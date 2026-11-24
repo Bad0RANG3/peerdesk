@@ -1364,6 +1364,145 @@ private slots:
         QCOMPARE(entries.constFirst().name, QStringLiteral("Recovered"));
     }
 
+    void favoriteConnectionsPersistAndDeduplicate()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString ini =
+            directory.filePath(QStringLiteral("favorites.ini"));
+
+        {
+            Preferences preferences(ini);
+            QVERIFY(preferences.favoriteConnections().isEmpty());
+            preferences.recordFavoriteConnection(
+                QStringLiteral("123 456 789"),
+                QStringLiteral("OFFICE-PC"),
+                QStringLiteral("desk.example"));
+            preferences.recordFavoriteConnection(
+                QStringLiteral("223456789"),
+                QStringLiteral("Laptop"),
+                QStringLiteral("desk.example:7901"));
+            preferences.recordFavoriteConnection(
+                QStringLiteral("123456789"),
+                QStringLiteral("OFFICE-PC Updated"),
+                QStringLiteral("desk.example:7900"));
+
+            const QList<FavoriteConnection> entries =
+                preferences.favoriteConnections();
+            QCOMPARE(entries.size(), 2);
+            QCOMPARE(entries.at(0).code, QStringLiteral("123456789"));
+            QCOMPARE(
+                entries.at(0).name,
+                QStringLiteral("OFFICE-PC Updated"));
+            QCOMPARE(
+                entries.at(0).server,
+                QStringLiteral("desk.example:7900"));
+            QVERIFY(preferences.isFavoriteConnection(
+                QStringLiteral("123 456 789"),
+                QStringLiteral("DESK.EXAMPLE:7900")));
+
+            for (int index = 0; index < 5; ++index) {
+                preferences.recordFavoriteConnection(
+                    QStringLiteral("30000000%1").arg(index),
+                    QStringLiteral("Favorite %1").arg(index),
+                    QStringLiteral("192.0.2.%1:7900").arg(index + 1));
+            }
+            const QList<FavoriteConnection> capped =
+                preferences.favoriteConnections();
+            QCOMPARE(
+                capped.size(),
+                Preferences::kFavoriteConnectionLimit);
+            QCOMPARE(
+                capped.constFirst().name,
+                QStringLiteral("Favorite 4"));
+            QCOMPARE(
+                capped.constLast().name,
+                QStringLiteral("Favorite 1"));
+        }
+
+        {
+            Preferences preferences(ini);
+            QCOMPARE(preferences.favoriteConnections().size(), 4);
+            QVERIFY(preferences.isFavoriteConnection(
+                QStringLiteral("300000004"),
+                QStringLiteral("192.0.2.5:7900")));
+            preferences.removeFavoriteConnection(
+                QStringLiteral("300 000 004"),
+                QStringLiteral("192.0.2.5:7900"));
+            QVERIFY(!preferences.isFavoriteConnection(
+                QStringLiteral("300000004"),
+                QStringLiteral("192.0.2.5:7900")));
+            QCOMPARE(preferences.favoriteConnections().size(), 3);
+        }
+
+        {
+            Preferences preferences(ini);
+            preferences.clearFavoriteConnections();
+            QVERIFY(preferences.favoriteConnections().isEmpty());
+        }
+
+        QSettings raw(ini, QSettings::IniFormat);
+        for (const QString &key : raw.allKeys()) {
+            if (key.startsWith(QStringLiteral("viewer/favorites"))) {
+                QVERIFY(!key.contains(
+                    QStringLiteral("token"),
+                    Qt::CaseInsensitive));
+            }
+        }
+    }
+
+    void favoriteConnectionsIgnoreMalformedEntries()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString ini =
+            directory.filePath(QStringLiteral("favorites-legacy.ini"));
+        {
+            QSettings settings(ini, QSettings::IniFormat);
+            settings.setValue(
+                QStringLiteral("viewer/favorites/size"),
+                3);
+            settings.setValue(
+                QStringLiteral("viewer/favorites/1/code"),
+                QStringLiteral("012345678"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/1/name"),
+                QStringLiteral("Leading Zero"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/1/server"),
+                QStringLiteral("legacy.example:7900"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/2/code"),
+                QStringLiteral("123456789"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/2/name"),
+                QStringLiteral("Missing Server"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/2/server"),
+                QString());
+            settings.setValue(
+                QStringLiteral("viewer/favorites/3/code"),
+                QStringLiteral("987654321"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/3/name"),
+                QStringLiteral("Valid"));
+            settings.setValue(
+                QStringLiteral("viewer/favorites/3/server"),
+                QStringLiteral("valid.example"));
+            settings.sync();
+        }
+
+        Preferences preferences(ini);
+        const QList<FavoriteConnection> entries =
+            preferences.favoriteConnections();
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.constFirst().code, QStringLiteral("987654321"));
+        QCOMPARE(entries.constFirst().name, QStringLiteral("Valid"));
+        QCOMPARE(
+            entries.constFirst().server,
+            QStringLiteral("valid.example:7900"));
+    }
+
     void preferencesRoundTrip()
     {
         QTemporaryDir hostConfig;

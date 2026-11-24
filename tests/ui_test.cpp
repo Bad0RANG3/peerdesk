@@ -102,6 +102,7 @@ private slots:
     void validConnectionIsDispatched();
     void connectedStateSwitchesToDisconnect();
     void recentConnectionsSelectionAndClear();
+    void favoriteDevicesQuickConnectAndToggle();
     void navigationSwitchesPagesWithoutAutoStart();
     void hostPanelRendersWithSyntheticSource();
     void viewerCanvasScalesAndNormalizesCoordinates();
@@ -133,6 +134,7 @@ private slots:
     void closeWithoutTrayQuits();
     void closeToTrayHidesAndExplicitQuitWorks();
     void appWindowLoadsAndClearsRecentConnections();
+    void appWindowRemovesFavoriteDevices();
     void settingsUpdateControllersAndConnectionPage();
     void settingsShowDiagnosticsAndRecoveryHint();
     void settingsStartupRegistrationRoundTrip();
@@ -308,6 +310,115 @@ void UiTest::recentConnectionsSelectionAndClear()
     for (QPushButton *button : page.recentConnectionButtons()) {
         QVERIFY(button->isHidden());
     }
+}
+
+void UiTest::favoriteDevicesQuickConnectAndToggle()
+{
+    pd::ui::ConnectionPage page;
+    page.resize(900, 760);
+    page.show();
+    QTest::qWait(20);
+
+    QVERIFY(page.favoriteDevicesPanel()->isHidden());
+    QCOMPARE(
+        page.favoriteConnectionButtons().size(),
+        pd::Preferences::kFavoriteConnectionLimit);
+    QVERIFY(page.favoriteConnectionButtons().constFirst()->isHidden());
+
+    pd::FavoriteConnection studio;
+    studio.code = QStringLiteral("246813579");
+    studio.name = QStringLiteral("DESIGN-STUDIO");
+    studio.server = QStringLiteral("studio.example:7900");
+    page.setFavoriteConnections({studio});
+    QTest::qWait(10);
+
+    QVERIFY(page.favoriteDevicesPanel()->isVisible());
+    QList<QPushButton *> favoriteButtons =
+        page.favoriteConnectionButtons();
+    QVERIFY(favoriteButtons.constFirst()->isVisible());
+    QVERIFY(favoriteButtons.at(1)->isHidden());
+    QCOMPARE(
+        favoriteButtons.constFirst()
+            ->findChild<QLabel *>(
+                QStringLiteral("favoriteConnectionName"))
+            ->text(),
+        QStringLiteral("DESIGN-STUDIO"));
+    QCOMPARE(
+        favoriteButtons.constFirst()
+            ->findChild<QLabel *>(
+                QStringLiteral("favoriteConnectionCode"))
+            ->text(),
+        QStringLiteral("246 813 579"));
+    page.setToken(QStringLiteral("server-secret"));
+
+    QSignalSpy requests(
+        &page,
+        &pd::ui::ConnectionPage::connectRequested);
+    favoriteButtons.constFirst()->click();
+    QCOMPARE(requests.count(), 1);
+    const QList<QVariant> request = requests.takeFirst();
+    QCOMPARE(request.at(0).toString(), QStringLiteral("246813579"));
+    QCOMPARE(
+        request.at(1).toString(),
+        QStringLiteral("studio.example:7900"));
+    QCOMPARE(request.at(2).toString(), QStringLiteral("server-secret"));
+    QVERIFY(page.busy());
+    QVERIFY(!favoriteButtons.constFirst()->isEnabled());
+    page.setBusy(false);
+
+    pd::RecentConnection office;
+    office.code = QStringLiteral("135792468");
+    office.name = QStringLiteral("OFFICE-PC");
+    office.server = QStringLiteral("desk.example:7900");
+    office.connectedAt = QDateTime::currentDateTimeUtc();
+    page.setRecentConnections({office});
+    QTest::qWait(10);
+
+    QList<QPushButton *> recentButtons =
+        page.recentConnectionButtons();
+    QList<QPushButton *> recentStars =
+        page.recentFavoriteButtons();
+    QCOMPARE(recentStars.constFirst()->text(), QStringLiteral("☆"));
+    requests.clear();
+    recentButtons.constFirst()->click();
+    QCOMPARE(requests.count(), 0);
+    QCOMPARE(page.code(), QStringLiteral("135792468"));
+    QCOMPARE(page.server(), QStringLiteral("desk.example:7900"));
+
+    QSignalSpy toggles(
+        &page,
+        &pd::ui::ConnectionPage::favoriteToggleRequested);
+    page.setCode({});
+    page.setServer({});
+    recentStars.constFirst()->click();
+    QCOMPARE(toggles.count(), 1);
+    const QList<QVariant> favorite = toggles.takeFirst();
+    QCOMPARE(favorite.at(0).toString(), QStringLiteral("135792468"));
+    QCOMPARE(favorite.at(1).toString(), QStringLiteral("OFFICE-PC"));
+    QCOMPARE(favorite.at(2).toString(), QStringLiteral("desk.example:7900"));
+    QCOMPARE(favorite.at(3).toBool(), true);
+    QVERIFY(page.code().isEmpty());
+    QVERIFY(page.server().isEmpty());
+
+    pd::FavoriteConnection officeFavorite;
+    officeFavorite.code = office.code;
+    officeFavorite.name = office.name;
+    officeFavorite.server = office.server;
+    page.setFavoriteConnections({studio, officeFavorite});
+    QCOMPARE(recentStars.constFirst()->text(), QStringLiteral("★"));
+    recentStars.constFirst()->click();
+    QCOMPARE(toggles.count(), 1);
+    QCOMPARE(toggles.constFirst().at(3).toBool(), false);
+
+    QSignalSpy removals(
+        &page,
+        &pd::ui::ConnectionPage::favoriteToggleRequested);
+    page.favoriteRemoveButtons().constFirst()->click();
+    QCOMPARE(removals.count(), 1);
+    QCOMPARE(
+        removals.constFirst().at(0).toString(),
+        QStringLiteral("246813579"));
+    QCOMPARE(removals.constFirst().at(3).toBool(), false);
 }
 
 void UiTest::navigationSwitchesPagesWithoutAutoStart()
@@ -2111,6 +2222,49 @@ void UiTest::appWindowLoadsAndClearsRecentConnections()
         pd::ViewerController::State::Error,
         4000);
     QVERIFY(preferences->recentConnections().isEmpty());
+}
+
+void UiTest::appWindowRemovesFavoriteDevices()
+{
+    pd::RecentConnection recent;
+    recent.code = QStringLiteral("246813579");
+    recent.name = QStringLiteral("DESIGN-STUDIO");
+    recent.server = QStringLiteral("studio.example:7900");
+    recent.connectedAt = QDateTime::currentDateTimeUtc();
+
+    const auto preferences = testPreferences();
+    preferences->recordRecentConnection(
+        recent.code,
+        recent.name,
+        recent.server,
+        recent.connectedAt);
+    preferences->recordFavoriteConnection(
+        recent.code,
+        recent.name,
+        recent.server);
+
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(preferences);
+    viewer.setPreferences(preferences);
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.resize(1000, 820);
+    window.show();
+    QTest::qWait(20);
+
+    auto *page = window.connectionPage();
+    QVERIFY(page->favoriteDevicesPanel()->isVisible());
+    QCOMPARE(preferences->favoriteConnections().size(), 1);
+    QList<QPushButton *> recentStars = page->recentFavoriteButtons();
+    QCOMPARE(recentStars.constFirst()->text(), QStringLiteral("★"));
+
+    const QString codeBeforeToggle = page->code();
+    recentStars.constFirst()->click();
+    QCOMPARE(page->code(), codeBeforeToggle);
+    QVERIFY(preferences->favoriteConnections().isEmpty());
+    QVERIFY(page->favoriteDevicesPanel()->isHidden());
+    QCOMPARE(recentStars.constFirst()->text(), QStringLiteral("☆"));
 }
 
 void UiTest::settingsUpdateControllersAndConnectionPage()

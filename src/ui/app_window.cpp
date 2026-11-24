@@ -399,6 +399,32 @@ void AppWindow::connectSignals()
             refreshRecentConnections();
         });
     connect(
+        connectionPage_,
+        &ConnectionPage::favoriteToggleRequested,
+        this,
+        [this](
+            const QString &code,
+            const QString &name,
+            const QString &server,
+            bool favorite) {
+            if (!preferences_) {
+                return;
+            }
+            if (favorite) {
+                preferences_->recordFavoriteConnection(
+                    code,
+                    name,
+                    server);
+                showToast(
+                    QStringLiteral("已收藏 %1").arg(name));
+            } else {
+                preferences_->removeFavoriteConnection(code, server);
+                showToast(
+                    QStringLiteral("已取消收藏 %1").arg(name));
+            }
+            refreshRecentConnections();
+        });
+    connect(
         viewer_,
         &ViewerController::stateChanged,
         this,
@@ -709,6 +735,9 @@ void AppWindow::refreshRecentConnections()
         connectionPage_->setRecentConnections(
             preferences_ ? preferences_->recentConnections()
                          : QList<RecentConnection>{});
+        connectionPage_->setFavoriteConnections(
+            preferences_ ? preferences_->favoriteConnections()
+                         : QList<FavoriteConnection>{});
     }
 }
 

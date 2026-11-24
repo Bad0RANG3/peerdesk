@@ -45,9 +45,16 @@ struct RecentConnection {
     QDateTime connectedAt;
 };
 
+struct FavoriteConnection {
+    QString code;
+    QString name;
+    QString server;
+};
+
 class Preferences final {
 public:
     static constexpr int kRecentConnectionLimit = 4;
+    static constexpr int kFavoriteConnectionLimit = 4;
 
     enum class Mode {
         Persistent,
@@ -77,6 +84,20 @@ public:
         const QString &server,
         const QDateTime &connectedAt = {});
     void clearRecentConnections();
+    [[nodiscard]] QList<FavoriteConnection> favoriteConnections() const;
+    void setFavoriteConnections(
+        const QList<FavoriteConnection> &connections);
+    void recordFavoriteConnection(
+        const QString &code,
+        const QString &name,
+        const QString &server);
+    void removeFavoriteConnection(
+        const QString &code,
+        const QString &server);
+    [[nodiscard]] bool isFavoriteConnection(
+        const QString &code,
+        const QString &server) const;
+    void clearFavoriteConnections();
     void sync();
 
 private:

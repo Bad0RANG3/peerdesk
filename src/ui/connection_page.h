@@ -34,6 +34,8 @@ public:
     void focusCode();
     void setRecentConnections(
         const QList<RecentConnection> &connections);
+    void setFavoriteConnections(
+        const QList<FavoriteConnection> &connections);
 
     [[nodiscard]] QString code() const;
     [[nodiscard]] QString server() const;
@@ -48,7 +50,14 @@ public:
     {
         return clearRecentButton_;
     }
+    [[nodiscard]] QWidget *favoriteDevicesPanel() const
+    {
+        return favoritePanel_;
+    }
     [[nodiscard]] QList<QPushButton *> recentConnectionButtons() const;
+    [[nodiscard]] QList<QPushButton *> recentFavoriteButtons() const;
+    [[nodiscard]] QList<QPushButton *> favoriteConnectionButtons() const;
+    [[nodiscard]] QList<QPushButton *> favoriteRemoveButtons() const;
 
     [[nodiscard]] CodeInput *codeInput() const { return codeInput_; }
     [[nodiscard]] QLineEdit *serverInput() const { return serverInput_; }
@@ -65,10 +74,24 @@ signals:
     void disconnectRequested();
     void hostModeRequested();
     void recentConnectionsCleared();
+    void favoriteToggleRequested(
+        const QString &code,
+        const QString &name,
+        const QString &server,
+        bool favorite);
 
 private:
     struct RecentTile {
         QPushButton *button = nullptr;
+        QPushButton *favorite = nullptr;
+        QLabel *name = nullptr;
+        QLabel *code = nullptr;
+        QLabel *server = nullptr;
+    };
+
+    struct FavoriteTile {
+        QPushButton *button = nullptr;
+        QPushButton *remove = nullptr;
         QLabel *name = nullptr;
         QLabel *code = nullptr;
         QLabel *server = nullptr;
@@ -76,7 +99,12 @@ private:
 
     void buildUi();
     void chooseRecentConnection(int index);
+    void chooseFavoriteConnection(int index);
     void updateRecentControls();
+    void updateFavoriteControls();
+    [[nodiscard]] bool isFavorite(
+        const QString &code,
+        const QString &server) const;
 
     CodeInput *codeInput_ = nullptr;
     QLineEdit *serverInput_ = nullptr;
@@ -87,8 +115,11 @@ private:
     StatusDot *statusDot_ = nullptr;
     QWidget *recentPanel_ = nullptr;
     QPushButton *clearRecentButton_ = nullptr;
+    QWidget *favoritePanel_ = nullptr;
     QList<RecentConnection> recentConnections_;
+    QList<FavoriteConnection> favoriteConnections_;
     QList<RecentTile> recentTiles_;
+    QList<FavoriteTile> favoriteTiles_;
     bool busy_ = false;
     bool connected_ = false;
 };

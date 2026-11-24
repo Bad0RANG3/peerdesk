@@ -13,6 +13,8 @@
 #include <QStringList>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace pd::ui {
 namespace {
 
@@ -38,6 +40,57 @@ QString displayName(const RecentConnection &connection)
 {
     const QString name = connection.name.simplified();
     return name.isEmpty() ? QStringLiteral("远端设备") : name;
+}
+
+QString displayName(const FavoriteConnection &connection)
+{
+    const QString name = connection.name.simplified();
+    return name.isEmpty() ? QStringLiteral("远端设备") : name;
+}
+
+QString quickTileStyle(const QString &objectName)
+{
+    return QStringLiteral(
+        "QPushButton#%1 {"
+        "  background: rgba(255, 255, 255, 0.035);"
+        "  border: 1px solid rgba(255, 255, 255, 0.085);"
+        "  border-radius: 9px;"
+        "  padding: 0;"
+        "  text-align: left;"
+        "}"
+        "QPushButton#%1:hover {"
+        "  background: rgba(61, 123, 253, 0.11);"
+        "  border-color: rgba(91, 155, 255, 0.34);"
+        "}"
+        "QPushButton#%1:pressed {"
+        "  background: rgba(61, 123, 253, 0.17);"
+        "}"
+        "QPushButton#%1:disabled {"
+        "  background: rgba(255, 255, 255, 0.02);"
+        "  border-color: rgba(255, 255, 255, 0.06);"
+        "}")
+        .arg(objectName);
+}
+
+QString favoriteStarStyle()
+{
+    return QStringLiteral(
+        "QPushButton {"
+        "  color: #8bb8ff;"
+        "  background: transparent;"
+        "  border: 0;"
+        "  border-radius: 7px;"
+        "  padding: 0;"
+        "  font-size: 13px;"
+        "}"
+        "QPushButton:hover {"
+        "  color: #d9e8ff;"
+        "  background: rgba(91, 155, 255, 0.14);"
+        "}"
+        "QPushButton:pressed {"
+        "  background: rgba(91, 155, 255, 0.22);"
+        "}"
+        "QPushButton:disabled { color: #56607a; }");
 }
 
 } // namespace
@@ -130,6 +183,120 @@ void ConnectionPage::buildUi()
     errorText_->hide();
     cardLayout->addWidget(errorText_);
 
+    favoritePanel_ = new QWidget(card);
+    favoritePanel_->setObjectName(QStringLiteral("favoriteDevices"));
+    favoritePanel_->hide();
+    auto *favoriteLayout = new QVBoxLayout(favoritePanel_);
+    favoriteLayout->setContentsMargins(0, 16, 0, 0);
+    favoriteLayout->setSpacing(8);
+
+    auto *favoriteHeading = new QHBoxLayout;
+    favoriteHeading->setSpacing(8);
+    favoriteHeading->addWidget(makeCaption(
+        QStringLiteral("常用设备"),
+        favoritePanel_));
+    favoriteHeading->addStretch(1);
+    auto *favoriteHint = new QLabel(
+        QStringLiteral("单击直接连接"),
+        favoritePanel_);
+    favoriteHint->setFont(uiFont(7));
+    favoriteHint->setStyleSheet(QStringLiteral("color: #56607a;"));
+    favoriteHeading->addWidget(favoriteHint);
+    favoriteLayout->addLayout(favoriteHeading);
+
+    auto *favoriteGrid = new QGridLayout;
+    favoriteGrid->setContentsMargins(0, 0, 0, 0);
+    favoriteGrid->setHorizontalSpacing(7);
+    favoriteGrid->setVerticalSpacing(7);
+    for (int index = 0;
+         index < Preferences::kFavoriteConnectionLimit;
+         ++index) {
+        FavoriteTile tile;
+        tile.button = new QPushButton(favoritePanel_);
+        tile.button->setObjectName(
+            QStringLiteral("favoriteConnectionButton"));
+        tile.button->setProperty("favoriteIndex", index);
+        tile.button->setCursor(Qt::PointingHandCursor);
+        tile.button->setMinimumHeight(46);
+        tile.button->setSizePolicy(
+            QSizePolicy::Expanding,
+            QSizePolicy::Fixed);
+        tile.button->setStyleSheet(
+            quickTileStyle(QStringLiteral("favoriteConnectionButton")));
+
+        auto *tileLayout = new QVBoxLayout(tile.button);
+        tileLayout->setContentsMargins(9, 5, 6, 5);
+        tileLayout->setSpacing(1);
+        auto *topLine = new QHBoxLayout;
+        topLine->setSpacing(5);
+        tile.name = new QLabel(tile.button);
+        tile.name->setObjectName(
+            QStringLiteral("favoriteConnectionName"));
+        tile.name->setFont(uiFont(9, QFont::DemiBold));
+        tile.name->setStyleSheet(
+            QStringLiteral("color: #e8eef9; background: transparent;"));
+        tile.name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        topLine->addWidget(tile.name, 1);
+        tile.remove = new QPushButton(QStringLiteral("★"), tile.button);
+        tile.remove->setObjectName(
+            QStringLiteral("favoriteRemoveButton"));
+        tile.remove->setProperty("favoriteIndex", index);
+        tile.remove->setCursor(Qt::PointingHandCursor);
+        tile.remove->setFixedSize(20, 20);
+        tile.remove->setStyleSheet(favoriteStarStyle());
+        topLine->addWidget(tile.remove, 0, Qt::AlignTop);
+        tileLayout->addLayout(topLine);
+
+        tile.code = new QLabel(tile.button);
+        tile.code->setObjectName(
+            QStringLiteral("favoriteConnectionCode"));
+        tile.code->setFont(uiFont(8, QFont::DemiBold));
+        tile.code->setStyleSheet(
+            QStringLiteral("color: #8bb8ff; background: transparent;"));
+        tile.code->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tileLayout->addWidget(tile.code);
+
+        tile.server = new QLabel(tile.button);
+        tile.server->setObjectName(
+            QStringLiteral("favoriteConnectionServer"));
+        tile.server->setFont(uiFont(7));
+        tile.server->setStyleSheet(
+            QStringLiteral("color: #69728a; background: transparent;"));
+        tile.server->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tileLayout->addWidget(tile.server);
+
+        favoriteGrid->addWidget(
+            tile.button,
+            index / 2,
+            index % 2);
+        favoriteTiles_.append(tile);
+        connect(
+            tile.button,
+            &QPushButton::clicked,
+            this,
+            [this, index]() { chooseFavoriteConnection(index); });
+        connect(
+            tile.remove,
+            &QPushButton::clicked,
+            this,
+            [this, index]() {
+                if (index < 0 || index >= favoriteConnections_.size()) {
+                    return;
+                }
+                const FavoriteConnection &connection =
+                    favoriteConnections_.at(index);
+                emit favoriteToggleRequested(
+                    connection.code,
+                    displayName(connection),
+                    connection.server,
+                    false);
+            });
+    }
+    favoriteGrid->setColumnStretch(0, 1);
+    favoriteGrid->setColumnStretch(1, 1);
+    favoriteLayout->addLayout(favoriteGrid);
+    cardLayout->addWidget(favoritePanel_);
+
     recentPanel_ = new QWidget(card);
     recentPanel_->setObjectName(QStringLiteral("recentConnections"));
     recentPanel_->hide();
@@ -183,25 +350,8 @@ void ConnectionPage::buildUi()
         tile.button->setSizePolicy(
             QSizePolicy::Expanding,
             QSizePolicy::Fixed);
-        tile.button->setStyleSheet(QStringLiteral(
-            "QPushButton#recentConnectionButton {"
-            "  background: rgba(255, 255, 255, 0.035);"
-            "  border: 1px solid rgba(255, 255, 255, 0.085);"
-            "  border-radius: 9px;"
-            "  padding: 0;"
-            "  text-align: left;"
-            "}"
-            "QPushButton#recentConnectionButton:hover {"
-            "  background: rgba(61, 123, 253, 0.11);"
-            "  border-color: rgba(91, 155, 255, 0.34);"
-            "}"
-            "QPushButton#recentConnectionButton:pressed {"
-            "  background: rgba(61, 123, 253, 0.17);"
-            "}"
-            "QPushButton#recentConnectionButton:disabled {"
-            "  background: rgba(255, 255, 255, 0.02);"
-            "  border-color: rgba(255, 255, 255, 0.06);"
-            "}"));
+        tile.button->setStyleSheet(
+            quickTileStyle(QStringLiteral("recentConnectionButton")));
 
         auto *tileLayout = new QVBoxLayout(tile.button);
         tileLayout->setContentsMargins(9, 5, 9, 5);
@@ -224,6 +374,14 @@ void ConnectionPage::buildUi()
             QStringLiteral("color: #8bb8ff; background: transparent;"));
         tile.code->setAttribute(Qt::WA_TransparentForMouseEvents);
         topLine->addWidget(tile.code, 0, Qt::AlignRight);
+        tile.favorite = new QPushButton(QStringLiteral("☆"), tile.button);
+        tile.favorite->setObjectName(
+            QStringLiteral("recentFavoriteButton"));
+        tile.favorite->setProperty("recentIndex", index);
+        tile.favorite->setCursor(Qt::PointingHandCursor);
+        tile.favorite->setFixedSize(20, 20);
+        tile.favorite->setStyleSheet(favoriteStarStyle());
+        topLine->addWidget(tile.favorite, 0, Qt::AlignTop);
         tileLayout->addLayout(topLine);
 
         tile.server = new QLabel(tile.button);
@@ -245,6 +403,25 @@ void ConnectionPage::buildUi()
             &QPushButton::clicked,
             this,
             [this, index]() { chooseRecentConnection(index); });
+        connect(
+            tile.favorite,
+            &QPushButton::clicked,
+            this,
+            [this, index]() {
+                if (busy_
+                    || connected_
+                    || index < 0
+                    || index >= recentConnections_.size()) {
+                    return;
+                }
+                const RecentConnection &connection =
+                    recentConnections_.at(index);
+                emit favoriteToggleRequested(
+                    connection.code,
+                    displayName(connection),
+                    connection.server,
+                    !isFavorite(connection.code, connection.server));
+            });
     }
     recentGrid->setColumnStretch(0, 1);
     recentGrid->setColumnStretch(1, 1);
@@ -359,6 +536,7 @@ void ConnectionPage::buildUi()
         });
 
     setRecentConnections({});
+    setFavoriteConnections({});
 }
 
 void ConnectionPage::setCode(const QString &code)
@@ -397,6 +575,7 @@ void ConnectionPage::setBusy(bool busy)
             PillLabel::Tone::Amber);
     }
     updateRecentControls();
+    updateFavoriteControls();
 }
 
 void ConnectionPage::setConnected(bool connected, const QString &peerName)
@@ -421,6 +600,7 @@ void ConnectionPage::setConnected(bool connected, const QString &peerName)
         setStatus(QStringLiteral("准备连接"));
     }
     updateRecentControls();
+    updateFavoriteControls();
 }
 
 void ConnectionPage::setStatus(
@@ -520,12 +700,82 @@ void ConnectionPage::setRecentConnections(
     updateRecentControls();
 }
 
+void ConnectionPage::setFavoriteConnections(
+    const QList<FavoriteConnection> &connections)
+{
+    favoriteConnections_ = connections.mid(
+        0,
+        Preferences::kFavoriteConnectionLimit);
+    for (int index = 0; index < favoriteTiles_.size(); ++index) {
+        FavoriteTile &tile = favoriteTiles_[index];
+        const bool visible = index < favoriteConnections_.size();
+        tile.button->setVisible(visible);
+        if (!visible) {
+            continue;
+        }
+
+        const FavoriteConnection &connection =
+            favoriteConnections_.at(index);
+        const QString name = displayName(connection);
+        const QString code = formatCode(connection.code);
+        const QString server = connection.server;
+        tile.name->setText(name);
+        tile.code->setText(code);
+        tile.server->setText(server);
+        tile.button->setToolTip(
+            QStringLiteral("%1\n%2\n%3").arg(name, code, server));
+        tile.button->setAccessibleName(
+            QStringLiteral("%1，连接码 %2，服务器 %3")
+                .arg(name, code, server));
+        tile.button->setAccessibleDescription(
+            QStringLiteral("立即连接此常用设备"));
+        tile.remove->setAccessibleName(
+            QStringLiteral("取消收藏 %1").arg(name));
+        tile.remove->setAccessibleDescription(
+            QStringLiteral("从常用设备中移除此连接"));
+        tile.remove->setToolTip(QStringLiteral("取消收藏"));
+    }
+    favoritePanel_->setVisible(!favoriteConnections_.isEmpty());
+    updateFavoriteControls();
+    updateRecentControls();
+}
+
 QList<QPushButton *> ConnectionPage::recentConnectionButtons() const
 {
     QList<QPushButton *> buttons;
     buttons.reserve(recentTiles_.size());
     for (const RecentTile &tile : recentTiles_) {
         buttons.append(tile.button);
+    }
+    return buttons;
+}
+
+QList<QPushButton *> ConnectionPage::recentFavoriteButtons() const
+{
+    QList<QPushButton *> buttons;
+    buttons.reserve(recentTiles_.size());
+    for (const RecentTile &tile : recentTiles_) {
+        buttons.append(tile.favorite);
+    }
+    return buttons;
+}
+
+QList<QPushButton *> ConnectionPage::favoriteConnectionButtons() const
+{
+    QList<QPushButton *> buttons;
+    buttons.reserve(favoriteTiles_.size());
+    for (const FavoriteTile &tile : favoriteTiles_) {
+        buttons.append(tile.button);
+    }
+    return buttons;
+}
+
+QList<QPushButton *> ConnectionPage::favoriteRemoveButtons() const
+{
+    QList<QPushButton *> buttons;
+    buttons.reserve(favoriteTiles_.size());
+    for (const FavoriteTile &tile : favoriteTiles_) {
+        buttons.append(tile.remove);
     }
     return buttons;
 }
@@ -551,16 +801,94 @@ void ConnectionPage::chooseRecentConnection(int index)
     connectButton_->setFocus(Qt::TabFocusReason);
 }
 
+void ConnectionPage::chooseFavoriteConnection(int index)
+{
+    if (busy_
+        || connected_
+        || index < 0
+        || index >= favoriteConnections_.size()) {
+        return;
+    }
+    const FavoriteConnection &connection =
+        favoriteConnections_.at(index);
+    if (!parseServerAddress(connection.server).has_value()) {
+        setError(QStringLiteral("常用设备的信令服务器地址无效"));
+        return;
+    }
+    setCode(connection.code);
+    setServer(connection.server);
+    errorText_->hide();
+    codeInput_->setInvalid(false);
+    setBusy(true);
+    setStatus(
+        QStringLiteral("正在连接常用设备 %1…")
+            .arg(displayName(connection)),
+        PillLabel::Tone::Amber);
+    emit connectRequested(connection.code, connection.server, token());
+}
+
 void ConnectionPage::updateRecentControls()
 {
     const bool enabled = !busy_ && !connected_;
     for (int index = 0; index < recentTiles_.size(); ++index) {
-        recentTiles_.at(index).button->setEnabled(
-            enabled && index < recentConnections_.size());
+        RecentTile &tile = recentTiles_[index];
+        const bool visible = index < recentConnections_.size();
+        tile.button->setEnabled(enabled && visible);
+        tile.favorite->setVisible(visible);
+        if (!visible) {
+            continue;
+        }
+        const RecentConnection &connection =
+            recentConnections_.at(index);
+        const bool favorite =
+            isFavorite(connection.code, connection.server);
+        tile.favorite->setText(
+            favorite ? QStringLiteral("★") : QStringLiteral("☆"));
+        tile.favorite->setEnabled(enabled);
+        tile.favorite->setToolTip(
+            favorite ? QStringLiteral("取消收藏")
+                     : QStringLiteral("收藏为常用设备"));
+        tile.favorite->setAccessibleName(
+            favorite
+                ? QStringLiteral("取消收藏 %1").arg(
+                      displayName(connection))
+                : QStringLiteral("收藏 %1").arg(
+                      displayName(connection)));
+        tile.favorite->setAccessibleDescription(
+            favorite
+                ? QStringLiteral("从常用设备中移除")
+                : QStringLiteral("收藏后可一键连接"));
     }
     if (clearRecentButton_) {
         clearRecentButton_->setEnabled(enabled);
     }
+}
+
+void ConnectionPage::updateFavoriteControls()
+{
+    const bool enabled = !busy_ && !connected_;
+    for (int index = 0; index < favoriteTiles_.size(); ++index) {
+        FavoriteTile &tile = favoriteTiles_[index];
+        const bool visible = index < favoriteConnections_.size();
+        tile.button->setEnabled(enabled && visible);
+        tile.remove->setEnabled(enabled && visible);
+    }
+}
+
+bool ConnectionPage::isFavorite(
+    const QString &code,
+    const QString &server) const
+{
+    return std::any_of(
+        favoriteConnections_.cbegin(),
+        favoriteConnections_.cend(),
+        [&code, &server](const FavoriteConnection &connection) {
+            return connection.code == code
+                && connection.server.compare(
+                       server,
+                       Qt::CaseInsensitive)
+                    == 0;
+        });
 }
 
 QString ConnectionPage::code() const
