@@ -3,6 +3,7 @@
 #include "app/host_controller.h"
 #include "app/preferences.h"
 #include "app/viewer_controller.h"
+#include "discovery/lan_discovery.h"
 #include "ui/connection_page.h"
 #include "ui/host_panel.h"
 #include "ui/settings_dialog.h"
@@ -589,6 +590,33 @@ void AppWindow::setTrayAvailableForTesting(bool available)
     if (!available && trayIcon_) {
         trayIcon_->hide();
     }
+}
+
+void AppWindow::setLanDiscovery(LanDiscovery *discovery)
+{
+    if (lanDiscovery_ == discovery) {
+        connectionPage_->setNearbyDevices(
+            discovery ? discovery->devices()
+                      : QList<pd::NearbyDevice>{});
+        return;
+    }
+    if (discoveryConnection_) {
+        QObject::disconnect(discoveryConnection_);
+        discoveryConnection_ = {};
+    }
+    lanDiscovery_ = discovery;
+    if (!lanDiscovery_) {
+        connectionPage_->setNearbyDevices({});
+        return;
+    }
+    discoveryConnection_ = connect(
+        lanDiscovery_,
+        &LanDiscovery::devicesChanged,
+        this,
+        [this](const QList<pd::NearbyDevice> &devices) {
+            connectionPage_->setNearbyDevices(devices);
+        });
+    connectionPage_->setNearbyDevices(lanDiscovery_->devices());
 }
 
 void AppWindow::showMainWindow()

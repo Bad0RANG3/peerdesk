@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/preferences.h"
+#include "discovery/lan_discovery.h"
 #include "ui/ui_widgets.h"
 
 #include <QList>
@@ -36,6 +37,8 @@ public:
         const QList<RecentConnection> &connections);
     void setFavoriteConnections(
         const QList<FavoriteConnection> &connections);
+    void setNearbyDevices(
+        const QList<NearbyDevice> &devices);
 
     [[nodiscard]] QString code() const;
     [[nodiscard]] QString server() const;
@@ -54,10 +57,15 @@ public:
     {
         return favoritePanel_;
     }
+    [[nodiscard]] QWidget *nearbyDevicesPanel() const
+    {
+        return nearbyPanel_;
+    }
     [[nodiscard]] QList<QPushButton *> recentConnectionButtons() const;
     [[nodiscard]] QList<QPushButton *> recentFavoriteButtons() const;
     [[nodiscard]] QList<QPushButton *> favoriteConnectionButtons() const;
     [[nodiscard]] QList<QPushButton *> favoriteRemoveButtons() const;
+    [[nodiscard]] QList<QPushButton *> nearbyDeviceButtons() const;
 
     [[nodiscard]] CodeInput *codeInput() const { return codeInput_; }
     [[nodiscard]] QLineEdit *serverInput() const { return serverInput_; }
@@ -97,11 +105,20 @@ private:
         QLabel *server = nullptr;
     };
 
+    struct NearbyTile {
+        QPushButton *button = nullptr;
+        QLabel *name = nullptr;
+        QLabel *code = nullptr;
+        QLabel *server = nullptr;
+    };
+
     void buildUi();
     void chooseRecentConnection(int index);
     void chooseFavoriteConnection(int index);
+    void chooseNearbyDevice(int index);
     void updateRecentControls();
     void updateFavoriteControls();
+    void updateNearbyControls();
     [[nodiscard]] bool isFavorite(
         const QString &code,
         const QString &server) const;
@@ -116,10 +133,13 @@ private:
     QWidget *recentPanel_ = nullptr;
     QPushButton *clearRecentButton_ = nullptr;
     QWidget *favoritePanel_ = nullptr;
+    QWidget *nearbyPanel_ = nullptr;
     QList<RecentConnection> recentConnections_;
     QList<FavoriteConnection> favoriteConnections_;
+    QList<NearbyDevice> nearbyDevices_;
     QList<RecentTile> recentTiles_;
     QList<FavoriteTile> favoriteTiles_;
+    QList<NearbyTile> nearbyTiles_;
     bool busy_ = false;
     bool connected_ = false;
 };

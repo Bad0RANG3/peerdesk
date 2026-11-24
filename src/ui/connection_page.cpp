@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStringList>
 #include <QVBoxLayout>
 
@@ -17,6 +18,8 @@
 
 namespace pd::ui {
 namespace {
+
+constexpr int kNearbyDeviceLimit = 4;
 
 QLabel *makeHint(const QString &value, QWidget *parent)
 {
@@ -46,6 +49,12 @@ QString displayName(const FavoriteConnection &connection)
 {
     const QString name = connection.name.simplified();
     return name.isEmpty() ? QStringLiteral("远端设备") : name;
+}
+
+QString displayName(const NearbyDevice &device)
+{
+    const QString name = device.name.simplified();
+    return name.isEmpty() ? QStringLiteral("附近设备") : name;
 }
 
 QString quickTileStyle(const QString &objectName)
@@ -104,9 +113,45 @@ ConnectionPage::ConnectionPage(QWidget *parent)
 void ConnectionPage::buildUi()
 {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(28, 24, 28, 28);
+    root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
-    root->addStretch(1);
+
+    auto *scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("connectionScroll"));
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(QStringLiteral(
+        "QScrollArea#connectionScroll {"
+        "  background: transparent;"
+        "  border: 0;"
+        "}"
+        "QScrollBar:vertical {"
+        "  background: transparent;"
+        "  width: 8px;"
+        "  margin: 4px 1px;"
+        "}"
+        "QScrollBar::handle:vertical {"
+        "  background: rgba(255, 255, 255, 0.16);"
+        "  border-radius: 4px;"
+        "  min-height: 28px;"
+        "}"
+        "QScrollBar::add-line:vertical,"
+        "QScrollBar::sub-line:vertical {"
+        "  height: 0;"
+        "}"
+        "QScrollBar::add-page:vertical,"
+        "QScrollBar::sub-page:vertical {"
+        "  background: transparent;"
+        "}"));
+    scroll->viewport()->setAutoFillBackground(false);
+    auto *content = new QWidget(scroll);
+    content->setObjectName(QStringLiteral("connectionContent"));
+    content->setAttribute(Qt::WA_TranslucentBackground);
+    auto *contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(28, 24, 28, 28);
+    contentLayout->setSpacing(0);
+    contentLayout->addStretch(1);
 
     auto *card = new GlassCard(this);
     card->setObjectName(QStringLiteral("connectCard"));
@@ -135,6 +180,92 @@ void ConnectionPage::buildUi()
     heading->addWidget(protocolPill, 0, Qt::AlignTop);
     cardLayout->addLayout(heading);
     cardLayout->addSpacing(22);
+
+    nearbyPanel_ = new QWidget(card);
+    nearbyPanel_->setObjectName(QStringLiteral("nearbyDevices"));
+    nearbyPanel_->hide();
+    auto *nearbyLayout = new QVBoxLayout(nearbyPanel_);
+    nearbyLayout->setContentsMargins(0, 0, 0, 18);
+    nearbyLayout->setSpacing(8);
+
+    auto *nearbyHeading = new QHBoxLayout;
+    nearbyHeading->setSpacing(8);
+    nearbyHeading->addWidget(makeCaption(
+        QStringLiteral("附近设备"),
+        nearbyPanel_));
+    nearbyHeading->addStretch(1);
+    auto *nearbyHint = new QLabel(
+        QStringLiteral("同局域网自动发现"),
+        nearbyPanel_);
+    nearbyHint->setFont(uiFont(7));
+    nearbyHint->setStyleSheet(QStringLiteral("color: #56607a;"));
+    nearbyHeading->addWidget(nearbyHint);
+    nearbyLayout->addLayout(nearbyHeading);
+
+    auto *nearbyGrid = new QGridLayout;
+    nearbyGrid->setContentsMargins(0, 0, 0, 0);
+    nearbyGrid->setHorizontalSpacing(7);
+    nearbyGrid->setVerticalSpacing(7);
+    for (int index = 0; index < kNearbyDeviceLimit; ++index) {
+        NearbyTile tile;
+        tile.button = new QPushButton(nearbyPanel_);
+        tile.button->setObjectName(
+            QStringLiteral("nearbyDeviceButton"));
+        tile.button->setProperty("nearbyIndex", index);
+        tile.button->setCursor(Qt::PointingHandCursor);
+        tile.button->setMinimumHeight(54);
+        tile.button->setSizePolicy(
+            QSizePolicy::Expanding,
+            QSizePolicy::Fixed);
+        tile.button->setStyleSheet(
+            quickTileStyle(QStringLiteral("nearbyDeviceButton")));
+
+        auto *tileLayout = new QVBoxLayout(tile.button);
+        tileLayout->setContentsMargins(9, 5, 9, 5);
+        tileLayout->setSpacing(1);
+
+        tile.name = new QLabel(tile.button);
+        tile.name->setObjectName(
+            QStringLiteral("nearbyDeviceName"));
+        tile.name->setFont(uiFont(9, QFont::DemiBold));
+        tile.name->setStyleSheet(
+            QStringLiteral("color: #e8eef9; background: transparent;"));
+        tile.name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tileLayout->addWidget(tile.name);
+
+        tile.code = new QLabel(tile.button);
+        tile.code->setObjectName(
+            QStringLiteral("nearbyDeviceCode"));
+        tile.code->setFont(uiFont(8, QFont::DemiBold));
+        tile.code->setStyleSheet(
+            QStringLiteral("color: #8bb8ff; background: transparent;"));
+        tile.code->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tileLayout->addWidget(tile.code);
+
+        tile.server = new QLabel(tile.button);
+        tile.server->setObjectName(
+            QStringLiteral("nearbyDeviceServer"));
+        tile.server->setFont(uiFont(7));
+        tile.server->setStyleSheet(
+            QStringLiteral("color: #69728a; background: transparent;"));
+        tile.server->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tileLayout->addWidget(tile.server);
+
+        nearbyGrid->addWidget(
+            tile.button,
+            index / 2,
+            index % 2);
+        nearbyTiles_.append(tile);
+        connect(
+            tile.button,
+            &QPushButton::clicked,
+            this,
+            [this, index]() { chooseNearbyDevice(index); });
+    }
+    nearbyGrid->setColumnStretch(0, 1);
+    nearbyGrid->setColumnStretch(1, 1);
+    nearbyLayout->addLayout(nearbyGrid);
+    cardLayout->addWidget(nearbyPanel_);
 
     cardLayout->addWidget(makeCaption(QStringLiteral("连接码"), card));
     cardLayout->addSpacing(7);
@@ -481,17 +612,20 @@ void ConnectionPage::buildUi()
     ownerRow->addStretch(1);
     cardLayout->addLayout(ownerRow);
 
-    root->addWidget(card, 0, Qt::AlignHCenter);
-    root->addStretch(1);
+    contentLayout->addWidget(card, 0, Qt::AlignHCenter);
+    contentLayout->addStretch(1);
 
     auto *footer = new QLabel(
         QStringLiteral("自托管信令 · 优先点对点直连 · 无会员与时长限制"),
-        this);
+        content);
     footer->setAlignment(Qt::AlignCenter);
     footer->setFont(uiFont(8));
     footer->setStyleSheet(QStringLiteral("color: #56607a;"));
-    root->addSpacing(16);
-    root->addWidget(footer);
+    contentLayout->addSpacing(16);
+    contentLayout->addWidget(footer);
+
+    scroll->setWidget(content);
+    root->addWidget(scroll);
 
     connect(
         connectButton_,
@@ -537,6 +671,7 @@ void ConnectionPage::buildUi()
 
     setRecentConnections({});
     setFavoriteConnections({});
+    setNearbyDevices({});
 }
 
 void ConnectionPage::setCode(const QString &code)
@@ -576,6 +711,7 @@ void ConnectionPage::setBusy(bool busy)
     }
     updateRecentControls();
     updateFavoriteControls();
+    updateNearbyControls();
 }
 
 void ConnectionPage::setConnected(bool connected, const QString &peerName)
@@ -601,6 +737,7 @@ void ConnectionPage::setConnected(bool connected, const QString &peerName)
     }
     updateRecentControls();
     updateFavoriteControls();
+    updateNearbyControls();
 }
 
 void ConnectionPage::setStatus(
@@ -740,6 +877,37 @@ void ConnectionPage::setFavoriteConnections(
     updateRecentControls();
 }
 
+void ConnectionPage::setNearbyDevices(
+    const QList<NearbyDevice> &devices)
+{
+    nearbyDevices_ = devices.mid(0, kNearbyDeviceLimit);
+    for (int index = 0; index < nearbyTiles_.size(); ++index) {
+        NearbyTile &tile = nearbyTiles_[index];
+        const bool visible = index < nearbyDevices_.size();
+        tile.button->setVisible(visible);
+        if (!visible) {
+            continue;
+        }
+
+        const NearbyDevice &device = nearbyDevices_.at(index);
+        const QString name = displayName(device);
+        const QString code = formatCode(device.code);
+        const QString server = device.server;
+        tile.name->setText(name);
+        tile.code->setText(code);
+        tile.server->setText(server);
+        tile.button->setToolTip(
+            QStringLiteral("%1\n%2\n%3").arg(name, code, server));
+        tile.button->setAccessibleName(
+            QStringLiteral("%1，连接码 %2，服务器 %3")
+                .arg(name, code, server));
+        tile.button->setAccessibleDescription(
+            QStringLiteral("立即连接此附近设备"));
+    }
+    nearbyPanel_->setVisible(!nearbyDevices_.isEmpty());
+    updateNearbyControls();
+}
+
 QList<QPushButton *> ConnectionPage::recentConnectionButtons() const
 {
     QList<QPushButton *> buttons;
@@ -776,6 +944,16 @@ QList<QPushButton *> ConnectionPage::favoriteRemoveButtons() const
     buttons.reserve(favoriteTiles_.size());
     for (const FavoriteTile &tile : favoriteTiles_) {
         buttons.append(tile.remove);
+    }
+    return buttons;
+}
+
+QList<QPushButton *> ConnectionPage::nearbyDeviceButtons() const
+{
+    QList<QPushButton *> buttons;
+    buttons.reserve(nearbyTiles_.size());
+    for (const NearbyTile &tile : nearbyTiles_) {
+        buttons.append(tile.button);
     }
     return buttons;
 }
@@ -827,6 +1005,31 @@ void ConnectionPage::chooseFavoriteConnection(int index)
     emit connectRequested(connection.code, connection.server, token());
 }
 
+void ConnectionPage::chooseNearbyDevice(int index)
+{
+    if (busy_
+        || connected_
+        || index < 0
+        || index >= nearbyDevices_.size()) {
+        return;
+    }
+    const NearbyDevice &device = nearbyDevices_.at(index);
+    if (!parseServerAddress(device.server).has_value()) {
+        setError(QStringLiteral("附近设备的信令服务器地址无效"));
+        return;
+    }
+    setCode(device.code);
+    setServer(device.server);
+    errorText_->hide();
+    codeInput_->setInvalid(false);
+    setBusy(true);
+    setStatus(
+        QStringLiteral("正在连接附近设备 %1…")
+            .arg(displayName(device)),
+        PillLabel::Tone::Amber);
+    emit connectRequested(device.code, device.server, token());
+}
+
 void ConnectionPage::updateRecentControls()
 {
     const bool enabled = !busy_ && !connected_;
@@ -872,6 +1075,16 @@ void ConnectionPage::updateFavoriteControls()
         const bool visible = index < favoriteConnections_.size();
         tile.button->setEnabled(enabled && visible);
         tile.remove->setEnabled(enabled && visible);
+    }
+}
+
+void ConnectionPage::updateNearbyControls()
+{
+    const bool enabled = !busy_ && !connected_;
+    for (int index = 0; index < nearbyTiles_.size(); ++index) {
+        NearbyTile &tile = nearbyTiles_[index];
+        const bool visible = index < nearbyDevices_.size();
+        tile.button->setEnabled(enabled && visible);
     }
 }
 

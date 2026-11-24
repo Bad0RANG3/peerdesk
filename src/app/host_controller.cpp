@@ -3,6 +3,7 @@
 #include "app/quality_presets.h"
 #include "client/signaling_client.h"
 #include "core/util.h"
+#include "discovery/lan_discovery.h"
 #include "session/host_session.h"
 #include "transport/peer_link.h"
 
@@ -221,6 +222,20 @@ void HostController::setDeviceId(const QString &deviceId)
     deviceId_ = deviceId.trimmed();
 }
 
+QString HostController::deviceName() const
+{
+    return machineName();
+}
+
+void HostController::setLanDiscovery(LanDiscovery *discovery)
+{
+    if (lanDiscovery_ == discovery) {
+        return;
+    }
+    lanDiscovery_ = discovery;
+    syncAnnouncement();
+}
+
 void HostController::setScreenSource(std::shared_ptr<IScreenSource> source)
 {
     screenSource_ = std::move(source);
@@ -292,6 +307,7 @@ bool HostController::start(QString *error)
     active_ = true;
     state_ = State::Connecting;
     emit stateChanged(state_);
+    syncAnnouncement();
     return true;
 }
 
@@ -399,6 +415,7 @@ bool HostController::regenerateCode(QString *error)
     emit peerChanged({}, false);
     state_ = State::Connecting;
     emit stateChanged(state_);
+    syncAnnouncement();
     return true;
 }
 
@@ -411,6 +428,7 @@ void HostController::setServer(const QString &server)
 {
     server_ = server.trimmed();
     persist();
+    syncAnnouncement();
 }
 
 void HostController::setToken(const QString &token)
@@ -481,10 +499,12 @@ void HostController::setReceiveDirectory(const QString &directory)
 void HostController::setState(State state)
 {
     if (state_ == state) {
+        syncAnnouncement();
         return;
     }
     state_ = state;
     emit stateChanged(state_);
+    syncAnnouncement();
 }
 
 void HostController::setError(const QString &message)
@@ -500,6 +520,20 @@ void HostController::updateCandidates()
         return;
     }
     signaling_->updateCandidates(link_->localCandidates());
+}
+
+void HostController::syncAnnouncement()
+{
+    if (!lanDiscovery_) {
+        return;
+    }
+    if (!active_
+        || state_ == State::Idle
+        || state_ == State::Error) {
+        lanDiscovery_->withdraw();
+        return;
+    }
+    lanDiscovery_->publish(deviceName(), code_, server_);
 }
 
 void HostController::onRegistered(const RegistrationInfo &info)

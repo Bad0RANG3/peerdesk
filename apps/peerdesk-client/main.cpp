@@ -4,6 +4,7 @@
 #include "app/single_instance.h"
 #include "app/viewer_controller.h"
 #include "diagnostics/logging.h"
+#include "discovery/lan_discovery.h"
 #include "platform/startup_registration.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
@@ -357,12 +358,27 @@ int main(int argc, char *argv[])
         syntheticCapture || viewerDemo,
         syntheticAudio || viewerDemo);
 
+    pd::LanDiscovery discovery;
+    QObject::connect(
+        &discovery,
+        &pd::LanDiscovery::logMessage,
+        [](const QString &message) {
+            qInfo().noquote() << message;
+        });
+    QString discoveryError;
+    if (!discovery.start(&discoveryError)) {
+        printError(QStringLiteral("局域网发现未启用：%1")
+                       .arg(discoveryError));
+    }
+    host.setLanDiscovery(&discovery);
+
     std::shared_ptr<pd::StartupRegistration> startupRegistration;
 #ifdef Q_OS_WIN
     startupRegistration =
         std::make_shared<pd::WindowsStartupRegistration>();
 #endif
     pd::ui::AppWindow window(&host, &viewer, startupRegistration);
+    window.setLanDiscovery(&discovery);
     if (instanceGuard) {
         QObject::connect(
             instanceGuard.get(),
@@ -436,9 +452,10 @@ int main(int argc, char *argv[])
         &application,
         &QCoreApplication::aboutToQuit,
         &application,
-        [&host, &viewer]() {
+        [&host, &viewer, &discovery]() {
             viewer.hangUp();
             host.stop();
+            discovery.stop();
             pd::diagnostics::LogManager::instance().stop();
         });
 

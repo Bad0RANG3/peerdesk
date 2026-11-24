@@ -18,6 +18,7 @@ class QTimer;
 
 namespace pd {
 class HostController;
+class LanDiscovery;
 class Preferences;
 class StartupRegistration;
 class ViewerController;
@@ -69,6 +70,7 @@ public:
     [[nodiscard]] QWidget *currentPage() const;
     void setTrayAvailableForTesting(bool available);
     [[nodiscard]] bool startInBackground();
+    void setLanDiscovery(LanDiscovery *discovery);
 
 public slots:
     void showRemotePage();
@@ -109,6 +111,7 @@ private:
 
     HostController *host_ = nullptr;
     ViewerController *viewer_ = nullptr;
+    LanDiscovery *lanDiscovery_ = nullptr;
     std::shared_ptr<Preferences> preferences_;
     std::shared_ptr<StartupRegistration> startupRegistration_;
     QStackedWidget *stack_ = nullptr;
@@ -126,6 +129,7 @@ private:
     QLabel *toast_ = nullptr;
     QTimer *toastTimer_ = nullptr;
     QTimer *windowSaveTimer_ = nullptr;
+    QMetaObject::Connection discoveryConnection_;
     bool wasMaximized_ = false;
     bool wasMaximizedBeforeHide_ = false;
     bool quitting_ = false;

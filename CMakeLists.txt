@@ -53,6 +53,17 @@ add_library(peerdesk_diagnostics STATIC
 target_include_directories(peerdesk_diagnostics PUBLIC src)
 target_link_libraries(peerdesk_diagnostics PUBLIC Qt6::Core)
 
+add_library(peerdesk_discovery STATIC
+    src/discovery/lan_discovery.cpp
+    src/discovery/lan_discovery.h
+)
+target_compile_definitions(peerdesk_discovery PRIVATE
+    PEERDESK_VERSION="${PROJECT_VERSION}"
+)
+target_link_libraries(peerdesk_discovery
+    PUBLIC peerdesk_core Qt6::Core Qt6::Network
+)
+
 add_library(peerdesk_server STATIC
     src/server/server.cpp
     src/server/server.h
@@ -155,7 +166,7 @@ add_library(peerdesk_app STATIC
     src/app/viewer_controller.h
 )
 target_link_libraries(peerdesk_app
-    PUBLIC peerdesk_client peerdesk_session
+    PUBLIC peerdesk_client peerdesk_session peerdesk_discovery
         peerdesk_diagnostics
         Qt6::Core Qt6::Gui Qt6::Multimedia
 )
@@ -398,6 +409,13 @@ target_link_libraries(peerdesk-logging-tests
     PRIVATE peerdesk_app peerdesk_diagnostics Qt6::Test
 )
 
+add_executable(peerdesk-discovery-tests
+    tests/discovery_test.cpp
+)
+target_link_libraries(peerdesk-discovery-tests
+    PRIVATE peerdesk_discovery Qt6::Test
+)
+
 if(WIN32)
     add_executable(peerdesk-platform-tests
         tests/platform_test.cpp
@@ -427,6 +445,7 @@ add_test(NAME peerdesk-audio-output COMMAND peerdesk-audio-output-tests)
 add_test(NAME peerdesk-single-instance COMMAND peerdesk-single-instance-tests)
 add_test(NAME peerdesk-ui COMMAND peerdesk-ui-tests)
 add_test(NAME peerdesk-logging COMMAND peerdesk-logging-tests)
+add_test(NAME peerdesk-discovery COMMAND peerdesk-discovery-tests)
 set_tests_properties(peerdesk-single-instance PROPERTIES
     ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1")
 set_tests_properties(peerdesk-ui PROPERTIES

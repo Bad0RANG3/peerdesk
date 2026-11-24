@@ -103,6 +103,7 @@ private slots:
     void connectedStateSwitchesToDisconnect();
     void recentConnectionsSelectionAndClear();
     void favoriteDevicesQuickConnectAndToggle();
+    void nearbyDevicesQuickConnectAndRefresh();
     void navigationSwitchesPagesWithoutAutoStart();
     void hostPanelRendersWithSyntheticSource();
     void viewerCanvasScalesAndNormalizesCoordinates();
@@ -419,6 +420,73 @@ void UiTest::favoriteDevicesQuickConnectAndToggle()
         removals.constFirst().at(0).toString(),
         QStringLiteral("246813579"));
     QCOMPARE(removals.constFirst().at(3).toBool(), false);
+}
+
+void UiTest::nearbyDevicesQuickConnectAndRefresh()
+{
+    pd::ui::ConnectionPage page;
+    page.resize(900, 760);
+    page.show();
+    QTest::qWait(20);
+
+    QVERIFY(page.nearbyDevicesPanel()->isHidden());
+    QCOMPARE(page.nearbyDeviceButtons().size(), 4);
+    QVERIFY(page.nearbyDeviceButtons().constFirst()->isHidden());
+
+    pd::NearbyDevice studio;
+    studio.instanceId = QStringLiteral("studio-instance");
+    studio.code = QStringLiteral("246813579");
+    studio.name = QStringLiteral("DESIGN-STUDIO");
+    studio.server = QStringLiteral("studio.example:7900");
+    page.setToken(QStringLiteral("server-secret"));
+    page.setNearbyDevices({studio});
+    QTest::qWait(10);
+
+    QVERIFY(page.nearbyDevicesPanel()->isVisible());
+    QList<QPushButton *> nearbyButtons = page.nearbyDeviceButtons();
+    QVERIFY(nearbyButtons.constFirst()->isVisible());
+    QVERIFY(nearbyButtons.at(1)->isHidden());
+    QCOMPARE(
+        nearbyButtons.constFirst()
+            ->findChild<QLabel *>(QStringLiteral("nearbyDeviceName"))
+            ->text(),
+        QStringLiteral("DESIGN-STUDIO"));
+    QCOMPARE(
+        nearbyButtons.constFirst()
+            ->findChild<QLabel *>(QStringLiteral("nearbyDeviceCode"))
+            ->text(),
+        QStringLiteral("246 813 579"));
+    QCOMPARE(
+        nearbyButtons.constFirst()
+            ->findChild<QLabel *>(QStringLiteral("nearbyDeviceServer"))
+            ->text(),
+        QStringLiteral("studio.example:7900"));
+
+    QSignalSpy requests(
+        &page,
+        &pd::ui::ConnectionPage::connectRequested);
+    nearbyButtons.constFirst()->click();
+    QCOMPARE(requests.count(), 1);
+    const QList<QVariant> request = requests.takeFirst();
+    QCOMPARE(request.at(0).toString(), QStringLiteral("246813579"));
+    QCOMPARE(
+        request.at(1).toString(),
+        QStringLiteral("studio.example:7900"));
+    QCOMPARE(request.at(2).toString(), QStringLiteral("server-secret"));
+    QVERIFY(page.busy());
+    QVERIFY(!nearbyButtons.constFirst()->isEnabled());
+
+    page.setBusy(false);
+    QVERIFY(nearbyButtons.constFirst()->isEnabled());
+    page.setConnected(true, QStringLiteral("DESIGN-STUDIO"));
+    QVERIFY(!nearbyButtons.constFirst()->isEnabled());
+    page.setConnected(false);
+    QVERIFY(nearbyButtons.constFirst()->isEnabled());
+
+    page.setNearbyDevices({});
+    QTest::qWait(10);
+    QVERIFY(page.nearbyDevicesPanel()->isHidden());
+    QVERIFY(nearbyButtons.constFirst()->isHidden());
 }
 
 void UiTest::navigationSwitchesPagesWithoutAutoStart()

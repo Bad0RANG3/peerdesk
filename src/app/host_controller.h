@@ -17,6 +17,7 @@ class IAudioSource;
 class IClipboard;
 class IInputSink;
 class IScreenSource;
+class LanDiscovery;
 class PeerLink;
 
 class HostController final : public QObject {
@@ -46,6 +47,9 @@ public:
 
     void setDeviceId(const QString &deviceId);
     [[nodiscard]] QString deviceId() const { return deviceId_; }
+    [[nodiscard]] QString deviceName() const;
+
+    void setLanDiscovery(LanDiscovery *discovery);
 
     void setScreenSource(std::shared_ptr<IScreenSource> source);
     void setAudioSource(std::shared_ptr<IAudioSource> source);
@@ -129,6 +133,7 @@ private:
     void setError(const QString &message);
     void failActive(const QString &message);
     void resetPeerState();
+    void syncAnnouncement();
     bool startSignaling(QString *error);
     void updateCandidates();
 
@@ -144,6 +149,7 @@ private:
     PeerLink *link_ = nullptr;
     SignalingClient *signaling_ = nullptr;
     HostSession *session_ = nullptr;
+    LanDiscovery *lanDiscovery_ = nullptr;
 
     std::shared_ptr<IScreenSource> screenSource_;
     std::shared_ptr<IAudioSource> audioSource_;
