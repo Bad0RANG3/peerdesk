@@ -31,6 +31,30 @@ QString jsonString(
     return value.isString() ? value.toString() : fallback;
 }
 
+bool offersH264(const QJsonObject &message)
+{
+#ifdef PD_HAS_H264
+    const QJsonArray codecs = message
+                                  .value(QStringLiteral("media"))
+                                  .toObject()
+                                  .value(QStringLiteral("codecs"))
+                                  .toArray();
+    return std::any_of(
+        codecs.cbegin(),
+        codecs.cend(),
+        [](const QJsonValue &value) {
+            return value.isString()
+                && value.toString().compare(
+                       QStringLiteral("h264"),
+                       Qt::CaseInsensitive)
+                    == 0;
+        });
+#else
+    Q_UNUSED(message)
+    return false;
+#endif
+}
+
 } // namespace
 
 HostSession::HostSession(PeerLink *link, QObject *parent)
@@ -51,6 +75,11 @@ HostSession::HostSession(PeerLink *link, QObject *parent)
         &VideoPipeline::failed,
         this,
         &HostSession::onVideoFailed);
+    connect(
+        &videoPipeline_,
+        &VideoPipeline::codecChanged,
+        this,
+        &HostSession::onVideoCodecChanged);
     connect(
         &videoPipeline_,
         &VideoPipeline::started,
@@ -234,8 +263,12 @@ void HostSession::onLinkStateChanged(const QString &state)
 
     if ((state == QStringLiteral("direct")
          || state == QStringLiteral("relay"))
-        && wantedRunning_ && !running_) {
-        startStreaming();
+        && wantedRunning_) {
+        if (running_) {
+            videoPipeline_.requestKeyframe();
+        } else {
+            startStreaming();
+        }
     } else if (state == QStringLiteral("closed")) {
         stopStreaming();
     }
@@ -258,6 +291,8 @@ void HostSession::startStreaming()
     }
 
     QString pipelineError;
+    settings_.pixelFormat = videoCodecName(negotiatedCodec_);
+    videoPipeline_.setCodec(negotiatedCodec_);
     adaptiveRate_.reset(settings_.quality, settings_.fps);
     lossKeyframeRequests_ = 0;
     adaptiveClock_.restart();
@@ -353,8 +388,10 @@ void HostSession::resumeOutgoingFile()
 
 void HostSession::setSettings(const VideoSettings &settings)
 {
+    const VideoCodec selectedCodec = negotiatedCodec_;
     settings_ = settings;
     settings_.clamp();
+    settings_.pixelFormat = videoCodecName(selectedCodec);
     adaptiveRate_.setCeilings(settings_.quality, settings_.fps);
     applyAdaptiveLimits();
     if (running_) {
@@ -641,11 +678,13 @@ void HostSession::pollClipboard()
 
 void HostSession::applySettings(const QJsonObject &message)
 {
+    const VideoCodec selectedCodec = negotiatedCodec_;
     const QJsonObject values =
         message.value(QStringLiteral("settings")).isObject()
         ? message.value(QStringLiteral("settings")).toObject()
         : message;
     settings_.update(values);
+    settings_.pixelFormat = videoCodecName(selectedCodec);
     adaptiveRate_.setCeilings(settings_.quality, settings_.fps);
     applyAdaptiveLimits();
     refreshMonitors();
@@ -667,11 +706,64 @@ void HostSession::applySettings(const QJsonObject &message)
     emit eventReceived(ack);
 }
 
+void HostSession::negotiateCodec(const QJsonObject &message)
+{
+    const VideoCodec codec = offersH264(message)
+        ? VideoCodec::H264
+        : VideoCodec::Jpeg;
+    settings_.pixelFormat = videoCodecName(codec);
+    if (codec == negotiatedCodec_) {
+        return;
+    }
+
+    negotiatedCodec_ = codec;
+    videoPipeline_.setCodec(codec);
+    sendMediaState();
+    if (running_) {
+        videoPipeline_.requestKeyframe();
+        sendInfo();
+    }
+}
+
+void HostSession::sendMediaState(const QString &reason)
+{
+    const QJsonObject message{
+        {QStringLiteral("t"), QStringLiteral("media")},
+        {QStringLiteral("codec"), videoCodecName(negotiatedCodec_)},
+        {QStringLiteral("negotiated"), true},
+        {QStringLiteral("reason"), reason},
+    };
+    sendControl(message);
+    emit eventReceived(message);
+}
+
+void HostSession::onVideoCodecChanged(
+    VideoCodec codec,
+    const QString &reason)
+{
+    const bool changed = codec != negotiatedCodec_;
+    negotiatedCodec_ = codec;
+    settings_.pixelFormat = videoCodecName(codec);
+    if (!changed) {
+        return;
+    }
+    sendMediaState(reason);
+    if (running_) {
+        videoPipeline_.requestKeyframe();
+        sendInfo();
+    }
+}
+
 void HostSession::dispatch(const QJsonObject &message)
 {
     const QString kind =
         message.value(QStringLiteral("t")).toString();
     if (kind == QStringLiteral("hello")) {
+        if (message.value(QStringLiteral("role")).toString()
+            != QStringLiteral("viewer")) {
+            return;
+        }
+        negotiateCodec(message);
         sendInfo();
         return;
     }

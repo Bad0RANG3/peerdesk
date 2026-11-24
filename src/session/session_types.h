@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/protocol.h"
+
 #include <QJsonObject>
 #include <QList>
 #include <QMetaType>
@@ -18,6 +20,9 @@ struct MonitorInfo {
 
     [[nodiscard]] QJsonObject toJson() const;
 };
+
+[[nodiscard]] QString videoCodecName(VideoCodec codec);
+[[nodiscard]] VideoCodec videoCodecFromName(const QString &name);
 
 struct VideoSettings {
     int fps = 30;

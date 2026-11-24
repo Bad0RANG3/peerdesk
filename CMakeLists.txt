@@ -131,6 +131,10 @@ target_compile_definitions(peerdesk_session PRIVATE
 target_link_libraries(peerdesk_session
     PUBLIC peerdesk_transport Qt6::Core Qt6::Gui
 )
+if(WIN32)
+    target_link_libraries(peerdesk_session PUBLIC peerdesk_codec)
+    target_compile_definitions(peerdesk_session PUBLIC PD_HAS_H264=1)
+endif()
 
 add_library(peerdesk_app STATIC
     src/app/quality_presets.cpp

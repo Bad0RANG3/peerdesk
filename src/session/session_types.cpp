@@ -7,6 +7,23 @@
 
 namespace pd {
 
+QString videoCodecName(VideoCodec codec)
+{
+    return codec == VideoCodec::H264
+        ? QStringLiteral("h264")
+        : QStringLiteral("jpeg");
+}
+
+VideoCodec videoCodecFromName(const QString &name)
+{
+    return name.compare(
+               QStringLiteral("h264"),
+               Qt::CaseInsensitive)
+            == 0
+        ? VideoCodec::H264
+        : VideoCodec::Jpeg;
+}
+
 QJsonObject MonitorInfo::toJson() const
 {
     return {

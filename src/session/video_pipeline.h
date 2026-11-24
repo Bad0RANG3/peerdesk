@@ -39,10 +39,12 @@ public:
         QString *error = nullptr);
     void stop();
     void update(const VideoSettings &settings, int quality);
+    void setCodec(VideoCodec codec);
     void setRateLimit(double mbps);
     void setAdaptiveLimits(int qualityLimit, int fpsLimit);
     void requestKeyframe();
 
+    [[nodiscard]] VideoCodec codec() const { return codec_; }
     [[nodiscard]] QList<MonitorInfo> monitors() const;
     [[nodiscard]] QString backend() const;
     [[nodiscard]] bool hasSource() const { return hasSource_; }
@@ -50,6 +52,7 @@ public:
 
 signals:
     void frameReady(const pd::EncodedVideoFrame &frame);
+    void codecChanged(pd::VideoCodec codec, const QString &reason);
     void failed(const QString &message);
     void started(const QString &backend);
 
@@ -59,12 +62,17 @@ private:
         const pd::EncodedVideoFrame &frame);
     void onWorkerFailed(quint64 generation, const QString &message);
     void onWorkerStarted(quint64 generation, const QString &backend);
+    void onWorkerCodecChanged(
+        quint64 generation,
+        pd::VideoCodec codec,
+        const QString &reason);
 
     QThread thread_;
     VideoCaptureWorker *worker_ = nullptr;
     mutable QList<MonitorInfo> monitorsCache_;
     mutable QString backendCache_;
     double rateLimitMbps_ = 0.0;
+    VideoCodec codec_ = VideoCodec::Jpeg;
     int adaptiveQualityLimit_ = 92;
     int adaptiveFpsLimit_ = 120;
     quint64 generation_ = 0;

@@ -1,5 +1,9 @@
 #include "session/video_pipeline.h"
 
+#ifdef PD_HAS_H264
+#include "codec/media_foundation_h264.h"
+#endif
+
 #include <QBuffer>
 #include <QElapsedTimer>
 #include <QImageWriter>
@@ -71,6 +75,60 @@ bool encodeJpeg(
     return true;
 }
 
+int evenDimension(int value)
+{
+    return std::max(2, value & ~1);
+}
+
+QImage normalizeH264Image(
+    const QImage &image,
+    int *width,
+    int *height)
+{
+    const int targetWidth = evenDimension(image.width());
+    const int targetHeight = evenDimension(image.height());
+    if (width != nullptr) {
+        *width = targetWidth;
+    }
+    if (height != nullptr) {
+        *height = targetHeight;
+    }
+    if (targetWidth == image.width()
+        && targetHeight == image.height()) {
+        return image;
+    }
+    return image.scaled(
+        targetWidth,
+        targetHeight,
+        Qt::IgnoreAspectRatio,
+        Qt::SmoothTransformation);
+}
+
+int h264Bitrate(
+    int quality,
+    int fps,
+    int width,
+    int height,
+    double rateLimitMbps)
+{
+    const double normalizedQuality =
+        static_cast<double>(std::clamp(quality, 20, 95) - 20)
+        / 75.0;
+    const double bitsPerPixel = 0.025 + normalizedQuality * 0.10;
+    double bitrate =
+        static_cast<double>(width) * height * std::max(1, fps)
+        * bitsPerPixel;
+    if (rateLimitMbps > 0.0) {
+        bitrate = std::min(
+            bitrate,
+            rateLimitMbps * 1'000'000.0 * 0.85);
+    }
+    return std::clamp(
+        static_cast<int>(std::lround(bitrate)),
+        500'000,
+        20'000'000);
+}
+
 } // namespace
 
 class VideoCaptureWorker final : public QObject {
@@ -102,6 +160,8 @@ public:
         currentQuality_ = pacer_.quality();
         forceKeyframe_ = true;
         lastError_.clear();
+        h264Broken_ = false;
+        activeCodec_ = VideoCodec::Jpeg;
 
         if (!source_) {
             emit failed(generation_, QStringLiteral("没有可用的抓屏源"));
@@ -139,6 +199,10 @@ public:
         }
         lastFingerprint_.clear();
         lastFingerprintMonitor_ = -1;
+#ifdef PD_HAS_H264
+        h264Encoder_.close();
+#endif
+        activeCodec_ = VideoCodec::Jpeg;
     }
 
     void configure(
@@ -162,6 +226,31 @@ public:
     {
         rateLimitMbps_ = std::max(0.0, mbps);
         updateBudget();
+    }
+
+    void setCodec(VideoCodec codec)
+    {
+        if (requestedCodec_ != codec) {
+            requestedCodec_ = codec;
+            h264Broken_ = false;
+            lastFingerprint_.clear();
+            lastFingerprintMonitor_ = -1;
+            forceKeyframe_ = true;
+        }
+        if (codec == VideoCodec::Jpeg) {
+#ifdef PD_HAS_H264
+            h264Encoder_.close();
+#endif
+            if (activeCodec_ != VideoCodec::Jpeg) {
+                activeCodec_ = VideoCodec::Jpeg;
+                if (running_) {
+                    emit codecChanged(
+                        generation_,
+                        activeCodec_,
+                        QString());
+                }
+            }
+        }
     }
 
     void setAdaptiveLimits(int qualityLimit, int fpsLimit)
@@ -193,6 +282,10 @@ signals:
         const pd::EncodedVideoFrame &frame);
     void failed(quint64 generation, const QString &message);
     void started(quint64 generation, const QString &backend);
+    void codecChanged(
+        quint64 generation,
+        pd::VideoCodec codec,
+        const QString &reason);
 
 private:
     void updateBudget()
@@ -251,6 +344,92 @@ private:
         emit failed(generation_, error);
     }
 
+    [[nodiscard]] int encoderFps() const
+    {
+        return std::clamp(
+            std::min(settings_.fps, adaptiveFpsLimit_),
+            1,
+            120);
+    }
+
+#ifdef PD_HAS_H264
+    bool ensureH264Encoder(
+        int width,
+        int height,
+        int fps,
+        QString *error)
+    {
+        const int bitrate = h264Bitrate(
+            currentQuality_,
+            fps,
+            width,
+            height,
+            rateLimitMbps_);
+        if (h264Encoder_.isOpen()
+            && h264Width_ == width
+            && h264Height_ == height
+            && h264Fps_ == fps) {
+            const int change =
+                std::abs(bitrate - h264Bitrate_);
+            if (change > std::max(128'000, h264Bitrate_ / 10)) {
+                QString ignored;
+                if (h264Encoder_.setBitrate(bitrate, &ignored)) {
+                    h264Bitrate_ = bitrate;
+                }
+            }
+            return true;
+        }
+
+        h264Encoder_.close();
+        h264Width_ = 0;
+        h264Height_ = 0;
+        h264Fps_ = 0;
+        h264Bitrate_ = 0;
+        if (!h264Encoder_.open(
+                width,
+                height,
+                fps,
+                bitrate,
+                error)) {
+            return false;
+        }
+        h264Width_ = width;
+        h264Height_ = height;
+        h264Fps_ = fps;
+        h264Bitrate_ = bitrate;
+        forceKeyframe_ = true;
+        lastFingerprint_.clear();
+        lastFingerprintMonitor_ = -1;
+        activeCodec_ = VideoCodec::H264;
+        emit codecChanged(generation_, activeCodec_, QString());
+        return true;
+    }
+#endif
+
+    void fallbackToJpeg(const QString &reason)
+    {
+#ifdef PD_HAS_H264
+        h264Encoder_.close();
+#endif
+        h264Width_ = 0;
+        h264Height_ = 0;
+        h264Fps_ = 0;
+        h264Bitrate_ = 0;
+        h264Broken_ = true;
+        requestedCodec_ = VideoCodec::Jpeg;
+        activeCodec_ = VideoCodec::Jpeg;
+        forceKeyframe_ = true;
+        lastFingerprint_.clear();
+        lastFingerprintMonitor_ = -1;
+        lastError_.clear();
+        emit codecChanged(
+            generation_,
+            VideoCodec::Jpeg,
+            reason.isEmpty()
+                ? QStringLiteral("H.264 不可用")
+                : reason);
+    }
+
     void tick()
     {
         if (!running_ || !source_) {
@@ -262,7 +441,7 @@ private:
         CaptureRequest request;
         request.monitor = settings_.monitor;
         request.maxWidth = settings_.maxWidth;
-        request.pixelFormat = settings_.pixelFormat;
+        request.pixelFormat = videoCodecName(requestedCodec_);
 
         CaptureResult captured = source_->capture(request);
         if (!captured.ok()) {
@@ -295,8 +474,6 @@ private:
             && !forceKeyframe_
             && currentFingerprint == lastFingerprint_
             && monitor == lastFingerprintMonitor_;
-        lastFingerprint_ = currentFingerprint;
-        lastFingerprintMonitor_ = monitor;
         if (unchanged) {
             scheduleNextFrame(clock.elapsed());
             return;
@@ -305,40 +482,93 @@ private:
         const qint64 captureMs = clock.elapsed();
         QElapsedTimer encodeClock;
         encodeClock.start();
-        QByteArray jpeg;
-        QString encodeError;
-        if (!encodeJpeg(
-                image,
-                currentQuality_,
-                &jpeg,
-                &encodeError)) {
-            reportError(
-                QStringLiteral("JPEG 编码失败：%1")
-                    .arg(encodeError));
-            scheduleNextFrame(clock.elapsed());
-            return;
+        QByteArray payload;
+        bool keyframe = false;
+        VideoCodec outputCodec = VideoCodec::Jpeg;
+
+        if (requestedCodec_ == VideoCodec::H264 && !h264Broken_) {
+#ifdef PD_HAS_H264
+            int width = 0;
+            int height = 0;
+            const QImage h264Image =
+                normalizeH264Image(image, &width, &height);
+            QString encodeError;
+            if (!ensureH264Encoder(
+                    width,
+                    height,
+                    encoderFps(),
+                    &encodeError)) {
+                fallbackToJpeg(
+                    QStringLiteral("H.264 编码器启动失败：%1")
+                        .arg(encodeError));
+            } else {
+                H264AccessUnit unit;
+                if (!h264Encoder_.encode(
+                        h264Image,
+                        forceKeyframe_,
+                        &unit,
+                        &encodeError)) {
+                    fallbackToJpeg(
+                        QStringLiteral("H.264 编码失败：%1")
+                            .arg(encodeError));
+                } else if (unit.data.isEmpty()) {
+                    scheduleNextFrame(clock.elapsed());
+                    return;
+                } else {
+                    payload = std::move(unit.data);
+                    keyframe = unit.keyframe;
+                    outputCodec = VideoCodec::H264;
+                }
+            }
+#else
+            fallbackToJpeg(
+                QStringLiteral("当前构建不支持 H.264"));
+#endif
         }
+
+        if (outputCodec == VideoCodec::Jpeg) {
+#ifdef PD_HAS_H264
+            h264Encoder_.close();
+#endif
+            activeCodec_ = VideoCodec::Jpeg;
+            QString encodeError;
+            if (!encodeJpeg(
+                    image,
+                    currentQuality_,
+                    &payload,
+                    &encodeError)) {
+                reportError(
+                    QStringLiteral("JPEG 编码失败：%1")
+                        .arg(encodeError));
+                scheduleNextFrame(clock.elapsed());
+                return;
+            }
+            keyframe = forceKeyframe_;
+        }
+
         const qint64 encodeMs = encodeClock.elapsed();
         lastError_.clear();
 
-        const bool keyframe = forceKeyframe_;
         const int encodedQuality = currentQuality_;
         pacer_.observe(
-            jpeg.size(),
+            payload.size(),
             static_cast<double>(clock.elapsed()));
         currentQuality_ = pacer_.quality();
-        forceKeyframe_ = false;
+        if (!forceKeyframe_ || keyframe) {
+            forceKeyframe_ = false;
+        }
+        lastFingerprint_ = currentFingerprint;
+        lastFingerprintMonitor_ = monitor;
 
-        emit frameReady(
-            generation_,
-            EncodedVideoFrame{
-                jpeg,
-                keyframe,
-                encodedQuality,
-                effectiveFps(),
-                captureMs,
-                encodeMs,
-            });
+        EncodedVideoFrame frame;
+        frame.data = std::move(payload);
+        frame.keyframe = keyframe;
+        frame.quality = encodedQuality;
+        frame.effectiveFps = effectiveFps();
+        frame.captureMs = captureMs;
+        frame.encodeMs = encodeMs;
+        frame.codec = outputCodec;
+        emit frameReady(generation_, frame);
         scheduleNextFrame(clock.elapsed());
     }
 
@@ -349,6 +579,16 @@ private:
     QTimer *timer_ = nullptr;
     bool running_ = false;
     bool forceKeyframe_ = true;
+    VideoCodec requestedCodec_ = VideoCodec::Jpeg;
+    VideoCodec activeCodec_ = VideoCodec::Jpeg;
+    bool h264Broken_ = false;
+#ifdef PD_HAS_H264
+    H264Encoder h264Encoder_;
+#endif
+    int h264Width_ = 0;
+    int h264Height_ = 0;
+    int h264Fps_ = 0;
+    int h264Bitrate_ = 0;
     int currentQuality_ = 65;
     double rateLimitMbps_ = 0.0;
     int adaptiveQualityLimit_ = 92;
@@ -387,6 +627,11 @@ VideoPipeline::VideoPipeline(QObject *parent)
         &VideoCaptureWorker::started,
         this,
         &VideoPipeline::onWorkerStarted);
+    connect(
+        worker_,
+        &VideoCaptureWorker::codecChanged,
+        this,
+        &VideoPipeline::onWorkerCodecChanged);
     thread_.start();
 }
 
@@ -445,10 +690,12 @@ bool VideoPipeline::start(
     running_ = true;
     const quint64 generation = ++generation_;
     const double rateLimitMbps = rateLimitMbps_;
+    const VideoCodec codec = codec_;
     QMetaObject::invokeMethod(
         worker_,
         [this,
          generation,
+         codec,
          settings,
          quality,
          rateLimitMbps,
@@ -457,6 +704,7 @@ bool VideoPipeline::start(
             worker_->setAdaptiveLimits(
                 adaptiveQualityLimit,
                 adaptiveFpsLimit);
+            worker_->setCodec(codec);
             worker_->start(
                 generation,
                 settings,
@@ -482,6 +730,18 @@ void VideoPipeline::stop()
             Qt::BlockingQueuedConnection);
     }
     Q_UNUSED(wasRunning)
+}
+
+void VideoPipeline::setCodec(VideoCodec codec)
+{
+    codec_ = codec;
+    if (!worker_) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        worker_,
+        [this, codec]() { worker_->setCodec(codec); },
+        Qt::QueuedConnection);
 }
 
 void VideoPipeline::update(
@@ -594,6 +854,18 @@ void VideoPipeline::onWorkerStarted(
         return;
     }
     emit started(backend);
+}
+
+void VideoPipeline::onWorkerCodecChanged(
+    quint64 generation,
+    pd::VideoCodec codec,
+    const QString &reason)
+{
+    if (!running_ || generation != generation_) {
+        return;
+    }
+    codec_ = codec;
+    emit codecChanged(codec, reason);
 }
 
 } // namespace pd

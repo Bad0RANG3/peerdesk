@@ -196,8 +196,12 @@ frameId u32 LE + index u16 LE + count u16 LE + encoded frame bytes
 - 最后一片设置 `LAST_FRAGMENT`；关键帧的每一片都设置 `KEYFRAME`。
 - 每个 DATA 分片只在 `H264` 标志中携带 codec；清零表示 JPEG。PARITY 也带相同标志，
   NACK 重传必须保留 `KEYFRAME` 和 `H264`，并按原分片位置设置 `LAST_FRAGMENT`。
-- 当前产品发送端只生成 JPEG；H.264 标志和数据通路已实现，但会话协商、产品编码/解码
-  和自动回退尚未接入。
+- Windows Viewer 在会话控制消息 `hello.media.codecs` 中声明 `h264`/`jpeg` 能力；
+  Host 仅在自身 codec 可用且 Viewer 声明 H.264 时编码 H.264，否则使用整帧 JPEG。
+- Host 通过控制消息 `t: "media"` 报告当前 `codec`、`negotiated` 和可选 `reason`；
+  接收端仍以每个视频 DATA/PARITY 的 `H264` 标志为准，不能只依赖该状态消息。
+- H.264 编码器启动或运行失败时，Host 切换到 JPEG 并发送新的 `media` 状态。Viewer
+  在 H.264 首个关键帧前丢弃增量帧，解码失败后重置解码器并等待下一关键帧。
 
 ### 4.2 XOR FEC
 
@@ -287,6 +291,7 @@ sequence u32 LE + timestamp u32 LE + samples u16 LE + previousLen u16 LE
 | `t` | 说明 |
 | --- | --- |
 | `hello` | 加密链路建立后的角色确认 |
+| `media` | Host 报告协商后的视频 codec、是否完成协商和回退原因 |
 | `settings` | 画质、帧率、显示器、声音、剪贴板等会话设置 |
 | `keyframe_req` | 请求新的完整视频关键帧 |
 | `mouse` | 绝对坐标、相对位移、按钮与滚轮 |

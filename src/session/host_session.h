@@ -105,6 +105,11 @@ private:
     void pushStats();
     void pollClipboard();
     void applySettings(const QJsonObject &message);
+    void negotiateCodec(const QJsonObject &message);
+    void sendMediaState(const QString &reason = {});
+    void onVideoCodecChanged(
+        VideoCodec codec,
+        const QString &reason);
 
     void dispatch(const QJsonObject &message);
     void handleMouse(const QJsonObject &message);
@@ -146,6 +151,7 @@ private:
     bool running_ = false;
     bool allowInput_ = true;
     double rateLimitMbps_ = 0.0;
+    VideoCodec negotiatedCodec_ = VideoCodec::Jpeg;
 
     AudioEncoder audioEncoder_;
     QByteArray audioCarry_;

@@ -1,4 +1,7 @@
 #include "server/server.h"
+#ifdef PD_HAS_H264
+#include "codec/media_foundation_h264.h"
+#endif
 #include "session/adaptive_video_rate_controller.h"
 #include "session/audio_codec.h"
 #include "session/file_transfer.h"
@@ -849,6 +852,116 @@ private slots:
             },
             3000));
         pipeline.stop();
+    }
+
+    void viewerVideoPipelineHonorsH264Keyframes()
+    {
+#ifndef PD_HAS_H264
+        QSKIP("当前构建不支持 H.264");
+#else
+        H264Encoder encoder;
+        QString error;
+        QVERIFY2(
+            encoder.open(320, 240, 30, 2'000'000, &error),
+            qPrintable(error));
+
+        QByteArray keyframe;
+        QByteArray delta;
+        for (int index = 0; index < 12; ++index) {
+            QImage source(320, 240, QImage::Format_RGB32);
+            source.fill(
+                QColor(
+                    24 + index * 9,
+                    64 + index * 5,
+                    120 - index * 3));
+            H264AccessUnit unit;
+            QVERIFY2(
+                encoder.encode(
+                    source,
+                    index == 0,
+                    &unit,
+                    &error),
+                qPrintable(error));
+            if (unit.data.isEmpty()) {
+                continue;
+            }
+            if (index == 0) {
+                QVERIFY(unit.keyframe);
+                keyframe = unit.data;
+            } else if (!unit.keyframe && delta.isEmpty()) {
+                delta = unit.data;
+            }
+        }
+        QVERIFY(!keyframe.isEmpty());
+        QVERIFY(!delta.isEmpty());
+
+        QImage jpegSource(320, 180, QImage::Format_RGB32);
+        jpegSource.fill(QColor(32, 96, 160));
+        QByteArray jpeg;
+        QBuffer buffer(&jpeg);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QImageWriter writer(&buffer, QByteArrayLiteral("jpeg"));
+        QVERIFY(writer.write(jpegSource));
+        buffer.close();
+        QVERIFY(!jpeg.isEmpty());
+
+        ViewerVideoPipeline pipeline;
+        QList<quint32> sequences;
+        QList<QImage> frames;
+        QList<QString> errors;
+        connect(
+            &pipeline,
+            &ViewerVideoPipeline::frameDecoded,
+            [&sequences, &frames](
+                const QImage &image,
+                quint32 sequence,
+                bool) {
+                sequences.append(sequence);
+                frames.append(image);
+            });
+        connect(
+            &pipeline,
+            &ViewerVideoPipeline::decodeFailed,
+            [&errors](const QString &message) {
+                errors.append(message);
+            });
+
+        pipeline.start();
+        pipeline.submit(delta, 1, false, VideoCodec::H264);
+        pumpEvents(250);
+        QVERIFY(frames.isEmpty());
+
+        pipeline.submit(jpeg, 2, true, VideoCodec::Jpeg);
+        QVERIFY(waitUntil(
+            [&]() { return !frames.isEmpty(); },
+            3000));
+        QCOMPARE(sequences.constLast(), 2U);
+        QCOMPARE(frames.constLast().size(), jpegSource.size());
+
+        pipeline.submit(delta, 3, false, VideoCodec::H264);
+        pumpEvents(250);
+        QCOMPARE(frames.size(), qsizetype(1));
+
+        pipeline.submit(keyframe, 4, true, VideoCodec::H264);
+        for (int index = 0;
+             index < 8 && frames.size() < 2;
+             ++index) {
+            pipeline.submit(
+                delta,
+                static_cast<quint32>(5 + index),
+                false,
+                VideoCodec::H264);
+            pumpEvents(100);
+        }
+        QVERIFY(waitUntil(
+            [&]() { return frames.size() >= 2; },
+            4000));
+        QCOMPARE(frames.constLast().size(), QSize(320, 240));
+        if (!errors.isEmpty()) {
+            QFAIL(qPrintable(errors.constFirst()));
+        }
+        pipeline.stop();
+#endif
     }
 
     void viewerAudioPipelineDecodesInOrderOffMainThread()
@@ -2417,6 +2530,8 @@ private slots:
         QList<QJsonObject> hostEvents;
         QList<QJsonObject> viewerEvents;
         QList<QByteArray> encodedFrames;
+        QList<VideoCodec> encodedCodecs;
+        QList<bool> encodedKeyframes;
         QList<QImage> decodedFrames;
         QList<bool> keyframes;
         QList<QByteArray> audioFrames;
@@ -2449,12 +2564,14 @@ private slots:
         connect(
             &viewer,
             &ViewerSession::videoFrameReceived,
-            [&encodedFrames](
-                const QByteArray &jpeg,
+            [&encodedFrames, &encodedCodecs, &encodedKeyframes](
+                const QByteArray &data,
                 quint32,
-                bool,
-                VideoCodec) {
-                encodedFrames.append(jpeg);
+                bool keyframe,
+                VideoCodec codec) {
+                encodedFrames.append(data);
+                encodedCodecs.append(codec);
+                encodedKeyframes.append(keyframe);
             });
         connect(
             &viewer,
@@ -2525,6 +2642,62 @@ private slots:
                     == 2;
             },
             5000));
+#ifdef PD_HAS_H264
+        const VideoCodec expectedCodec = VideoCodec::H264;
+        const QString expectedCodecName = QStringLiteral("h264");
+#else
+        const VideoCodec expectedCodec = VideoCodec::Jpeg;
+        const QString expectedCodecName = QStringLiteral("jpeg");
+#endif
+        const bool negotiatedInfo = waitUntil(
+            [&]() {
+                return viewer.info()
+                           .value(QStringLiteral("settings"))
+                           .toObject()
+                           .value(QStringLiteral("pixel_format"))
+                           .toString()
+                    == expectedCodecName;
+            },
+            5000);
+        QVERIFY2(
+            negotiatedInfo,
+            qPrintable(
+                QStringLiteral(
+                    "viewer_info=%1 host_pixel_format=%2 events=%3")
+                    .arg(
+                        QString::fromUtf8(
+                            QJsonDocument(viewer.info())
+                                .toJson(QJsonDocument::Compact)),
+                        host.settings().pixelFormat,
+                        QString::fromUtf8(
+                            QJsonDocument(
+                                QJsonArray::fromVariantList(
+                                    [&viewerEvents]() {
+                                        QVariantList values;
+                                        for (const QJsonObject &event :
+                                             viewerEvents) {
+                                            values.append(event);
+                                        }
+                                        return values;
+                                    }()))
+                                .toJson(QJsonDocument::Compact)))));
+#ifdef PD_HAS_H264
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerEvents.cbegin(),
+                    viewerEvents.cend(),
+                    [](const QJsonObject &message) {
+                        return message.value(QStringLiteral("t"))
+                                    .toString()
+                                == QStringLiteral("media")
+                            && message.value(QStringLiteral("codec"))
+                                    .toString()
+                                == QStringLiteral("h264");
+                    });
+            },
+            5000));
+#endif
         const QJsonObject info = viewer.info();
         QCOMPARE(
             info.value(QStringLiteral("monitors")).toArray().size(),
@@ -2534,8 +2707,73 @@ private slots:
                 .toObject()
                 .value(QStringLiteral("pixel_format"))
                 .toString(),
-            QStringLiteral("jpeg"));
+            expectedCodecName);
         QVERIFY(info.value(QStringLiteral("audio")).isObject());
+
+        const qsizetype settingsAckStart = viewerEvents.size();
+        viewerLink.sendControl(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("settings")},
+            {QStringLiteral("settings"),
+             QJsonObject{
+                 {QStringLiteral("pixel_format"),
+                  QStringLiteral("raw")},
+                 {QStringLiteral("quality"), 63},
+             }},
+        });
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    viewerEvents.cbegin() + settingsAckStart,
+                    viewerEvents.cend(),
+                    [&expectedCodecName](
+                        const QJsonObject &message) {
+                        const QJsonObject settings =
+                            message.value(QStringLiteral("settings"))
+                                .toObject();
+                        return message.value(QStringLiteral("t"))
+                                    .toString()
+                                == QStringLiteral("settings_ack")
+                            && settings.value(QStringLiteral("quality"))
+                                    .toInt()
+                                == 63
+                            && settings
+                                       .value(QStringLiteral(
+                                           "pixel_format"))
+                                       .toString()
+                                == expectedCodecName;
+                    });
+            },
+            3000));
+        QCOMPARE(
+            host.settings().pixelFormat,
+            expectedCodecName);
+
+        const qsizetype decodedBeforeCodec = decodedFrames.size();
+        QVERIFY(waitUntil(
+            [&]() {
+                return std::any_of(
+                    encodedCodecs.cbegin(),
+                    encodedCodecs.cend(),
+                    [&expectedCodec](VideoCodec codec) {
+                        return codec == expectedCodec;
+                    });
+            },
+            6000));
+        const auto expectedFrame = std::find(
+            encodedCodecs.cbegin(),
+            encodedCodecs.cend(),
+            expectedCodec);
+        QVERIFY(expectedFrame != encodedCodecs.cend());
+        const qsizetype expectedFrameIndex =
+            std::distance(encodedCodecs.cbegin(), expectedFrame);
+#ifdef PD_HAS_H264
+        QVERIFY(encodedKeyframes.at(expectedFrameIndex));
+        QVERIFY(isH264Keyframe(
+            encodedFrames.at(expectedFrameIndex)));
+#endif
+        QVERIFY(waitUntil(
+            [&]() { return decodedFrames.size() > decodedBeforeCodec; },
+            6000));
 
         QVERIFY(waitUntil(
             [&]() { return !decodedFrames.isEmpty(); },

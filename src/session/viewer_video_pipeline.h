@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/protocol.h"
+
 #include <QByteArray>
 #include <QImage>
 #include <QMutex>
@@ -21,9 +23,10 @@ public:
     void start();
     void stop();
     void submit(
-        const QByteArray &jpeg,
+        const QByteArray &data,
         quint32 sequence,
-        bool keyframe);
+        bool keyframe,
+        VideoCodec codec = VideoCodec::Jpeg);
 
     [[nodiscard]] QString decoderThreadName() const;
 

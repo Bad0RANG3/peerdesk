@@ -4,6 +4,7 @@
 #include "transport/peer_link.h"
 
 #include <QFileInfo>
+#include <QJsonArray>
 
 #include <algorithm>
 
@@ -20,6 +21,18 @@ QString jsonString(
 {
     const QJsonValue value = object.value(QLatin1String(key));
     return value.isString() ? value.toString() : fallback;
+}
+
+QJsonObject mediaCapabilities()
+{
+    QJsonArray codecs;
+#ifdef PD_HAS_H264
+    codecs.append(QStringLiteral("h264"));
+#endif
+    codecs.append(QStringLiteral("jpeg"));
+    return {
+        {QStringLiteral("codecs"), codecs},
+    };
 }
 
 } // namespace
@@ -168,6 +181,7 @@ void ViewerSession::start()
         sendControlNoReply(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("hello")},
             {QStringLiteral("role"), QStringLiteral("viewer")},
+            {QStringLiteral("media"), mediaCapabilities()},
         });
         requestKeyframe();
     }
@@ -555,6 +569,7 @@ void ViewerSession::onLinkStateChanged(const QString &state)
         sendControlNoReply(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("hello")},
             {QStringLiteral("role"), QStringLiteral("viewer")},
+            {QStringLiteral("media"), mediaCapabilities()},
         });
         requestKeyframe();
     } else if (state == QStringLiteral("closed")) {
@@ -572,7 +587,7 @@ void ViewerSession::onVideoFrame(
     }
     ++videoSequence_;
     emit videoFrameReceived(data, videoSequence_, keyframe, codec);
-    video_.submit(data, videoSequence_, keyframe);
+    video_.submit(data, videoSequence_, keyframe, codec);
 }
 
 void ViewerSession::onAudioPacket(const QByteArray &payload)

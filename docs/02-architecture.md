@@ -44,7 +44,7 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 | `src/transport/` | `PeerLink` 握手、候选、打洞、中继、保活、统计、链路状态，以及 UDP I/O、已认证包和带 codec 元数据的视频发送/接收流水线 |
 | `src/server/` | TCP JSON Lines 信令、UDP 中继、STUN、连接频次限制和每会话令牌桶 |
 | `src/client/` | TCP 信令客户端、注册/配对、候选更新和错误映射 |
-| `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入会话媒体路径） |
+| `src/codec/` | Windows Media Foundation H.264 Annex B 编解码、关键帧与码率调整封装 |
 | `src/session/` | 被控端/控制端会话、视频、音频、输入工作线程、剪贴板、文件和统计 |
 | `src/app/` | `HostController`、`ViewerController`、偏好、单实例守卫、五档画质、音频播放 |
 | `src/diagnostics/` | 滚动文件日志、脱敏、运行标记和无压缩 ZIP 诊断包 |
@@ -64,9 +64,12 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 3. 控制端发送 `connect`，服务器检查在线状态、令牌和连接频次。
 4. 被控端收到 `viewer`，控制端收到 `peer`，双方获得 `sid`、对端候选、
    中继地址和各自的中继 tag。
-5. 候选变化通过 `cands`/`peer_cands` 增量同步；额外路径通过
+5. Viewer 在会话 `hello` 中声明 `media.codecs`。Windows Host 在自身 H.264
+   可用且 Viewer 声明支持时选择 H.264，否则选择 JPEG；协商完成后 Host 发送
+   `t: "media"` 状态，后续视频帧仍以 PDTP codec 标志为准。
+6. 候选变化通过 `cands`/`peer_cands` 增量同步；额外路径通过
    `relay_hello`/`peer_relay_hello` 保持中继可达。
-6. 任一端 `bye` 或 TCP 断开时，服务器向另一端发送 `peer_bye`/`peer_gone`/
+7. 任一端 `bye` 或 TCP 断开时，服务器向另一端发送 `peer_bye`/`peer_gone`/
    `viewer_gone` 并释放配对。
 
 Viewer 的信令客户端支持自动重连；服务端返回 `offline`/`not_found` 时保持 Viewer
@@ -121,7 +124,7 @@ Viewer 实况中断 ──▶ Reconnecting ──同码重新配对/握手──
 ### 3.3 视频数据流
 
 ```text
-PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePacer
+PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → H.264 或 JPEG → FramePacer
   → queued frameReady
   → HostSession → PeerLink::sendVideo
   → PeerDeskVideoSend：视频分片 DATA + XOR PARITY
@@ -136,35 +139,40 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   → PeerDeskLinkFeedback：异步 NACK；关键帧请求经可靠控制流限频提交
   → HostSession（每秒）：RTT/NACK/loss 关键帧 → AdaptiveVideoRateController
   → VideoPipeline：动态质量/FPS 上限，健康恢复后逐步放宽
-  → PeerDeskViewerVideo 解码（保留最新帧）
+  → PeerDeskViewerVideo：H.264（关键帧门控）或 JPEG 解码（保留最新帧）
   → PeerDeskViewerPresent 等比缩放（物理像素/DPR，最新帧背压）
   → 主线程 paintEvent：最终 drawImage
 ```
 
-- `VideoPipeline` 在独立的 `PeerDeskVideo` 线程中执行抓屏、缩放、静帧指纹和 JPEG
-  编码，并用单次定时器在每帧编码完成后串行调度下一帧。
+- `VideoPipeline` 在独立的 `PeerDeskVideo` 线程中执行抓屏、缩放、静帧指纹和编码，
+  并用单次定时器在每帧编码完成后串行调度下一帧。Windows 默认按协商结果尝试
+  Media Foundation H.264；编码器启动或编码失败时关闭编码器并自动回退到整帧 JPEG，
+  通过 codec 状态消息通知 Viewer。非 Windows 构建或未启用 codec 模块时只使用 JPEG。
 - `HostSession` 在主线程接收编码完成的帧并交给 `PeerLink`；`PeerLink` 把帧数据和
   codec 提交到 `PeerDeskVideoSend`，由该线程独占 `VideoSender` 并完成分片、XOR FEC
   和 NACK 重传缓存检索。DATA 与 PARITY 使用 `FlagH264` 区分 JPEG/H.264，重传继续
   保留 codec 和关键帧标志，并按原分片位置设置末片标志。批次以排队信号回到主线程；
   `PeerLink` 选定路径后，把包头构造、AEAD 加密、发送序号和 UDP 写入排队交给
   `PeerDeskUdpIo` 线程。
-- `FramePacer` 根据实际帧大小调整 JPEG 质量，带宽上限同时影响质量预算和有效发帧率。
+- `FramePacer` 根据实际帧大小调整编码质量参数，带宽上限同时影响 JPEG 质量预算、
+  H.264 目标码率和有效发帧率。H.264 在分辨率或 FPS 改变时重建编码器，码率变化超过
+  阈值时动态调整；强制关键帧会同时清除静帧指纹并请求 IDR。
   `HostSession` 每秒把链路 RTT、NACK 帧/分片计数和带 `loss: true` 的自动关键帧请求
   交给 `AdaptiveVideoRateController`。控制器以 0.9 秒为最小调整间隔，在拥塞时同时
   收紧质量与 FPS 上限，链路持续健康 4 秒后再逐步恢复；用户画质/FPS 始终作为外部
   上限，`--relay-mbps` 等静态限速仍可进一步压低有效发帧率。会话停止或重新开始时
   控制器与计数归零，避免旧网络状态污染新会话。
-- 静帧可跳过发送；首帧和显式关键帧请求会提供新的编码基准。
+- 静帧可跳过发送；首帧和显式关键帧请求会提供新的编码基准。H.264 编码器在会话
+  开始时、传输路径可用时和 Viewer 请求刷新时输出关键帧。
 - `PeerDeskVideoReceive` 在独立线程中串行执行分片解析、重组、XOR FEC 缺片恢复、
   超时丢帧和 NACK 判定；结果以排队信号回到主线程。`PeerLink` 更新接收统计并发布
   路由快照；NACK 由 `PeerDeskLinkFeedback` 异步发送，关键帧请求经
   `PeerDeskPeerLinkRx` 的可靠控制流生成 DATA，并在反馈线程限制为每 200 ms 一次。
   重传包由 `PeerDeskVideoSend` 检索缓存并构造；关键帧丢失仍会触发刷新请求。
-- Viewer 当前把产品路径收到的 JPEG 交给 `PeerDeskViewerVideo` 线程解码；解码慢时只
-  保留最新帧，尚未交付的关键帧不会被普通帧覆盖。视频重组和会话信号已经携带 codec
-  元数据，但 Viewer 尚未接入 H.264 解码，不能把带 H.264 标志的数据视为可播放的端到端
-  路径。解码完成的 `QImage` 再交给 `PeerDeskViewerPresent` 线程，按当前窗口与
+- Viewer 把收到的 H.264 或 JPEG 交给 `PeerDeskViewerVideo` 线程解码；解码慢时只
+  保留最新帧，尚未交付的关键帧不会被普通帧覆盖。H.264 在首个关键帧到达前丢弃增量
+  帧，解码失败时重置解码器并等待下一关键帧；切换到 JPEG 时会关闭 H.264 解码器。
+  解码完成的 `QImage` 再交给 `PeerDeskViewerPresent` 线程，按当前窗口与
   `devicePixelRatio` 生成等比缩放后的物理像素图像；缩放同样只保留最新请求。主线程
   画布只执行最终 `drawImage`，输入坐标仍按源图对应的实际画面矩形归一化。
 
@@ -174,9 +182,11 @@ PeerDeskVideo 媒体线程：抓屏/缩放 → 静帧检测 → JPEG → FramePa
   动态码率，并在关键帧中携带 SPS/PPS。
 - `H264Decoder` 从 Annex B 输入自动协商 NV12 输出，处理流格式变化并转换为 RGB32。
 - 编解码回环、关键帧刷新、非法输入和码率更新已有 Windows 自动化测试。
-- PDTP DATA/PARITY 标志、NACK 重传、跨线程发送/接收信号和 `HostSession` 已贯通 codec
-  元数据；该封装尚未接入会话协商、产品编解码路径、JPEG 自动回退或 Viewer H.264
-  解码，当前实况视频仍全部使用 JPEG。
+- Viewer 通过 `hello.media.codecs` 声明能力，Host 协商后把编码结果交给 `VideoPipeline`；
+  H.264 编码失败会自动回退 JPEG。Viewer 按 PDTP codec 标志选择解码器，关键帧前
+  丢弃增量帧，解码失败后重置并等待刷新。
+- 端到端回环测试覆盖协商消息、Host 编码、伪造 `pixel_format` 隔离、首个 H.264
+  关键帧、Viewer 解码和持续帧输出；真实跨机画质、延迟、带宽和硬件编码仍未验收。
 
 ### 3.4 音频数据流
 
@@ -258,7 +268,7 @@ Viewer 与被控端的文件批次状态都由 UI 侧 `OutgoingFileQueue` 管理
 
 画质档位：
 
-| 档位 | 最大宽度 | JPEG 质量 | 目标帧率 |
+| 档位 | 最大宽度 | 编码质量参数 | 目标帧率 |
 | --- | ---: | ---: | ---: |
 | 流畅 | 1280 | 45 | 24 |
 | 均衡 | 1600 | 62 | 30 |
@@ -279,13 +289,14 @@ Qt 事件循环是主执行体。以下工作都在主线程完成：
 - 被控端控制消息的解析和鼠标坐标区域选择；实际系统输入注入提交给独立工作线程。
 
 `VideoPipeline` 创建一个名为 `PeerDeskVideo` 的 `QThread`。GDI 抓屏、缩放、静帧检测、
-JPEG 编码和 `FramePacer` 都在该线程串行执行；启动、停止和设置更新通过 Qt 排队/阻塞
+H.264/JPEG 编码和 `FramePacer` 都在该线程串行执行；启动、停止和设置更新通过 Qt 排队/阻塞
 调用进入 worker，编码结果再以排队信号交回主线程。停止或重启会递增 generation，
 丢弃旧线程路径尚未交付的帧。
 
 `ViewerVideoPipeline` 创建一个名为 `PeerDeskViewerVideo` 的 `QThread`，串行执行
-JPEG 解码。输入帧使用最新值覆盖策略限制积压，并保留尚未解码的关键帧；停止或重启同样
-通过 generation 丢弃旧结果。
+H.264/JPEG 解码。输入帧使用最新值覆盖策略限制积压，并保留尚未解码的关键帧；
+H.264 解码器只在关键帧后进入可输出状态，解码失败会重置；停止或重启同样通过
+generation 丢弃旧结果。
 
 `ViewerFramePipeline` 创建一个名为 `PeerDeskViewerPresent` 的 `QThread`，串行执行
 Viewer 画面的等比平滑缩放。窗口尺寸或设备像素比变化时会重新提交当前源图，缩放目标按
@@ -300,7 +311,7 @@ Viewer 画面的等比平滑缩放。窗口尺寸或设备像素比变化时会�
 `QAudioSink`；主线程不执行播放设备 I/O。
 
 `VideoSendPipeline` 创建一个名为 `PeerDeskVideoSend` 的 `QThread`，由 worker 独占
-唯一的 `VideoSender`，串行执行 JPEG 分片、XOR FEC 生成和 NACK 重传缓存检索。待发送
+唯一的 `VideoSender`，串行执行视频分片、XOR FEC 生成和 NACK 重传缓存检索。待发送
 帧使用最新值覆盖策略限制积压，尚未开始处理的普通帧不会覆盖待处理关键帧；停止、重置
 或重启通过 generation 丢弃旧批次。生成的数据包批次以排队信号回到主线程，再由
 `PeerLink` 交给 UDP 发送管线。
@@ -419,10 +430,10 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 
 ## 8. 当前架构限制
 
-- 实况视频是整帧 JPEG，没有帧间压缩、脏矩形或硬件编码；Media Foundation H.264
-  封装虽已通过底层回环，codec 元数据也已贯通协议、分片、FEC/NACK 重传和接收信号，
-  但尚未接入会话协商、产品编解码和自动回退。
-- 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、JPEG 编码、Viewer
+- Windows 实况视频优先使用 Media Foundation H.264，编码失败会自动回退整帧 JPEG；
+  非 Windows 构建只保留 JPEG。当前没有脏矩形、GPU 抓屏、硬件编码策略或 H.264
+  真实跨机性能结论。
+- 抓屏只有 GDI，每帧需要完整抓取和缩放；抓屏、缩放、静帧检测、H.264/JPEG 编码、Viewer
   解码与呈现、视频发送分片/FEC/NACK 缓存检索、入站视频重组/FEC/NACK 判定已移至
   独立线程，音频包校验和 µ-law 解码也已移至 FIFO 工作线程，抖动缓冲和 `QAudioSink`
   播放已移至 `PeerDeskAudio` 工作线程，UDP socket 收发、入站类型识别、RLY1 解包、

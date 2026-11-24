@@ -28,9 +28,11 @@ Qt 6.8、CMake 和 Ninja。
 - 日志与诊断：客户端和服务端写入滚动文件日志；客户端设置页可打开日志目录、导出脱敏 ZIP
   诊断包，并在发现上次异常退出标记时提示。诊断包不会自动上传，不包含 minidump。
 
-当前媒体管线是整帧 JPEG。抓屏、缩放、静帧检测和 JPEG 编码运行在 `PeerDeskVideo`
-媒体线程，Viewer JPEG 解码运行在 `PeerDeskViewerVideo` 媒体线程；后者用最新帧覆盖
-旧待解码帧，并保留尚未交付的关键帧。Viewer 画面缩放运行在 `PeerDeskViewerPresent`
+Windows 媒体管线优先使用 Media Foundation H.264，编码不可用时自动回退整帧 JPEG。
+抓屏、缩放、静帧检测和 H.264/JPEG 编码运行在 `PeerDeskVideo` 媒体线程，Viewer
+H.264/JPEG 解码运行在 `PeerDeskViewerVideo` 媒体线程；后者用最新帧覆盖旧待解码帧，
+保留尚未交付的关键帧，并在 H.264 首个关键帧前丢弃增量帧。Viewer 画面缩放运行在
+`PeerDeskViewerPresent`
 工作线程，按窗口与设备像素比生成物理像素目标，连续收帧和缩放采用最新值背压；UI 线程
 只执行最终 `drawImage`，源图尺寸仍用于输入坐标归一化。Viewer 音频包校验和 G.711
 µ-law 解码运行在
@@ -41,7 +43,7 @@ Qt 6.8、CMake 和 Ninja。
 超时丢帧和 NACK 判定运行在 `PeerDeskVideoReceive` 工作线程，结果排队回主线程后由
 `PeerLink` 更新统计并发布反馈路由快照。视频 DATA/PARITY 用 `FlagH264` 区分
 JPEG/H.264，NACK 重传保留 codec 与关键帧标志，跨线程发送/重组和 Viewer 帧信号也
-携带 codec；产品发送仍固定为 JPEG。`PeerDeskLinkFeedback` 工作线程异步发送 NACK、
+携带 codec。`PeerDeskLinkFeedback` 工作线程异步发送 NACK、
 Pong、ACK 和控制 DATA，关键帧请求经认证可靠控制流提交并限制为每 200 ms 一次。
 `PeerDeskUdpIo` 工作线程独占 UDP socket 和唯一加密上下文，完成绑定/关闭、
 入站类型识别、RLY1 解包、包头解析、接收侧 AEAD/重放检查、发送侧 AEAD、发送序号、
@@ -51,7 +53,7 @@ RLY1 封装、实际收写和原子发送统计。只有已认证包会回到主
 `LinkWireCommand` 把 ACK、Pong 和控制 DATA 交给反馈线程。反馈、UDP 接收和认证流
 代际必须同时匹配，重置或停止后迟到的任务会被丢弃。
 `HostSession` 每秒把最近窗口的 RTT、NACK 帧/分片和带 `loss: true` 的自动关键帧
-请求交给 `AdaptiveVideoRateController`，动态收紧 `VideoPipeline` 的 JPEG 质量与
+请求交给 `AdaptiveVideoRateController`，动态收紧 `VideoPipeline` 的编码质量与
 有效 FPS 上限；最小调整间隔为 0.9 秒，链路持续健康 4 秒后逐步恢复。用户画质/FPS
 和 `--relay-mbps` 仍作为外部上限。Host 统计消息新增
 `nack`、`nack_shards`、`keyreq`、`aq`、`afps` 和 `health`，便于回环和后续跨机
@@ -60,10 +62,12 @@ RLY1 封装、实际收写和原子发送统计。只有已认证包会回到主
 连续绝对移动合并，停止会立即拒绝并清空待处理队列，再等待 worker 释放按键与鼠标按钮。
 文件发送分块、接收 Base64 解码/校验、临时文件读写与提交由 `PeerDeskFileTransfer`
 工作线程串行处理，UI 线程只选择文件、展示进度并排队提交控制消息；WASAPI loopback
-另有采集线程。`src/codec/` 已有 Windows Media Foundation H.264 Annex B 编解码封装，
-并通过关键帧、动态码率和 RGB32/NV12 转换回环测试；PDTP codec 元数据、FEC/NACK
-重传和接收信号已接通，但会话协商、产品 H.264 编解码和 JPEG 自动回退仍未接入。
-尚未接入 GPU 抓屏、脏矩形、硬件编码或 Opus。
+另有采集线程。Windows `src/codec/` 提供 Media Foundation H.264 Annex B 编解码封装，
+支持关键帧、动态码率和 RGB32/NV12 转换。Viewer 在会话 `hello.media.codecs` 中声明
+H.264/JPEG 能力，Host 在自身 codec 可用时选择 H.264，并通过
+`PeerDeskVideo`/`PeerDeskViewerVideo` 完成编解码；编码器启动或编码失败会自动回退
+JPEG。首个 H.264 关键帧前不输出增量帧，解码失败后重置并等待下一关键帧。尚未接入
+GPU 抓屏、脏矩形、H.264 硬件编码策略、真实跨机媒体性能结论或 Opus。
 
 文件发送支持主动取消：发送端最多发出一次 `file_cancel`，接收端回滚临时文件并回执
 `file_cancelled`。接收失败、本地读写失败与断链中断使用不同事件；断链只清理本机状态，
@@ -119,6 +123,8 @@ Viewer 已实现应用层游戏鼠标：勾选工具栏按钮后隐藏本机光�
 - 真实登录/重启后的启动项、托盘驻留和窗口回退验收。
 - 安装包代码签名、自动更新、失败回滚、跨版本升级和正式发布渠道。
 - 两台真实 Windows 主机上的系统验收与正式性能基线。
+- H.264 在复杂桌面、视频播放、弱网、带宽突变和长会话中的画质/延迟/CPU 验收，
+  以及硬件编码策略。
 - 虚拟显示器、虚拟 HID、广泛游戏兼容性、真实弱网下的速率自适应调参和较长会话的
   稳定性证明。
 
@@ -356,7 +362,7 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
 | `src/transport/` | `PeerLink` 握手、打洞、直连/中继、UDP I/O、已认证包处理、链路统计和视频发送/接收流水线 |
 | `src/server/` | TCP 信令、UDP 中继、STUN、令牌、频次限制与中继限速 |
 | `src/client/` | TCP JSON Lines 信令客户端 |
-| `src/codec/` | Windows Media Foundation H.264 编解码封装（尚未接入产品会话编解码） |
+| `src/codec/` | Windows Media Foundation H.264 Annex B 编解码、关键帧与码率调整封装 |
 | `src/session/` | 被控/Viewer 会话、`VideoPipeline` 媒体线程、`HostInputPipeline` 输入线程、音视频处理和文件传输 |
 | `src/app/` | 页面控制器、偏好、最近连接、单实例守卫、画质决策、音频播放和错误状态 |
 | `src/diagnostics/` | 文件日志、轮转、脱敏、运行标记、诊断服务和无压缩 ZIP 打包 |
@@ -432,8 +438,8 @@ Viewer HUD 显示窗口尺寸、帧数和带宽信息。`--viewer-demo` 中的 H
    优化顺序；评估渲染线程和线程池的收益与队列边界。
 4. 产品化：真实登录/重启验收、安装包签名、自动更新、失败回滚、升级验证，以及在现有
    诊断包之上评估 minidump 与远程诊断。
-5. 媒体升级：在已贯通的 PDTP codec 元数据之上接入会话协商、真实 H.264 编解码和 JPEG
-   自动回退，再接 Opus；失败时始终保留整帧 JPEG 与 G.711 回退。
+5. 媒体升级：为已接入的 H.264 建立真实跨机画质、延迟、带宽、CPU 和长会话基线，
+   再评估硬件编码与 Opus；失败时始终保留整帧 JPEG 与 G.711 回退。
 6. 平台增强：脏矩形、GPU 共享纹理、虚拟显示器、虚拟 HID、真实游戏兼容性与真实弱网
    下的拥塞参数校准。
 7. 交互低摩擦入口：在本地历史之上评估收藏、二维码和账号云同步，明确隐私边界后再实现。

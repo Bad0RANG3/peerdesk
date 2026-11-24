@@ -1,5 +1,9 @@
 #include "session/viewer_video_pipeline.h"
 
+#ifdef PD_HAS_H264
+#include "codec/media_foundation_h264.h"
+#endif
+
 #include <QMetaObject>
 #include <QMutex>
 #include <QMutexLocker>
@@ -43,13 +47,33 @@ public:
         pending_.reset();
     }
 
+    void resetDecoder()
+    {
+#ifdef PD_HAS_H264
+        h264Decoder_.close();
+#endif
+        activeCodec_ = VideoCodec::Jpeg;
+        haveCodec_ = false;
+        waitingForKeyframe_ = true;
+        h264Broken_ = false;
+        lastH264Error_.clear();
+    }
+
+    void shutdown()
+    {
+#ifdef PD_HAS_H264
+        h264Decoder_.close();
+#endif
+    }
+
     void submit(
         quint64 generation,
         quint32 sequence,
-        QByteArray jpeg,
-        bool keyframe)
+        QByteArray data,
+        bool keyframe,
+        VideoCodec codec)
     {
-        if (jpeg.isEmpty()) {
+        if (data.isEmpty()) {
             return;
         }
         bool schedule = false;
@@ -63,11 +87,19 @@ public:
                 && !keyframe) {
                 return;
             }
+            if (pending_.has_value()
+                && pending_->codec == VideoCodec::H264
+                && codec == VideoCodec::H264
+                && !pending_->keyframe
+                && !keyframe) {
+                return;
+            }
             pending_ = Pending{
                 generation,
                 sequence,
-                std::move(jpeg),
+                std::move(data),
                 keyframe,
+                codec,
             };
             if (!scheduled_) {
                 scheduled_ = true;
@@ -98,9 +130,95 @@ private:
     struct Pending {
         quint64 generation = 0;
         quint32 sequence = 0;
-        QByteArray jpeg;
+        QByteArray data;
         bool keyframe = false;
+        VideoCodec codec = VideoCodec::Jpeg;
     };
+
+    void selectCodec(VideoCodec codec)
+    {
+        if (haveCodec_ && activeCodec_ == codec) {
+            return;
+        }
+#ifdef PD_HAS_H264
+        h264Decoder_.close();
+#endif
+        activeCodec_ = codec;
+        haveCodec_ = true;
+        waitingForKeyframe_ = true;
+        if (codec == VideoCodec::H264) {
+            h264Broken_ = false;
+            lastH264Error_.clear();
+        }
+    }
+
+#ifdef PD_HAS_H264
+    void decodeH264(
+        const Pending &pending,
+        const QString &threadName)
+    {
+        const bool keyframe =
+            pending.keyframe || isH264Keyframe(pending.data);
+        if (h264Broken_ || (waitingForKeyframe_ && !keyframe)) {
+            return;
+        }
+        if (!h264Decoder_.isOpen()) {
+            QString error;
+            if (!h264Decoder_.open(&error)) {
+                h264Broken_ = true;
+                waitingForKeyframe_ = true;
+                if (error != lastH264Error_) {
+                    lastH264Error_ = error;
+                    emit decodeFailed(
+                        pending.generation,
+                        pending.sequence,
+                        error.isEmpty()
+                            ? QStringLiteral("无法启动 H.264 解码器")
+                            : error);
+                }
+                return;
+            }
+        }
+
+        QImage image;
+        bool decodedKeyframe = false;
+        QString error;
+        if (!h264Decoder_.decode(
+                pending.data,
+                pending.sequence,
+                30,
+                &image,
+                &decodedKeyframe,
+                &error)) {
+            h264Decoder_.reset();
+            waitingForKeyframe_ = true;
+            const QString message = error.isEmpty()
+                ? QStringLiteral("H.264 视频帧解码失败")
+                : error;
+            if (message != lastH264Error_) {
+                lastH264Error_ = message;
+                emit decodeFailed(
+                    pending.generation,
+                    pending.sequence,
+                    message);
+            }
+            return;
+        }
+        if (keyframe) {
+            waitingForKeyframe_ = false;
+        }
+        lastH264Error_.clear();
+        if (image.isNull()) {
+            return;
+        }
+        emit frameDecoded(
+            pending.generation,
+            pending.sequence,
+            image,
+            pending.keyframe || decodedKeyframe,
+            threadName);
+    }
+#endif
 
     void decodePending()
     {
@@ -117,7 +235,20 @@ private:
                 pending_.reset();
             }
 
-            const QImage image = decodeJpeg(pending.jpeg);
+            selectCodec(pending.codec);
+            if (pending.codec == VideoCodec::H264) {
+#ifdef PD_HAS_H264
+                decodeH264(pending, threadName);
+#else
+                emit decodeFailed(
+                    pending.generation,
+                    pending.sequence,
+                    QStringLiteral("当前构建不支持 H.264 解码"));
+#endif
+                continue;
+            }
+
+            const QImage image = decodeJpeg(pending.data);
             if (image.isNull()) {
                 emit decodeFailed(
                     pending.generation,
@@ -139,6 +270,14 @@ private:
     std::optional<Pending> pending_;
     bool accepting_ = false;
     bool scheduled_ = false;
+    VideoCodec activeCodec_ = VideoCodec::Jpeg;
+    bool haveCodec_ = false;
+    bool waitingForKeyframe_ = true;
+    bool h264Broken_ = false;
+    QString lastH264Error_;
+#ifdef PD_HAS_H264
+    H264Decoder h264Decoder_;
+#endif
 };
 
 ViewerVideoPipeline::ViewerVideoPipeline(QObject *parent)
@@ -168,6 +307,13 @@ ViewerVideoPipeline::ViewerVideoPipeline(QObject *parent)
 ViewerVideoPipeline::~ViewerVideoPipeline()
 {
     stop();
+    if (worker_ && thread_.isRunning()) {
+        ViewerVideoWorker *worker = worker_;
+        QMetaObject::invokeMethod(
+            worker,
+            [worker]() { worker->shutdown(); },
+            Qt::BlockingQueuedConnection);
+    }
     if (thread_.isRunning()) {
         thread_.quit();
         thread_.wait();
@@ -185,6 +331,11 @@ void ViewerVideoPipeline::start()
     }
     if (worker_) {
         worker_->start();
+        ViewerVideoWorker *worker = worker_;
+        QMetaObject::invokeMethod(
+            worker,
+            [worker]() { worker->resetDecoder(); },
+            Qt::QueuedConnection);
     }
 }
 
@@ -194,18 +345,24 @@ void ViewerVideoPipeline::stop()
     ++generation_;
     if (worker_) {
         worker_->cancel();
+        ViewerVideoWorker *worker = worker_;
+        QMetaObject::invokeMethod(
+            worker,
+            [worker]() { worker->shutdown(); },
+            Qt::QueuedConnection);
     }
 }
 
 void ViewerVideoPipeline::submit(
-    const QByteArray &jpeg,
+    const QByteArray &data,
     quint32 sequence,
-    bool keyframe)
+    bool keyframe,
+    VideoCodec codec)
 {
-    if (!running_ || !worker_ || jpeg.isEmpty()) {
+    if (!running_ || !worker_ || data.isEmpty()) {
         return;
     }
-    worker_->submit(generation_, sequence, jpeg, keyframe);
+    worker_->submit(generation_, sequence, data, keyframe, codec);
 }
 
 QString ViewerVideoPipeline::decoderThreadName() const
