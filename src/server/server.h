@@ -75,6 +75,7 @@ public:
         double relayMbps = 0.0;
         int connectMax = kDefaultConnectMax;
         double connectWindow = kDefaultConnectWindowSeconds;
+        int approvalTimeoutMs = 30000;
     };
 
     explicit SignalingServer(QObject *parent = nullptr);

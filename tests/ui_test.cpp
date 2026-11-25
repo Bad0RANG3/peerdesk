@@ -3,6 +3,7 @@
 #include "app/viewer_controller.h"
 #include "diagnostics/logging.h"
 #include "platform/startup_registration.h"
+#include "server/server.h"
 #include "session/media_sources.h"
 #include "ui/app_window.h"
 #include "ui/code_input.h"
@@ -119,6 +120,7 @@ private slots:
     void viewerEndedClearsFrameAndShowsBack();
     void viewerToolbarFadesAndRevealsOnActivity();
     void viewerReconnectKeepsFrameAndIsolatesInput();
+    void viewerApprovalKeepsFrameAndShowsCancel();
     void viewerClipboardImagePriorityAndSync();
     void viewerPageGameMouseLifecycle();
     void outgoingFileQueueRetriesAndContinues();
@@ -131,6 +133,7 @@ private slots:
     void hostFileQueueFiltersAndRetries();
     void hostFileQueuePausesAndResumes();
     void appWindowKeepsViewerDuringLiveSession();
+    void appWindowRequiresApprovalAndKeepsRecoveryView();
     void windowGeometryRoundTrip();
     void windowGeometryFallsBackWhenOffscreen();
     void closeWithoutTrayQuits();
@@ -1311,6 +1314,107 @@ void UiTest::viewerReconnectKeepsFrameAndIsolatesInput()
     QCOMPARE(page.fileQueueSize(), 0);
 }
 
+void UiTest::viewerApprovalKeepsFrameAndShowsCancel()
+{
+    const auto preferences = testPreferences();
+    pd::ViewerController controller;
+    controller.setPreferences(preferences);
+    pd::ui::ViewerPage page(&controller);
+    page.resize(960, 600);
+    page.show();
+    QTest::qWait(20);
+
+    QImage frame(640, 360, QImage::Format_RGB32);
+    frame.fill(QColor(QStringLiteral("#203a54")));
+    page.beginSession(QStringLiteral("DESKTOP"), QStringLiteral("123456789"));
+    page.canvas()->setFrame(frame);
+    page.showStreaming(QStringLiteral("DESKTOP"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !page.canvas()->presentedFrame().isNull(),
+        2000);
+
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->inputEnabled());
+    page.canvas()->setRelativeMouseMode(true);
+    QVERIFY(page.canvas()->relativeMouseMode());
+    QKeyEvent pressEvent(
+        QEvent::KeyPress,
+        Qt::Key_A,
+        Qt::NoModifier,
+        QStringLiteral("a"));
+    QApplication::sendEvent(page.canvas(), &pressEvent);
+    QCOMPARE(
+        page.canvas()->pressedKeys(),
+        QStringList{QStringLiteral("KeyA")});
+
+    pd::CursorPacket cursor;
+    cursor.sequence = 9;
+    cursor.x = 16384;
+    cursor.y = 16384;
+    cursor.visible = true;
+    cursor.shape = pd::CursorShape::Arrow;
+    page.canvas()->setRemoteCursor(cursor);
+    QImage cursorImage(24, 24, QImage::Format_ARGB32);
+    cursorImage.fill(QColor(255, 120, 30, 255));
+    page.canvas()->setRemoteCursorImage(0xC0FFEE03U, cursorImage);
+    QVERIFY(page.canvas()->hasRemoteCursor());
+    QVERIFY(page.canvas()->hasRemoteCursorImage());
+
+    page.toolbar()->show();
+    page.textOverlay()->show();
+    page.dropOverlay()->show();
+    page.transferLabel()->show();
+    page.fileCancelButton()->show();
+    page.fileRetryButton()->show();
+    controller.outgoingFileStarted(
+        QStringLiteral("approval-file"),
+        QStringLiteral("approval.bin"),
+        8192,
+        QString());
+    controller.outgoingFileProgress(
+        QStringLiteral("approval-file"),
+        4096,
+        8192);
+    QTest::qWait(10);
+
+    page.showWaitingApproval(QStringLiteral("HOST-PC"));
+    QTest::qWait(10);
+
+    QVERIFY(page.sessionLive());
+    QVERIFY(page.canvas()->hasFrame());
+    QCOMPARE(page.canvas()->frame().size(), frame.size());
+    QCOMPARE(
+        page.canvas()->frame().pixelColor(QPoint(20, 20)),
+        frame.pixelColor(QPoint(20, 20)));
+    QVERIFY(!page.canvas()->presentedFrame().isNull());
+    QVERIFY(!page.canvas()->inputEnabled());
+    QVERIFY(page.canvas()->pressedKeys().isEmpty());
+    QVERIFY(!page.canvas()->relativeMouseMode());
+    QVERIFY(!page.canvas()->hasRemoteCursor());
+    QVERIFY(!page.canvas()->hasRemoteCursorImage());
+    QCOMPARE(page.canvas()->cursor().shape(), Qt::ArrowCursor);
+    QCOMPARE(page.lastPeerName(), QStringLiteral("HOST-PC"));
+    QVERIFY(page.connectionOverlay()->isVisible());
+    QVERIFY(page.overlayTitle()->text().contains(QStringLiteral("HOST-PC")));
+    QVERIFY(page.overlayTitle()->text().contains(QStringLiteral("确认连接")));
+    QCOMPARE(page.overlayDotColor(), pd::ui::amber());
+    QVERIFY(page.backButton()->isVisible());
+    QCOMPARE(page.backButton()->text(), QStringLiteral("取消连接"));
+    QVERIFY(page.toolbar()->isHidden());
+    QVERIFY(page.textOverlay()->isHidden());
+    QVERIFY(page.dropOverlay()->isHidden());
+    QVERIFY(page.transferLabel()->isHidden());
+    QVERIFY(page.fileCancelButton()->isHidden());
+    QVERIFY(page.fileRetryButton()->isHidden());
+
+    page.showEnded(QStringLiteral("对方拒绝了连接请求"));
+    QVERIFY(!page.sessionLive());
+    QVERIFY(!page.canvas()->hasFrame());
+    QVERIFY(page.canvas()->presentedFrame().isNull());
+    QCOMPARE(page.overlayDotColor(), pd::ui::red());
+    QCOMPARE(page.backButton()->text(), QStringLiteral("返回连接页"));
+}
+
 void UiTest::viewerClipboardImagePriorityAndSync()
 {
     QClipboard *clipboard = QApplication::clipboard();
@@ -2241,6 +2345,179 @@ void UiTest::appWindowKeepsViewerDuringLiveSession()
     QCOMPARE(window.currentPage(), window.connectionPage());
     QVERIFY(!window.viewerPage()->sessionLive());
     QVERIFY(!viewer.active());
+}
+
+void UiTest::appWindowRequiresApprovalAndKeepsRecoveryView()
+{
+    pd::SignalingServer::Options options;
+    options.host = QStringLiteral("127.0.0.1");
+    options.port = 0;
+    options.udpPort = 0;
+    options.connectMax = 1000;
+    options.connectWindow = 60.0;
+    options.approvalTimeoutMs = 5000;
+    pd::SignalingServer server(options);
+    QString serverError;
+    QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+    const QString address =
+        QStringLiteral("127.0.0.1:%1").arg(server.signalingPort());
+    const QString code = QStringLiteral("223606797");
+
+    auto hostPreferences = testPreferences();
+    pd::HostPreferences hostValues = hostPreferences->host();
+    hostValues.server = address;
+    hostValues.code = code;
+    hostValues.video.fps = 15;
+    hostValues.video.maxWidth = 320;
+    hostValues.video.quality = 40;
+    hostValues.video.monitor = 0;
+    hostValues.video.skipStatic = false;
+    hostValues.video.clipboard = false;
+    hostValues.video.audio = false;
+    hostValues.allowInput = false;
+    hostValues.forceRelay = false;
+    hostPreferences->setHost(hostValues);
+
+    auto viewerPreferences = testPreferences();
+    pd::ViewerPreferences viewerValues = viewerPreferences->viewer();
+    viewerValues.server = address;
+    viewerValues.code.clear();
+    viewerValues.qualityId = QStringLiteral("fluent");
+    viewerValues.audio = false;
+    viewerPreferences->setViewer(viewerValues);
+
+    pd::HostController host;
+    pd::ViewerController viewer;
+    host.setPreferences(hostPreferences);
+    viewer.setPreferences(viewerPreferences);
+    host.setBindAddress(QStringLiteral("127.0.0.1"));
+    host.setDeviceId(QStringLiteral("ui-approval-host"));
+    host.setScreenSource(
+        std::make_shared<pd::SyntheticScreenSource>(320, 180, false));
+    viewer.setBindAddress(QStringLiteral("127.0.0.1"));
+    viewer.setReconnectTimeoutMs(8000);
+
+    pd::ui::AppWindow window(&host, &viewer);
+    window.hostPanel()->setAutoStart(false);
+    window.resize(1200, 760);
+    window.show();
+    QTest::qWait(20);
+
+    auto *panel = window.hostPanel();
+    QVERIFY(panel->approvalCard()->isHidden());
+
+    QString error;
+    QVERIFY2(host.start(&error), qPrintable(error));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        host.state() == pd::HostController::State::Waiting,
+        5000);
+    QVERIFY2(
+        viewer.connectTo(
+            code,
+            address,
+            {},
+            QStringLiteral("UI-VIEWER"),
+            &error),
+        qPrintable(error));
+
+    QTRY_VERIFY_WITH_TIMEOUT(host.approvalPending(), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        viewer.state(),
+        pd::ViewerController::State::WaitingApproval,
+        5000);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        window.currentPage(),
+        window.viewerPage(),
+        5000);
+    QVERIFY(window.viewerPage()->sessionLive());
+    QVERIFY(window.viewerPage()->connectionOverlay()->isVisible());
+    QVERIFY(window.viewerPage()->overlayTitle()->text().contains(
+        host.deviceName()));
+    QVERIFY(window.viewerPage()->overlayTitle()->text().contains(
+        QStringLiteral("确认连接")));
+    QVERIFY(window.viewerPage()->backButton()->isVisible());
+    QCOMPARE(
+        window.viewerPage()->backButton()->text(),
+        QStringLiteral("取消连接"));
+    QVERIFY(!window.viewerPage()->canvas()->inputEnabled());
+
+    QVERIFY(!panel->approvalCard()->isHidden());
+    QVERIFY(panel->approvalName()->text().contains(
+        QStringLiteral("UI-VIEWER")));
+    QCOMPARE(
+        panel->approveButton()->text(),
+        QStringLiteral("允许控制"));
+    QCOMPARE(panel->rejectButton()->text(), QStringLiteral("拒绝"));
+    auto *hostStatus = panel->findChild<QLabel *>(
+        QStringLiteral("hostStatus"));
+    QVERIFY(hostStatus);
+    QVERIFY(hostStatus->text().contains(QStringLiteral("请求")));
+
+    panel->approveButton()->click();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        host.state() == pd::HostController::State::Streaming
+            && viewer.state() == pd::ViewerController::State::Streaming
+            && viewer.streaming(),
+        10000);
+    QVERIFY(panel->approvalCard()->isHidden());
+
+    host.stop();
+    QTRY_COMPARE_WITH_TIMEOUT(
+        viewer.state(),
+        pd::ViewerController::State::Reconnecting,
+        5000);
+    QVERIFY(viewer.active());
+    QVERIFY2(host.start(&error), qPrintable(error));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        host.state() == pd::HostController::State::Waiting
+            && host.approvalPending()
+            && viewer.state() == pd::ViewerController::State::Reconnecting
+            && viewer.approvalPending(),
+        8000);
+    QTRY_COMPARE_WITH_TIMEOUT(
+        window.currentPage(),
+        window.viewerPage(),
+        5000);
+    QVERIFY(window.viewerPage()->sessionLive());
+    QVERIFY(window.viewerPage()->backButton()->isVisible());
+    QVERIFY(window.viewerPage()->overlayTitle()->text().contains(
+        QStringLiteral("确认连接")));
+    QVERIFY(!panel->approvalCard()->isHidden());
+
+    window.viewerPage()->backButton()->click();
+    QTRY_COMPARE_WITH_TIMEOUT(
+        window.currentPage(),
+        window.connectionPage(),
+        5000);
+    QCOMPARE(viewer.state(), pd::ViewerController::State::Idle);
+    QVERIFY(!viewer.active());
+    QVERIFY(!window.viewerPage()->sessionLive());
+    QTRY_VERIFY_WITH_TIMEOUT(!host.approvalPending(), 3000);
+
+    QVERIFY2(
+        viewer.connectTo(
+            code,
+            address,
+            {},
+            QStringLiteral("UI-VIEWER-2"),
+            &error),
+        qPrintable(error));
+    QTRY_VERIFY_WITH_TIMEOUT(host.approvalPending(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        window.viewerPage()->backButton()->isVisible(),
+        5000);
+    QVERIFY(panel->approvalName()->text().contains(
+        QStringLiteral("UI-VIEWER-2")));
+    panel->rejectButton()->click();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        viewer.state() == pd::ViewerController::State::Error
+            && !viewer.active(),
+        5000);
+    QVERIFY(panel->approvalCard()->isHidden());
+
+    viewer.hangUp();
+    host.stop();
 }
 
 void UiTest::windowGeometryRoundTrip()

@@ -74,6 +74,11 @@ private slots:
             QStringLiteral("604173829"),
             QStringLiteral("agent-pc"),
             sampleCandidates(50000)));
+        QObject::connect(
+            &host, &SignalingClient::viewerRequested, &host,
+            [&host](const QString &requestId, const QString &, int) {
+                host.approveViewer(requestId);
+            });
 
         QTRY_COMPARE_WITH_TIMEOUT(
             host.state(), SignalingClient::State::Ready, 3000);
@@ -185,8 +190,14 @@ private slots:
         host.setServer(
             QStringLiteral("127.0.0.1"), server.signalingPort());
         host.setReconnectPolicy(40, 160);
+        host.setPairRetryPolicy(40, 160);
         QSignalSpy hostPeer(
             &host, &SignalingClient::peerJoined);
+        QObject::connect(
+            &host, &SignalingClient::viewerRequested, &host,
+            [&host](const QString &requestId, const QString &, int) {
+                host.approveViewer(requestId);
+            });
         QVERIFY(host.startHost(
             QStringLiteral("918273645"),
             QStringLiteral("late-host"),
@@ -205,6 +216,233 @@ private slots:
 
         viewer.stop();
         host.stop();
+    }
+
+    void hostApprovesExplicitly()
+    {
+        SignalingServer::Options options = loopbackOptions();
+        options.connectMax = 1000;
+        options.connectWindow = 60.0;
+        SignalingServer server(options);
+        QString serverError;
+        QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+        SignalingClient host;
+        host.setServer(
+            QStringLiteral("127.0.0.1"), server.signalingPort());
+        QSignalSpy hostRequests(
+            &host, &SignalingClient::viewerRequested);
+        QSignalSpy hostCleared(
+            &host, &SignalingClient::viewerRequestCleared);
+        QSignalSpy hostPeer(
+            &host, &SignalingClient::peerJoined);
+        QVERIFY(host.startHost(
+            QStringLiteral("246813579"),
+            QStringLiteral("approval-host"),
+            sampleCandidates(50100)));
+        QTRY_COMPARE_WITH_TIMEOUT(
+            host.state(), SignalingClient::State::Ready, 3000);
+
+        SignalingClient viewer;
+        viewer.setServer(
+            QStringLiteral("127.0.0.1"), server.signalingPort());
+        QSignalSpy viewerWaiting(
+            &viewer, &SignalingClient::waitingApproval);
+        QSignalSpy viewerPeer(
+            &viewer, &SignalingClient::peerJoined);
+        QSignalSpy viewerAccess(
+            &viewer, &SignalingClient::accessChanged);
+        QVERIFY(viewer.startViewer(
+            QStringLiteral("246813579"),
+            QStringLiteral("approval-viewer"),
+            sampleCandidates(50120)));
+
+        QTRY_COMPARE_WITH_TIMEOUT(
+            viewer.state(),
+            SignalingClient::State::WaitingApproval,
+            3000);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            host.state(),
+            SignalingClient::State::ViewerRequest,
+            3000);
+        QCOMPARE(hostRequests.count(), 1);
+        QCOMPARE(viewerWaiting.count(), 1);
+        QVERIFY(!host.paired());
+        QVERIFY(!viewer.paired());
+        QCOMPARE(host.pendingViewerName(), QStringLiteral("approval-viewer"));
+        QCOMPARE(viewer.pendingHostName(), QStringLiteral("approval-host"));
+        QCOMPARE(
+            host.pendingRequestId(),
+            viewer.pendingRequestId());
+
+        const QString requestId = host.pendingRequestId();
+        QVERIFY(host.approveViewer(requestId));
+        QTRY_COMPARE_WITH_TIMEOUT(
+            host.state(), SignalingClient::State::Paired, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            viewer.state(), SignalingClient::State::Paired, 3000);
+        QCOMPARE(hostPeer.count(), 1);
+        QCOMPARE(viewerPeer.count(), 1);
+        QCOMPARE(host.access(), QStringLiteral("control"));
+        QCOMPARE(viewer.access(), QStringLiteral("control"));
+        QCOMPARE(viewerAccess.count(), 1);
+        QCOMPARE(hostCleared.count(), 1);
+        QCOMPARE(
+            hostCleared.first().first().toString(),
+            QStringLiteral("approved"));
+        QVERIFY(host.pendingRequestId().isEmpty());
+    }
+
+    void approvalRejectCancelAndTimeout()
+    {
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            SignalingServer server(options);
+            QString serverError;
+            QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+            SignalingClient host;
+            host.setServer(
+                QStringLiteral("127.0.0.1"),
+                server.signalingPort());
+            QSignalSpy hostCleared(
+                &host, &SignalingClient::viewerRequestCleared);
+            QSignalSpy hostPeer(
+                &host, &SignalingClient::peerJoined);
+            QVERIFY(host.startHost(
+                QStringLiteral("135724680"),
+                QStringLiteral("reject-host")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                host.state(), SignalingClient::State::Ready, 3000);
+
+            SignalingClient viewer;
+            viewer.setServer(
+                QStringLiteral("127.0.0.1"),
+                server.signalingPort());
+            QSignalSpy viewerErrors(
+                &viewer, &SignalingClient::errorOccurred);
+            QSignalSpy viewerPeer(
+                &viewer, &SignalingClient::peerJoined);
+            QVERIFY(viewer.startViewer(
+                QStringLiteral("135724680"),
+                QStringLiteral("rejected-viewer")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                host.state(),
+                SignalingClient::State::ViewerRequest,
+                3000);
+            QCOMPARE(
+                viewer.state(),
+                SignalingClient::State::WaitingApproval);
+            QVERIFY(host.rejectViewer(
+                host.pendingRequestId(),
+                QStringLiteral("现在不方便")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                viewer.state(), SignalingClient::State::Error, 3000);
+            QCOMPARE(viewer.lastError(), QStringLiteral("rejected"));
+            QCOMPARE(viewer.lastErrorText(), QStringLiteral("现在不方便"));
+            QCOMPARE(viewerErrors.count(), 1);
+            QCOMPARE(hostCleared.count(), 1);
+            QCOMPARE(hostPeer.count(), 0);
+            QCOMPARE(viewerPeer.count(), 0);
+        }
+
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            SignalingServer server(options);
+            QString serverError;
+            QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+            SignalingClient host;
+            host.setServer(
+                QStringLiteral("127.0.0.1"),
+                server.signalingPort());
+            QSignalSpy hostCleared(
+                &host, &SignalingClient::viewerRequestCleared);
+            QVERIFY(host.startHost(
+                QStringLiteral("802467913"),
+                QStringLiteral("cancel-host")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                host.state(), SignalingClient::State::Ready, 3000);
+
+            SignalingClient viewer;
+            viewer.setServer(
+                QStringLiteral("127.0.0.1"),
+                server.signalingPort());
+            QVERIFY(viewer.startViewer(
+                QStringLiteral("802467913"),
+                QStringLiteral("cancelling-viewer")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                host.state(),
+                SignalingClient::State::ViewerRequest,
+                3000);
+            QVERIFY(viewer.cancelConnection());
+            QTRY_COMPARE_WITH_TIMEOUT(
+                hostCleared.count(), 1, 3000);
+            QCOMPARE(
+                hostCleared.first().first().toString(),
+                QStringLiteral("cancelled"));
+            QCOMPARE(host.state(), SignalingClient::State::Ready);
+            QVERIFY(host.pendingRequestId().isEmpty());
+        }
+
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            options.approvalTimeoutMs = 200;
+            SignalingServer server(options);
+            QString serverError;
+            QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+            SignalingClient host;
+            host.setServer(
+                QStringLiteral("127.0.0.1"),
+                server.signalingPort());
+            QSignalSpy hostCleared(
+                &host, &SignalingClient::viewerRequestCleared);
+            QVERIFY(host.startHost(
+                QStringLiteral("975310864"),
+                QStringLiteral("timeout-host")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                host.state(), SignalingClient::State::Ready, 3000);
+
+            SignalingClient viewer;
+            viewer.setServer(
+                QStringLiteral("127.0.0.1"),
+                server.signalingPort());
+            QSignalSpy viewerErrors(
+                &viewer, &SignalingClient::errorOccurred);
+            QSignalSpy viewerCleared(
+                &viewer, &SignalingClient::viewerRequestCleared);
+            QVERIFY(viewer.startViewer(
+                QStringLiteral("975310864"),
+                QStringLiteral("timeout-viewer")));
+            QTRY_COMPARE_WITH_TIMEOUT(
+                hostCleared.count(), 1, 3000);
+            QCOMPARE(
+                hostCleared.first().first().toString(),
+                QStringLiteral("timeout"));
+            QCOMPARE(host.state(), SignalingClient::State::Ready);
+            QVERIFY(host.pendingRequestId().isEmpty());
+            QTRY_VERIFY_WITH_TIMEOUT(
+                viewerErrors.count() >= 1, 3000);
+            QCOMPARE(
+                viewer.lastError(),
+                QStringLiteral("approval_timeout"));
+            QCOMPARE(viewer.state(), SignalingClient::State::Error);
+            QCOMPARE(viewerCleared.count(), 1);
+            QCOMPARE(
+                viewerCleared.first().first().toString(),
+                QStringLiteral("timeout"));
+            QVERIFY(viewer.pendingRequestId().isEmpty());
+            pumpEvents(300);
+            QCOMPARE(hostCleared.count(), 1);
+            QCOMPARE(viewerCleared.count(), 1);
+        }
     }
 
     void tokenAndInvalidCode()

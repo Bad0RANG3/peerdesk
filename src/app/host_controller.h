@@ -89,6 +89,21 @@ public:
     [[nodiscard]] QJsonObject statistics() const { return statistics_; }
     [[nodiscard]] QJsonObject viewerInfo() const;
     [[nodiscard]] QList<MonitorInfo> monitors() const;
+    [[nodiscard]] bool approvalPending() const
+    {
+        return !pendingRequestId_.isEmpty();
+    }
+    [[nodiscard]] QString pendingViewerName() const
+    {
+        return pendingViewerName_;
+    }
+    [[nodiscard]] QString pendingRequestId() const
+    {
+        return pendingRequestId_;
+    }
+
+    bool approveViewer();
+    bool rejectViewer(const QString &reason = {});
 
     [[nodiscard]] bool sendFile(
         const QString &path,
@@ -123,6 +138,7 @@ signals:
     void outgoingFileCancelled(const QString &id, const QString &reason);
     void outgoingFileInterrupted(const QString &id, const QString &reason);
     void logMessage(const QString &message);
+    void approvalChanged();
 
 private:
     void connectComponents();
@@ -133,6 +149,7 @@ private:
     void setError(const QString &message);
     void failActive(const QString &message);
     void resetPeerState();
+    void clearApproval();
     void syncAnnouncement();
     bool startSignaling(QString *error);
     void updateCandidates();
@@ -144,6 +161,11 @@ private:
     void onSignalingError(const QString &reason, const QString &text);
     void onLinkState(const QString &state);
     void onSessionEvent(const QJsonObject &message);
+    void onViewerRequested(
+        const QString &requestId,
+        const QString &name,
+        int expiresMs);
+    void onViewerRequestCleared(const QString &reason);
 
     std::shared_ptr<Preferences> preferences_;
     PeerLink *link_ = nullptr;
@@ -163,6 +185,8 @@ private:
     QString token_;
     QString peerName_;
     QString peerSid_;
+    QString pendingRequestId_;
+    QString pendingViewerName_;
     QString lastError_;
     VideoSettings video_;
     bool allowInput_ = true;

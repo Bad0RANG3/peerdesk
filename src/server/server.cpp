@@ -16,6 +16,7 @@
 #include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QUdpSocket>
 #include <QtEndian>
 
@@ -222,6 +223,13 @@ public:
         TokenBucket bucket;
     };
 
+    struct Request {
+        QString id;
+        Peer *agent = nullptr;
+        Peer *viewer = nullptr;
+        double expiresAt = 0.0;
+    };
+
     Impl(SignalingServer *owner, Options options)
         : owner_(owner)
         , options_(std::move(options))
@@ -232,6 +240,13 @@ public:
         options_.relayMbps = std::max(0.0, options_.relayMbps);
         options_.connectMax = limiter_.maxAttempts();
         options_.connectWindow = limiter_.windowSeconds();
+        options_.approvalTimeoutMs =
+            std::max(200, options_.approvalTimeoutMs);
+        approvalTimer_.setInterval(200);
+        approvalTimer_.setSingleShot(false);
+        QObject::connect(
+            &approvalTimer_, &QTimer::timeout, owner_,
+            [this] { expireRequests(); });
     }
 
     ~Impl()
@@ -288,6 +303,7 @@ public:
         QObject::connect(
             udp_.get(), &QUdpSocket::readyRead, owner_,
             [this] { readDatagrams(); });
+        approvalTimer_.start();
 
         publicHost_ = resolvePublicHost();
         log(QStringLiteral(
@@ -312,10 +328,13 @@ public:
 
     void stop()
     {
-        if (!tcp_ && !udp_ && peers_.isEmpty() && pairs_.isEmpty()) {
+        if (!tcp_ && !udp_ && peers_.isEmpty() && pairs_.isEmpty()
+            && requests_.isEmpty()) {
             return;
         }
 
+        approvalTimer_.stop();
+        clearAllRequests();
         if (tcp_) {
             tcp_->close();
             tcp_.reset();
@@ -560,13 +579,27 @@ private:
             handleConnect(peer, message);
         } else if (kind == QStringLiteral("reconnect")) {
             handleReconnect(peer);
+        } else if (kind == QStringLiteral("approve")) {
+            handleApprove(peer, message);
+        } else if (kind == QStringLiteral("reject")) {
+            handleReject(peer, message);
+        } else if (kind == QStringLiteral("cancel")) {
+            handleCancel(peer, message);
         } else if (kind == QStringLiteral("ping")) {
             sendObject(
                 peer,
                 QJsonObject{{QStringLiteral("t"),
                              QStringLiteral("pong")}});
-        } else if (kind == QStringLiteral("cands")
-                   || kind == QStringLiteral("relay_hello")
+        } else if (kind == QStringLiteral("cands")) {
+            peer->cands = candidatesOf(message);
+            if (peer->partner) {
+                QJsonObject forwarded = message;
+                forwarded.insert(
+                    QStringLiteral("t"),
+                    QStringLiteral("peer_cands"));
+                sendObject(peer->partner, forwarded);
+            }
+        } else if (kind == QStringLiteral("relay_hello")
                    || kind == QStringLiteral("bye")) {
             if (peer->partner) {
                 QJsonObject forwarded = message;
@@ -593,6 +626,8 @@ private:
             return;
         }
 
+        cancelPendingForViewer(peer, true);
+        cancelPendingForAgent(peer, true);
         if (peer->role == QStringLiteral("viewer") && peer->partner) {
             teardownPair(peer->sid);
         }
@@ -632,6 +667,24 @@ private:
         if (!authenticate(peer, message)) {
             return;
         }
+        const QString code =
+            normalizeCode(message.value(QStringLiteral("code")).toString());
+        if (!codeIsValid(code)) {
+            sendError(peer, QStringLiteral("bad_code"));
+            return;
+        }
+        Peer *agent = registry_.value(codeId(code), nullptr);
+        const bool agentOnline = peerOnline(agent);
+
+        Request *pending = requestByViewer_.value(peer, nullptr);
+        if (agentOnline && pending && pending->agent == agent) {
+            peer->role = QStringLiteral("viewer");
+            peer->name = nameOf(message);
+            peer->cands = candidatesOf(message);
+            sendPendingRequest(pending);
+            return;
+        }
+
         const QString ip = remoteIp(peer);
         if (!limiter_.allow(ip)) {
             log(QStringLiteral("connect rate limited ip=%1").arg(ip));
@@ -641,26 +694,169 @@ private:
             return;
         }
 
-        const QString code =
-            normalizeCode(message.value(QStringLiteral("code")).toString());
-        Peer *agent = registry_.value(codeId(code), nullptr);
-        if (!agent || agent->cleanedUp || !agent->socket
-            || agent->socket->state()
-                != QAbstractSocket::ConnectedState) {
+        if (!agentOnline) {
+            Request *existing = requestByViewer_.value(peer, nullptr);
+            if (existing) {
+                const QString requestId = existing->id;
+                if (peerOnline(existing->agent)) {
+                    sendObject(
+                        existing->agent,
+                        QJsonObject{
+                            {QStringLiteral("t"),
+                             QStringLiteral("viewer_cancelled")},
+                            {QStringLiteral("request_id"), requestId},
+                        });
+                }
+                sendError(
+                    peer, QStringLiteral("offline"),
+                    QStringLiteral("对方设备暂时离线"),
+                    requestId);
+                clearRequest(existing);
+                return;
+            }
             sendError(peer, QStringLiteral("offline"));
             return;
         }
+        if (peer == agent) {
+            sendError(
+                peer, QStringLiteral("bad_request"),
+                QStringLiteral("不能连接到本机连接码"));
+            return;
+        }
 
-        if (!agent->sid.isEmpty()) {
-            teardownPair(agent->sid);
+        if (peer->partner) {
+            sendObject(
+                peer->partner,
+                QJsonObject{{QStringLiteral("t"),
+                             QStringLiteral("peer_gone")}});
         }
         if (!peer->sid.isEmpty()) {
             teardownPair(peer->sid);
         }
+        if (pending) {
+            cancelPendingForViewer(peer, true);
+        }
+
+        if (agent->partner || requestByAgent_.contains(agent)) {
+            sendError(
+                peer, QStringLiteral("host_busy"),
+                QStringLiteral("对方正在处理其他连接请求"));
+            return;
+        }
+
         if (peer->role == QStringLiteral("agent")
             && !peer->codeId.isEmpty()
             && registry_.value(peer->codeId) == peer) {
             registry_.remove(peer->codeId);
+        }
+
+        auto *request = new Request;
+        do {
+            request->id =
+                QString::fromLatin1(randomBytes(8).toHex());
+        } while (requests_.contains(request->id));
+        request->agent = agent;
+        request->viewer = peer;
+        request->expiresAt =
+            monotonicSeconds()
+            + options_.approvalTimeoutMs / 1000.0;
+        requests_.insert(request->id, request);
+        requestByViewer_.insert(peer, request);
+        requestByAgent_.insert(agent, request);
+
+        peer->role = QStringLiteral("viewer");
+        peer->name = nameOf(message);
+        peer->cands = candidatesOf(message);
+        sendPendingRequest(request);
+        log(QStringLiteral("approval requested %1 agent=%2 viewer=%3")
+                .arg(request->id.left(8),
+                     socketAddress(agent->socket),
+                     socketAddress(peer->socket)));
+    }
+
+    void sendPendingRequest(Request *request)
+    {
+        if (!request || request->agent == nullptr
+            || request->viewer == nullptr) {
+            return;
+        }
+        const int remainingMs = std::max(
+            0,
+            static_cast<int>(std::ceil(
+                (request->expiresAt - monotonicSeconds()) * 1000.0)));
+        sendObject(
+            request->agent,
+            QJsonObject{
+                {QStringLiteral("t"),
+                 QStringLiteral("viewer_request")},
+                {QStringLiteral("request_id"), request->id},
+                {QStringLiteral("name"), request->viewer->name},
+                {QStringLiteral("expires_ms"), remainingMs},
+            });
+        sendObject(
+            request->viewer,
+            QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("waiting")},
+                {QStringLiteral("request_id"), request->id},
+                {QStringLiteral("name"), request->agent->name},
+                {QStringLiteral("expires_ms"), remainingMs},
+            });
+    }
+
+    void handleApprove(Peer *peer, const QJsonObject &message)
+    {
+        if (!authenticate(peer, message)) {
+            return;
+        }
+        const QString requestId =
+            message.value(QStringLiteral("request_id")).toString();
+        Request *request = requests_.value(requestId, nullptr);
+        if (!request || request->agent != peer) {
+            sendError(
+                peer, QStringLiteral("bad_request"),
+                QStringLiteral("连接请求已失效"), requestId);
+            return;
+        }
+        const QString access =
+            message.value(QStringLiteral("access")).toString();
+        if (access != QStringLiteral("control")) {
+            sendError(
+                peer, QStringLiteral("bad_access"),
+                QStringLiteral("仅支持控制访问"), request->id);
+            sendError(
+                request->viewer, QStringLiteral("bad_access"),
+                QStringLiteral("对方无法授予控制权限"),
+                request->id);
+            clearRequest(request);
+            return;
+        }
+
+        Peer *agent = request->agent;
+        Peer *viewer = request->viewer;
+        if (!peerOnline(viewer)) {
+            sendObject(
+                peer,
+                QJsonObject{
+                    {QStringLiteral("t"),
+                     QStringLiteral("viewer_cancelled")},
+                    {QStringLiteral("request_id"), request->id},
+                });
+            clearRequest(request);
+            return;
+        }
+        if (!peerOnline(agent) || agent->partner
+            || viewer->partner
+            || requestByAgent_.value(agent, nullptr) != request
+            || requestByViewer_.value(viewer, nullptr) != request) {
+            sendError(
+                peer, QStringLiteral("host_busy"),
+                QStringLiteral("连接请求已失效"), request->id);
+            sendError(
+                viewer, QStringLiteral("host_busy"),
+                QStringLiteral("对方正在处理其他连接请求"),
+                request->id);
+            clearRequest(request);
+            return;
         }
 
         QString sid;
@@ -677,20 +873,18 @@ private:
             viewerTag = randomTag();
         } while (viewerTag == agentTag || tagMap_.contains(viewerTag));
 
-        peer->role = QStringLiteral("viewer");
-        peer->name = nameOf(message);
-        peer->cands = candidatesOf(message);
-        peer->sid = sid;
+        viewer->role = QStringLiteral("viewer");
         agent->sid = sid;
-        peer->partner = agent;
-        agent->partner = peer;
-        peer->relayTag = viewerTag;
+        viewer->sid = sid;
+        agent->partner = viewer;
+        viewer->partner = agent;
         agent->relayTag = agentTag;
+        viewer->relayTag = viewerTag;
 
         auto *pair = new Pair{
             sid,
             agent,
-            peer,
+            viewer,
             agentTag,
             viewerTag,
             TokenBucket(options_.relayMbps),
@@ -701,34 +895,210 @@ private:
 
         log(QStringLiteral("pair %1 agent=%2 viewer=%3")
                 .arg(sid, socketAddress(agent->socket),
-                     socketAddress(peer->socket)));
+                     socketAddress(viewer->socket)));
+        sendPairMessages(pair);
+        clearRequest(request);
+    }
 
+    void handleReject(Peer *peer, const QJsonObject &message)
+    {
+        if (!authenticate(peer, message)) {
+            return;
+        }
+        const QString requestId =
+            message.value(QStringLiteral("request_id")).toString();
+        Request *request = requests_.value(requestId, nullptr);
+        if (!request || request->agent != peer) {
+            sendError(
+                peer, QStringLiteral("bad_request"),
+                QStringLiteral("连接请求已失效"), requestId);
+            return;
+        }
+        QString reason =
+            message.value(QStringLiteral("reason")).toString().trimmed();
+        if (reason.isEmpty()) {
+            reason = QStringLiteral("对方拒绝了连接请求");
+        }
+        sendError(
+            request->viewer, QStringLiteral("rejected"), reason,
+            request->id);
+        log(QStringLiteral("approval rejected %1")
+                .arg(request->id.left(8)));
+        clearRequest(request);
+    }
+
+    void handleCancel(Peer *peer, const QJsonObject &message)
+    {
+        if (!authenticate(peer, message)) {
+            return;
+        }
+        Request *request = requestByViewer_.value(peer, nullptr);
+        if (!request) {
+            sendError(
+                peer, QStringLiteral("bad_request"),
+                QStringLiteral("连接请求已失效"),
+                message.value(
+                    QStringLiteral("request_id")).toString());
+            return;
+        }
+        const QString requestId =
+            message.value(QStringLiteral("request_id")).toString();
+        if (requestId.isEmpty() || requestId != request->id) {
+            sendError(
+                peer, QStringLiteral("bad_request"),
+                QStringLiteral("连接请求编号不匹配"), requestId);
+            return;
+        }
+        sendObject(
+            request->agent,
+            QJsonObject{
+                {QStringLiteral("t"),
+                 QStringLiteral("viewer_cancelled")},
+                {QStringLiteral("request_id"), request->id},
+            });
+        log(QStringLiteral("approval cancelled %1")
+                .arg(request->id.left(8)));
+        clearRequest(request);
+    }
+
+    void sendPairMessages(Pair *pair)
+    {
+        if (!pair || !pair->agent || !pair->viewer) {
+            return;
+        }
         const QJsonArray relay{
             publicHost_, static_cast<int>(relayPort())};
         sendObject(
-            agent,
+            pair->agent,
             QJsonObject{
                 {QStringLiteral("t"), QStringLiteral("viewer")},
-                {QStringLiteral("sid"), sid},
-                {QStringLiteral("cands"), peer->cands},
-                {QStringLiteral("name"), peer->name},
+                {QStringLiteral("sid"), pair->sid},
+                {QStringLiteral("cands"), pair->viewer->cands},
+                {QStringLiteral("name"), pair->viewer->name},
                 {QStringLiteral("relay"), relay},
                 {QStringLiteral("relay_tag"),
-                 static_cast<qint64>(agentTag)},
+                 static_cast<qint64>(pair->agentTag)},
                 {QStringLiteral("relay_mbps"), options_.relayMbps},
             });
         sendObject(
-            peer,
+            pair->viewer,
             QJsonObject{
                 {QStringLiteral("t"), QStringLiteral("peer")},
-                {QStringLiteral("sid"), sid},
-                {QStringLiteral("cands"), agent->cands},
-                {QStringLiteral("name"), agent->name},
+                {QStringLiteral("sid"), pair->sid},
+                {QStringLiteral("cands"), pair->agent->cands},
+                {QStringLiteral("name"), pair->agent->name},
                 {QStringLiteral("relay"), relay},
                 {QStringLiteral("relay_tag"),
-                 static_cast<qint64>(viewerTag)},
+                 static_cast<qint64>(pair->viewerTag)},
                 {QStringLiteral("relay_mbps"), options_.relayMbps},
             });
+        const QJsonObject access{
+            {QStringLiteral("t"), QStringLiteral("access")},
+            {QStringLiteral("access"), QStringLiteral("control")},
+        };
+        sendObject(pair->agent, access);
+        sendObject(pair->viewer, access);
+    }
+
+    [[nodiscard]] bool peerOnline(const Peer *peer) const
+    {
+        return peer && !peer->cleanedUp && !peer->closing
+            && peer->socket
+            && peer->socket->state()
+                == QAbstractSocket::ConnectedState;
+    }
+
+    void cancelPendingForViewer(
+        Peer *viewer, bool notifyAgent)
+    {
+        Request *request = requestByViewer_.value(viewer, nullptr);
+        if (!request) {
+            return;
+        }
+        if (notifyAgent && request->agent) {
+            sendObject(
+                request->agent,
+                QJsonObject{
+                    {QStringLiteral("t"),
+                     QStringLiteral("viewer_cancelled")},
+                    {QStringLiteral("request_id"), request->id},
+                });
+        }
+        clearRequest(request);
+    }
+
+    void cancelPendingForAgent(
+        Peer *agent, bool notifyViewer)
+    {
+        Request *request = requestByAgent_.value(agent, nullptr);
+        if (!request) {
+            return;
+        }
+        if (notifyViewer && request->viewer) {
+            sendError(
+                request->viewer, QStringLiteral("offline"),
+                QStringLiteral("对方设备暂时离线"),
+                request->id);
+        }
+        clearRequest(request);
+    }
+
+    void clearRequest(Request *request)
+    {
+        if (!request) {
+            return;
+        }
+        requests_.remove(request->id);
+        if (requestByViewer_.value(request->viewer, nullptr) == request) {
+            requestByViewer_.remove(request->viewer);
+        }
+        if (requestByAgent_.value(request->agent, nullptr) == request) {
+            requestByAgent_.remove(request->agent);
+        }
+        delete request;
+    }
+
+    void clearAllRequests()
+    {
+        const QList<Request *> requests = requests_.values();
+        requests_.clear();
+        requestByViewer_.clear();
+        requestByAgent_.clear();
+        for (Request *request : requests) {
+            delete request;
+        }
+    }
+
+    void expireRequests()
+    {
+        const double now = monotonicSeconds();
+        QList<Request *> expired;
+        for (Request *request : std::as_const(requests_)) {
+            if (request->expiresAt <= now) {
+                expired.append(request);
+            }
+        }
+        for (Request *request : expired) {
+            if (peerOnline(request->agent)) {
+                sendObject(
+                    request->agent,
+                    QJsonObject{
+                        {QStringLiteral("t"),
+                         QStringLiteral("viewer_request_expired")},
+                        {QStringLiteral("request_id"), request->id},
+                    });
+            }
+            if (peerOnline(request->viewer)) {
+                sendError(
+                    request->viewer,
+                    QStringLiteral("approval_timeout"),
+                    QStringLiteral("对方未及时确认连接请求"),
+                    request->id);
+            }
+            log(QStringLiteral("approval expired %1")
+                    .arg(request->id.left(8)));
+            clearRequest(request);
+        }
     }
 
     void handleReconnect(Peer *peer)
@@ -757,7 +1127,8 @@ private:
 
     void sendError(
         Peer *peer, const QString &reason,
-        const QString &text = {})
+        const QString &text = {},
+        const QString &requestId = {})
     {
         QJsonObject error{
             {QStringLiteral("t"), QStringLiteral("error")},
@@ -765,6 +1136,10 @@ private:
         };
         if (!text.isEmpty()) {
             error.insert(QStringLiteral("text"), text);
+        }
+        if (!requestId.isEmpty()) {
+            error.insert(
+                QStringLiteral("request_id"), requestId);
         }
         sendObject(peer, error);
     }
@@ -778,6 +1153,8 @@ private:
         log(QStringLiteral("tcp disconnect %1 role=%2")
                 .arg(socketAddress(peer->socket), peer->role));
 
+        cancelPendingForViewer(peer, true);
+        cancelPendingForAgent(peer, true);
         if (peer->role == QStringLiteral("agent")
             && registry_.value(peer->codeId) == peer) {
             registry_.remove(peer->codeId);
@@ -924,6 +1301,10 @@ private:
     QHash<QString, Peer *> registry_;
     QHash<QString, Pair *> pairs_;
     QHash<quint32, Pair *> tagMap_;
+    QHash<QString, Request *> requests_;
+    QHash<Peer *, Request *> requestByViewer_;
+    QHash<Peer *, Request *> requestByAgent_;
+    QTimer approvalTimer_;
     QString publicHost_;
 };
 

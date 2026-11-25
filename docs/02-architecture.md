@@ -63,15 +63,22 @@ STUN 与中继共用 peerdesk-server 的 UDP 端口
 1. 被控端向服务器发送 `register`，携带 9 位数字码的摘要、名称和本地 UDP 候选。
 2. 服务器保存注册信息，返回 `registered`、STUN/中继地址、令牌要求和带宽配置。
 3. 控制端发送 `connect`，服务器检查在线状态、令牌和连接频次。
-4. 被控端收到 `viewer`，控制端收到 `peer`，双方获得 `sid`、对端候选、
-   中继地址和各自的中继 tag。
-5. Viewer 在会话 `hello` 中声明 `media.codecs`。Windows Host 在自身 H.264
+4. 服务器创建一次性审批请求，被控端收到 `viewer_request`，控制端收到 `waiting`；
+   此时只建立待确认关系，不创建会话 `Pair`，也不下发对端候选、中继 tag 或媒体密钥。
+5. 被控端通过 `approve` 或 `reject` 明确处理请求，控制端可发送 `cancel` 撤回；
+   只有被控端批准 `access=control` 后，服务器才发送 `viewer`/`peer`/`access`，
+   双方获得 `sid`、对端候选、中继地址和各自的中继 tag。
+6. Viewer 在会话 `hello` 中声明 `media.codecs`。Windows Host 在自身 H.264
    可用且 Viewer 声明支持时选择 H.264，否则选择 JPEG；协商完成后 Host 发送
    `t: "media"` 状态，后续视频帧仍以 PDTP codec 标志为准。
-6. 候选变化通过 `cands`/`peer_cands` 增量同步；额外路径通过
+7. 候选变化通过 `cands`/`peer_cands` 增量同步；额外路径通过
    `relay_hello`/`peer_relay_hello` 保持中继可达。
-7. 任一端 `bye` 或 TCP 断开时，服务器向另一端发送 `peer_bye`/`peer_gone`/
+8. 任一端 `bye` 或 TCP 断开时，服务器向另一端发送 `peer_bye`/`peer_gone`/
    `viewer_gone` 并释放配对。
+
+审批请求默认 30 秒失效，同一 Host 同时只能挂起一个请求。拒绝、取消、审批超时、
+Host 忙碌、请求编号过期或无效 `access` 都不会建立配对；Host 的 UI 在批准前只显示
+待确认卡片，不会把请求误当成已接入会话。
 
 Viewer 的信令客户端支持自动重连；服务端返回 `offline`/`not_found` 时保持 Viewer
 角色，并通过指数退避重新请求配对，而不是进入终态。相同的 `sid` 再次配对只刷新候选，
@@ -84,6 +91,8 @@ Viewer 的信令客户端支持自动重连；服务端返回 `offline`/`not_fou
 - 只释放一次本机输入，恢复期间禁用键鼠注入。
 - 在同一信令服务上按原连接码重新配对，重新完成 HELLO/AEAD 握手，恢复画质与声音设置，
   并请求关键帧。
+- 重新配对必须再次获得 Host 批准；审批等待期保持恢复遮罩和已有末帧，不建立旧媒体
+  链路，也不提前进入实况。
 - 默认给予 30 秒恢复期限；成功握手后回到 `Streaming`，超时才进入终态。
 - 首次连接失败不发送 `sessionEnded`；实况后恢复失败最多发送一次；用户主动挂断后保持静默。
 
@@ -135,10 +144,13 @@ idle ──开始握手──▶ punching ──路径响应──▶ direct
 
 任意状态 ──BYE / RX 超时 / 主动关闭──▶ closed
 
-Viewer 实况中断 ──▶ Reconnecting ──同码重新配对/握手──▶ Streaming
+Viewer 实况中断 ──▶ Reconnecting ──同码重新申请/批准/握手──▶ Streaming
                          │
                          └─30 秒恢复期限──▶ Error（仅曾实况时发一次 sessionEnded）
 ```
+
+首次连接在 Host 批准前停留在 `WaitingApproval`，不会进入 `punching`；拒绝或超时
+进入 `Error`。实况恢复中的审批等待仍归入 `Reconnecting`，以便保留末帧和文件队列。
 
 `session` 包头字段是每端随机生成的链路 tag，不是信令层的 `sid`。两者不能混用。
 
@@ -310,6 +322,11 @@ Viewer 不丢音频包，也不做“最新帧覆盖”：`PeerDeskViewerAudio` 
 
 - 管理 `SignalingClient`、`PeerLink`、`HostSession`/`ViewerSession` 的生命周期。
 - 把会话状态、统计、错误、文件进度和音频状态转换为 Qt 信号。
+- `HostController` 维护一次性接入请求，暴露待批准状态、Viewer 名称、`approveViewer()`、
+  `rejectViewer()` 和 `approvalChanged()`；`HostPanel` 在收到请求时显示审批卡。
+- `ViewerController` 在首次连接和实况恢复中维护 `WaitingApproval`、待批准状态和 Host
+  名称；`ViewerPage` 显示琥珀色等待遮罩并隐藏工具栏、释放输入，但保留已有末帧；
+  `AppWindow` 在等待批准时保留 Viewer 页面，不切回连接页。
 - 保存被控端和控制端偏好，包括服务器、令牌、连接码、画质、显示器和声音选项；
   另存最近 4 个成功连接的连接码、对端名称、服务器和时间，按“连接码 + 服务器”去重。
   另存最多 4 个本机收藏的常用设备，按“连接码 + 规范化服务器”大小写不敏感去重并把
@@ -478,7 +495,8 @@ CI 的独立打包任务会生成 `PeerDesk-<version>-setup.exe` 和 SHA-256 清
 
 ## 7. 安全边界
 
-- 9 位连接码是会话预共享密钥的一部分；知道码且网络可达的人可以发起配对。
+- 9 位连接码是会话预共享密钥的一部分；知道码且网络可达的人可以发起配对请求，但
+  只有 Host 明确批准后服务器才下发配对信息，批准前不会开放 UDP 媒体链路。
 - 服务器不保存明文连接码，只保存摘要；中继无法解出媒体内容。
 - 服务器仍能看到连接关系、候选地址、流量大小和时序，也能丢包或阻断会话。
 - HTTP/TCP 信令当前是明文；`--token` 只保护入口，不能替代 TLS 或传输加密。

@@ -213,9 +213,36 @@ std::optional<PairInfo> establishPair(
                  },
              }},
         });
+    const auto agentRequest =
+        agent.take(QStringLiteral("viewer_request"));
+    const auto viewerWaiting =
+        viewer.take(QStringLiteral("waiting"));
+    if (!agentRequest.has_value() || !viewerWaiting.has_value()) {
+        return std::nullopt;
+    }
+    const QString requestId =
+        agentRequest->value(QStringLiteral("request_id")).toString();
+    if (requestId.isEmpty()
+        || viewerWaiting->value(QStringLiteral("request_id")).toString()
+            != requestId) {
+        return std::nullopt;
+    }
+    agent.send(
+        QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("approve")},
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("access"), QStringLiteral("control")},
+        });
     const auto agentMessage = agent.take(QStringLiteral("viewer"));
     const auto viewerMessage = viewer.take(QStringLiteral("peer"));
-    if (!agentMessage.has_value() || !viewerMessage.has_value()) {
+    const auto agentAccess = agent.take(QStringLiteral("access"));
+    const auto viewerAccess = viewer.take(QStringLiteral("access"));
+    if (!agentMessage.has_value() || !viewerMessage.has_value()
+        || !agentAccess.has_value() || !viewerAccess.has_value()
+        || agentAccess->value(QStringLiteral("access")).toString()
+            != QStringLiteral("control")
+        || viewerAccess->value(QStringLiteral("access")).toString()
+            != QStringLiteral("control")) {
         return std::nullopt;
     }
     return PairInfo{
@@ -223,6 +250,51 @@ std::optional<PairInfo> establishPair(
         relayTag(*agentMessage),
         relayTag(*viewerMessage),
     };
+}
+
+bool registerAgent(
+    TestClient &agent,
+    quint16 port,
+    const QString &code,
+    const QString &name = QStringLiteral("agent-pc"))
+{
+    if (!agent.connectTo(port)) {
+        return false;
+    }
+    agent.send(
+        QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("register")},
+            {QStringLiteral("code"), code},
+            {QStringLiteral("name"), name},
+            {QStringLiteral("cands"), QJsonArray{}},
+        });
+    return agent.take(QStringLiteral("registered")).has_value();
+}
+
+bool requestViewer(
+    TestClient &viewer,
+    quint16 port,
+    const QString &code,
+    const QString &name,
+    QString *requestId)
+{
+    if (!viewer.connectTo(port)) {
+        return false;
+    }
+    viewer.send(
+        QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("connect")},
+            {QStringLiteral("code"), code},
+            {QStringLiteral("name"), name},
+            {QStringLiteral("cands"), QJsonArray{}},
+        });
+    const auto waiting = viewer.take(QStringLiteral("waiting"));
+    if (!waiting.has_value()) {
+        return false;
+    }
+    *requestId =
+        waiting->value(QStringLiteral("request_id")).toString();
+    return !requestId->isEmpty();
 }
 
 } // namespace
@@ -380,12 +452,62 @@ private slots:
                 {QStringLiteral("cands"), viewerCands},
             });
 
+        const auto agentRequest =
+            agent.take(QStringLiteral("viewer_request"));
+        const auto viewerWaiting =
+            viewer.take(QStringLiteral("waiting"));
+        QVERIFY2(
+            agentRequest.has_value(),
+            qPrintable(
+                QStringLiteral("viewer_request missing: %1")
+                    .arg(agent.summary())));
+        QVERIFY2(
+            viewerWaiting.has_value(),
+            qPrintable(
+                QStringLiteral("waiting missing: %1")
+                    .arg(viewer.summary())));
+        const QString requestId =
+            agentRequest->value(QStringLiteral("request_id")).toString();
+        QCOMPARE(
+            viewerWaiting->value(QStringLiteral("request_id")).toString(),
+            requestId);
+        QCOMPARE(
+            agentRequest->value(QStringLiteral("name")).toString(),
+            QStringLiteral("viewer-pc"));
+        QCOMPARE(
+            viewerWaiting->value(QStringLiteral("name")).toString(),
+            QStringLiteral("agent-pc"));
+        QVERIFY(
+            agentRequest->value(QStringLiteral("expires_ms"))
+                .toInt()
+            > 0);
+        QVERIFY(!agent.take(QStringLiteral("viewer"), 150).has_value());
+        QVERIFY(!viewer.take(QStringLiteral("peer"), 150).has_value());
+
+        agent.send(
+            QJsonObject{
+                {QStringLiteral("t"), QStringLiteral("approve")},
+                {QStringLiteral("request_id"), requestId},
+                {QStringLiteral("access"), QStringLiteral("control")},
+            });
         const auto agentViewer =
             agent.take(QStringLiteral("viewer"));
         const auto viewerPeer =
             viewer.take(QStringLiteral("peer"));
+        const auto agentAccess =
+            agent.take(QStringLiteral("access"));
+        const auto viewerAccess =
+            viewer.take(QStringLiteral("access"));
         QVERIFY2(agentViewer.has_value(), "agent did not receive viewer");
         QVERIFY2(viewerPeer.has_value(), "viewer did not receive peer");
+        QVERIFY2(agentAccess.has_value(), "agent did not receive access");
+        QVERIFY2(viewerAccess.has_value(), "viewer did not receive access");
+        QCOMPARE(
+            agentAccess->value(QStringLiteral("access")).toString(),
+            QStringLiteral("control"));
+        QCOMPARE(
+            viewerAccess->value(QStringLiteral("access")).toString(),
+            QStringLiteral("control"));
 
         const QString sid =
             viewerPeer->value(QStringLiteral("sid")).toString();
@@ -562,6 +684,286 @@ private slots:
             QCOMPARE(
                 connectAuth->value(QStringLiteral("reason")).toString(),
                 QStringLiteral("bad_token"));
+        }
+    }
+
+    void signalingApprovalBoundaries()
+    {
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            SignalingServer server(options);
+            QString error;
+            QVERIFY2(server.start(&error), qPrintable(error));
+
+            TestClient agent;
+            QVERIFY(registerAgent(
+                agent, server.signalingPort(),
+                QStringLiteral("246813570")));
+            TestClient viewer;
+            QString requestId;
+            QVERIFY(requestViewer(
+                viewer, server.signalingPort(),
+                QStringLiteral("246813570"),
+                QStringLiteral("rejected-viewer"),
+                &requestId));
+            const auto request =
+                agent.take(QStringLiteral("viewer_request"));
+            QVERIFY(request.has_value());
+            QCOMPARE(
+                request->value(QStringLiteral("request_id")).toString(),
+                requestId);
+            QVERIFY(!agent.take(QStringLiteral("viewer"), 150).has_value());
+            QVERIFY(!viewer.take(QStringLiteral("peer"), 150).has_value());
+
+            agent.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("reject")},
+                    {QStringLiteral("request_id"), requestId},
+                    {QStringLiteral("reason"),
+                     QStringLiteral("现在不方便")},
+                });
+            const auto rejected = viewer.take(QStringLiteral("error"));
+            QVERIFY(rejected.has_value());
+            QCOMPARE(
+                rejected->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("rejected"));
+            QCOMPARE(
+                rejected->value(QStringLiteral("text")).toString(),
+                QStringLiteral("现在不方便"));
+            QCOMPARE(
+                rejected->value(QStringLiteral("request_id")).toString(),
+                requestId);
+            QVERIFY(!viewer.take(QStringLiteral("peer"), 150).has_value());
+            QVERIFY(!agent.take(QStringLiteral("viewer"), 150).has_value());
+
+            agent.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("approve")},
+                    {QStringLiteral("request_id"), requestId},
+                    {QStringLiteral("access"), QStringLiteral("control")},
+                });
+            const auto stale = agent.take(QStringLiteral("error"));
+            QVERIFY(stale.has_value());
+            QCOMPARE(
+                stale->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("bad_request"));
+        }
+
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            SignalingServer server(options);
+            QString error;
+            QVERIFY2(server.start(&error), qPrintable(error));
+
+            TestClient agent;
+            QVERIFY(registerAgent(
+                agent, server.signalingPort(),
+                QStringLiteral("246813571")));
+            TestClient viewer;
+            QString requestId;
+            QVERIFY(requestViewer(
+                viewer, server.signalingPort(),
+                QStringLiteral("246813571"),
+                QStringLiteral("cancelling-viewer"),
+                &requestId));
+            QVERIFY(
+                agent.take(QStringLiteral("viewer_request"))
+                    .has_value());
+            viewer.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("cancel")},
+                    {QStringLiteral("request_id"), requestId},
+                });
+            const auto cancelled =
+                agent.take(QStringLiteral("viewer_cancelled"));
+            QVERIFY(cancelled.has_value());
+            QCOMPARE(
+                cancelled->value(QStringLiteral("request_id")).toString(),
+                requestId);
+            QVERIFY(!agent.take(QStringLiteral("viewer"), 150).has_value());
+            QVERIFY(!viewer.take(QStringLiteral("peer"), 150).has_value());
+
+            viewer.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("cancel")},
+                    {QStringLiteral("request_id"), requestId},
+                });
+            const auto repeated = viewer.take(QStringLiteral("error"));
+            QVERIFY(repeated.has_value());
+            QCOMPARE(
+                repeated->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("bad_request"));
+        }
+
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            SignalingServer server(options);
+            QString error;
+            QVERIFY2(server.start(&error), qPrintable(error));
+
+            TestClient agent;
+            QVERIFY(registerAgent(
+                agent, server.signalingPort(),
+                QStringLiteral("246813572")));
+            TestClient viewer;
+            QString requestId;
+            QVERIFY(requestViewer(
+                viewer, server.signalingPort(),
+                QStringLiteral("246813572"),
+                QStringLiteral("access-viewer"),
+                &requestId));
+            QVERIFY(
+                agent.take(QStringLiteral("viewer_request"))
+                    .has_value());
+            agent.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("approve")},
+                    {QStringLiteral("request_id"), requestId},
+                    {QStringLiteral("access"), QStringLiteral("view")},
+                });
+            const auto agentError = agent.take(QStringLiteral("error"));
+            const auto viewerError = viewer.take(QStringLiteral("error"));
+            QVERIFY(agentError.has_value());
+            QVERIFY(viewerError.has_value());
+            QCOMPARE(
+                agentError->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("bad_access"));
+            QCOMPARE(
+                viewerError->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("bad_access"));
+            QCOMPARE(
+                viewerError->value(QStringLiteral("request_id")).toString(),
+                requestId);
+            QVERIFY(!agent.take(QStringLiteral("viewer"), 150).has_value());
+            QVERIFY(!viewer.take(QStringLiteral("peer"), 150).has_value());
+        }
+
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            SignalingServer server(options);
+            QString error;
+            QVERIFY2(server.start(&error), qPrintable(error));
+
+            TestClient agent;
+            QVERIFY(registerAgent(
+                agent, server.signalingPort(),
+                QStringLiteral("246813573")));
+            TestClient viewerOne;
+            QString requestId;
+            QVERIFY(requestViewer(
+                viewerOne, server.signalingPort(),
+                QStringLiteral("246813573"),
+                QStringLiteral("first-viewer"),
+                &requestId));
+            QVERIFY(
+                agent.take(QStringLiteral("viewer_request"))
+                    .has_value());
+
+            TestClient viewerTwo;
+            QVERIFY(viewerTwo.connectTo(server.signalingPort()));
+            viewerTwo.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("connect")},
+                    {QStringLiteral("code"),
+                     QStringLiteral("246813573")},
+                    {QStringLiteral("name"),
+                     QStringLiteral("second-viewer")},
+                });
+            const auto busy = viewerTwo.take(QStringLiteral("error"));
+            QVERIFY(busy.has_value());
+            QCOMPARE(
+                busy->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("host_busy"));
+            QVERIFY(!viewerTwo.take(QStringLiteral("waiting"), 150).has_value());
+
+            agent.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("approve")},
+                    {QStringLiteral("request_id"), requestId},
+                    {QStringLiteral("access"), QStringLiteral("control")},
+                });
+            QVERIFY(agent.take(QStringLiteral("viewer")).has_value());
+            QVERIFY(viewerOne.take(QStringLiteral("peer")).has_value());
+            QVERIFY(agent.take(QStringLiteral("access")).has_value());
+            QVERIFY(viewerOne.take(QStringLiteral("access")).has_value());
+
+            TestClient viewerThree;
+            QVERIFY(viewerThree.connectTo(server.signalingPort()));
+            viewerThree.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("connect")},
+                    {QStringLiteral("code"),
+                     QStringLiteral("246813573")},
+                    {QStringLiteral("name"),
+                     QStringLiteral("third-viewer")},
+                });
+            const auto pairedBusy =
+                viewerThree.take(QStringLiteral("error"));
+            QVERIFY(pairedBusy.has_value());
+            QCOMPARE(
+                pairedBusy->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("host_busy"));
+        }
+
+        {
+            SignalingServer::Options options = loopbackOptions();
+            options.connectMax = 1000;
+            options.connectWindow = 60.0;
+            options.approvalTimeoutMs = 200;
+            SignalingServer server(options);
+            QString error;
+            QVERIFY2(server.start(&error), qPrintable(error));
+
+            TestClient agent;
+            QVERIFY(registerAgent(
+                agent, server.signalingPort(),
+                QStringLiteral("246813574")));
+            TestClient viewer;
+            QString requestId;
+            QVERIFY(requestViewer(
+                viewer, server.signalingPort(),
+                QStringLiteral("246813574"),
+                QStringLiteral("timeout-viewer"),
+                &requestId));
+            QVERIFY(
+                agent.take(QStringLiteral("viewer_request"))
+                    .has_value());
+            const auto expired =
+                agent.take(QStringLiteral("viewer_request_expired"), 3000);
+            QVERIFY(expired.has_value());
+            QCOMPARE(
+                expired->value(QStringLiteral("request_id")).toString(),
+                requestId);
+            const auto timedOut = viewer.take(QStringLiteral("error"), 3000);
+            QVERIFY(timedOut.has_value());
+            QCOMPARE(
+                timedOut->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("approval_timeout"));
+            QCOMPARE(
+                timedOut->value(QStringLiteral("request_id")).toString(),
+                requestId);
+            QVERIFY(!viewer.take(QStringLiteral("peer"), 150).has_value());
+            QVERIFY(!agent.take(QStringLiteral("viewer"), 150).has_value());
+
+            agent.send(
+                QJsonObject{
+                    {QStringLiteral("t"), QStringLiteral("approve")},
+                    {QStringLiteral("request_id"), requestId},
+                    {QStringLiteral("access"), QStringLiteral("control")},
+                });
+            const auto stale = agent.take(QStringLiteral("error"));
+            QVERIFY(stale.has_value());
+            QCOMPARE(
+                stale->value(QStringLiteral("reason")).toString(),
+                QStringLiteral("bad_request"));
         }
     }
 

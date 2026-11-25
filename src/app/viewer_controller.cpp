@@ -77,6 +77,16 @@ void ViewerController::connectComponents()
         &ViewerController::onPeerLeft);
     connect(
         signaling_,
+        &SignalingClient::waitingApproval,
+        this,
+        &ViewerController::onWaitingApproval);
+    connect(
+        signaling_,
+        &SignalingClient::viewerRequestCleared,
+        this,
+        &ViewerController::onViewerRequestCleared);
+    connect(
+        signaling_,
         &SignalingClient::errorOccurred,
         this,
         &ViewerController::onSignalingError);
@@ -92,6 +102,7 @@ void ViewerController::connectComponents()
         [this](SignalingClient::State state) {
             if (!active_ || stopping_
                 || state_ == State::Streaming
+                || state_ == State::WaitingApproval
                 || state_ == State::Reconnecting
                 || state_ == State::Error) {
                 return;
@@ -323,6 +334,7 @@ bool ViewerController::connectTo(
     hadLiveSession_ = false;
     recovering_ = false;
     recoveryHandshakeArmed_ = false;
+    clearApproval();
 
     code_ = normalized;
     server_ = server.trimmed();
@@ -410,6 +422,7 @@ void ViewerController::stopSession(bool notify, const QString &reason)
     hadLiveSession_ = false;
     recovering_ = false;
     recoveryHandshakeArmed_ = false;
+    clearApproval();
     const bool wasActive = active_ || state_ != State::Idle;
     active_ = false;
     session_->stop();
@@ -437,6 +450,9 @@ void ViewerController::stopSession(bool notify, const QString &reason)
 void ViewerController::ensureInitialDeadline()
 {
     if (!active_ || stopping_ || hadLiveSession_
+        || state_ == State::WaitingApproval
+        || state_ == State::Reconnecting
+        || recovering_ || approvalPending_
         || deadlineTimer_->isActive()) {
         return;
     }
@@ -445,12 +461,14 @@ void ViewerController::ensureInitialDeadline()
 
 void ViewerController::beginRecovery()
 {
-    if (!active_ || stopping_ || recovering_ || !hadLiveSession_) {
+    if (!active_ || stopping_ || recovering_
+        || state_ == State::Reconnecting || !hadLiveSession_) {
         return;
     }
 
     recovering_ = true;
     recoveryHandshakeArmed_ = false;
+    clearApproval();
     emit inputReleaseRequested();
     stopping_ = true;
     session_->suspend();
@@ -466,8 +484,18 @@ void ViewerController::beginRecovery()
     deadlineTimer_->start(reconnectTimeoutMs_);
     emit logMessage(QStringLiteral("连接中断，正在尝试恢复会话"));
     if (signaling_->connected()) {
-        signaling_->requestPairRetry();
+        signaling_->requestPairRetry(true);
     }
+}
+
+void ViewerController::clearApproval()
+{
+    if (!approvalPending_ && approvalHostName_.isEmpty()) {
+        return;
+    }
+    approvalPending_ = false;
+    approvalHostName_.clear();
+    emit approvalChanged();
 }
 
 void ViewerController::persist()
@@ -518,7 +546,7 @@ void ViewerController::onRegistered(const RegistrationInfo &)
     lastError_.clear();
     if (active_ && state_ == State::Reconnecting
         && signaling_->connected()) {
-        signaling_->requestPairRetry();
+        signaling_->requestPairRetry(true);
     }
 }
 
@@ -557,6 +585,7 @@ void ViewerController::onPeerJoined(const PeerInfo &info)
     } else {
         setState(State::Connecting);
     }
+    clearApproval();
     ensureInitialDeadline();
     link_->beginHandshake();
 }
@@ -615,8 +644,9 @@ void ViewerController::onPeerLeft(const QString &reason)
         stopping_ = false;
         peerSid_.clear();
         setState(State::Reconnecting);
+        clearApproval();
         if (signaling_->connected()) {
-            signaling_->requestPairRetry();
+            signaling_->requestPairRetry(true);
         }
         return;
     }
@@ -634,10 +664,11 @@ void ViewerController::onPeerLeft(const QString &reason)
     }
     stopping_ = false;
     peerSid_.clear();
+    clearApproval();
     setState(State::Connecting);
     ensureInitialDeadline();
     if (signaling_->connected()) {
-        signaling_->requestPairRetry();
+        signaling_->requestPairRetry(true);
     }
 }
 
@@ -654,8 +685,10 @@ void ViewerController::onSignalingError(
     if (reason == QStringLiteral("network")
         || reason == QStringLiteral("timeout")
         || reason == QStringLiteral("offline")
-        || reason == QStringLiteral("not_found")) {
+        || reason == QStringLiteral("not_found")
+        || reason == QStringLiteral("host_busy")) {
         if (state_ != State::Streaming
+            && state_ != State::WaitingApproval
             && state_ != State::Reconnecting) {
             setState(State::Connecting);
             ensureInitialDeadline();
@@ -683,9 +716,10 @@ void ViewerController::onLinkState(const QString &state)
         }
         stopping_ = false;
         peerSid_.clear();
+        clearApproval();
         setState(State::Reconnecting);
         if (signaling_->connected()) {
-            signaling_->requestPairRetry();
+            signaling_->requestPairRetry(true);
         }
         return;
     }
@@ -709,7 +743,8 @@ void ViewerController::onLinkState(const QString &state)
     } else if (state == QStringLiteral("punching")) {
         if (state_ == State::Streaming) {
             beginRecovery();
-        } else if (state_ != State::Reconnecting) {
+        } else if (state_ != State::WaitingApproval
+                   && state_ != State::Reconnecting) {
             setState(State::Connecting);
             ensureInitialDeadline();
         }
@@ -720,6 +755,69 @@ void ViewerController::onLinkState(const QString &state)
             onPeerLeft(QStringLiteral("传输通道已关闭"));
         }
     }
+}
+
+void ViewerController::onWaitingApproval(
+    const QString &requestId,
+    const QString &hostName,
+    int)
+{
+    if (!active_ || stopping_ || requestId.isEmpty()) {
+        return;
+    }
+    if (!hadLiveSession_ && state_ != State::Reconnecting) {
+        deadlineTimer_->stop();
+    }
+    approvalPending_ = true;
+    approvalHostName_ = hostName.trimmed();
+    if (state_ != State::Reconnecting) {
+        setState(State::WaitingApproval);
+    }
+    emit approvalChanged();
+}
+
+void ViewerController::onViewerRequestCleared(const QString &reason)
+{
+    if (!active_ || stopping_) {
+        clearApproval();
+        return;
+    }
+
+    const bool wasRecovering =
+        recovering_ || state_ == State::Reconnecting;
+    clearApproval();
+
+    if (reason == QStringLiteral("rejected")) {
+        failActive(QStringLiteral("对方拒绝了远程连接请求。"));
+        return;
+    }
+    if (reason == QStringLiteral("timeout")
+        || reason == QStringLiteral("approval_timeout")) {
+        failActive(QStringLiteral("对方未及时确认连接请求。"));
+        return;
+    }
+    if (reason == QStringLiteral("signaling_lost")
+        || reason == QStringLiteral("offline")
+        || reason == QStringLiteral("not_found")
+        || reason == QStringLiteral("host_busy")
+        || reason == QStringLiteral("cancelled")
+        || reason == QStringLiteral("paired")
+        || reason == QStringLiteral("approved")) {
+        if (wasRecovering || hadLiveSession_) {
+            if (state_ != State::Reconnecting) {
+                setState(State::Reconnecting);
+            }
+            return;
+        }
+        if (state_ == State::WaitingApproval) {
+            setState(State::Connecting);
+        }
+        ensureInitialDeadline();
+        return;
+    }
+
+    failActive(
+        QStringLiteral("连接请求未获批准：%1").arg(reason));
 }
 
 void ViewerController::applyVideoSettings()
@@ -954,7 +1052,7 @@ QJsonObject ViewerController::audioState() const
 
 void ViewerController::failActive(const QString &message)
 {
-    if (stopping_) {
+    if (stopping_ || !active_) {
         return;
     }
     deadlineTimer_->stop();
@@ -962,6 +1060,7 @@ void ViewerController::failActive(const QString &message)
     hadLiveSession_ = false;
     recovering_ = false;
     recoveryHandshakeArmed_ = false;
+    clearApproval();
     stopping_ = true;
     active_ = false;
     session_->stop();

@@ -441,35 +441,55 @@ ID 发起续传：
 
 信令是长度有界的 JSON Lines：每行一条 JSON，单行上限 1 MiB。客户端消息包括：
 
-`register`、`connect`、`reconnect`、`ping`、`cands`、`relay_hello`、`bye`。
+`register`、`connect`、`approve`、`reject`、`cancel`、`reconnect`、`ping`、
+`cands`、`relay_hello`、`bye`。
 
 服务端下行包括：
 
-`registered`、`viewer`、`peer`、`peer_gone`、`viewer_gone`、`pong`、`error`，
-以及转交给对端的 `peer_cands`、`peer_relay_hello`、`peer_bye`。
+`registered`、`viewer_request`、`waiting`、`viewer`、`peer`、`access`、
+`viewer_request_expired`、`viewer_cancelled`、`peer_gone`、`viewer_gone`、
+`pong`、`error`，以及转交给对端的 `peer_cands`、`peer_relay_hello`、
+`peer_bye`。
 
 ### 8.2 注册与配对
 
 1. 被控端发送 `register`，携带 `codeId`、设备名、会话 `sid`、本地候选和令牌。
 2. 服务端返回 `registered`，包含连接码、STUN/中继 UDP 地址、`server_time`、
    `token_required` 和 `relay_mbps`。
-3. 控制端发送 `connect`，服务端检查令牌、在线状态和每 IP 连接频次。
-4. 被控端收到 `viewer`，控制端收到 `peer`；双方得到相同 `sid`、对端候选、
-   中继地址、各自的 `relay_tag` 和 `relay_mbps`。
-5. 双方用同一连接码派生 psk，在 UDP 候选上执行 PDTP 握手。
+3. 控制端发送 `connect`，服务端检查令牌、在线状态、每 IP 连接频次，以及 Host 是否
+   已处于配对或待审批状态。Host 离线返回 `offline`，忙碌返回 `host_busy`。
+4. 服务端签发一次性 `request_id`，向被控端发送 `viewer_request`（Viewer 名称和
+   `expires_ms`），向控制端发送 `waiting`（Host 名称和 `expires_ms`）。此时尚未
+   创建会话 `sid`，也不会下发候选、中继 tag 或 `access`。
+5. 被控端发送 `approve`（`request_id`、`access: "control"`）或 `reject`
+   （`request_id`、可选 `reason`）；控制端可用 `cancel` 和对应 `request_id` 撤回。
+   当前只接受 `access=control`，其他值返回 `bad_access` 并清理请求。
+6. 只有在双方仍在线、Host 与 Viewer 都未占用且 `request_id` 未过期时，服务端才
+   创建配对，发送 `viewer`、`peer` 和双方一致的 `access`；双方得到相同 `sid`、
+   对端候选、中继地址、各自的 `relay_tag` 和 `relay_mbps`。
+7. 双方用同一连接码派生 psk，在 UDP 候选上执行 PDTP 握手。
+
+审批请求默认 30 秒超时。过期时 Host 收到 `viewer_request_expired`，Viewer 收到
+`approval_timeout`；Viewer 取消时 Host 收到 `viewer_cancelled`；Viewer 掉线时
+Host 也会收到同一清理消息。`request_id` 只能成功使用一次，重复、过期或不属于该
+Host 的批准/拒绝返回 `bad_request`。拒绝后 Viewer 收到带原始请求编号的
+`rejected` 错误，双方都不会获得可握手的候选。
 
 信令层 `reconnect` 消息只向被控端发送 `viewer_gone`；Viewer 的会话恢复由客户端重新
 执行配对、UDP 握手和会话启动完成，不复用旧媒体密钥。重新进入实况后，文件发送端保留的
 续传断点可接管对端临时文件并从确认偏移继续；Viewer 的 UI 队列同时保留批次与进度。
-该恢复已在本机回环测试覆盖，真实弱网、跨 NAT 与跨机续传仍需独立验收。
+恢复会创建新的审批请求，必须再次由 Host 批准；等待审批期间不会恢复旧媒体链路。该恢复
+已在本机回环测试覆盖，真实弱网、跨 NAT 与跨机续传仍需独立验收。
 
 ### 8.3 错误与限制
 
 服务端错误 `reason` 包括：
 
-`bad_token`、`bad_code`、`offline`、`rate_limited`、`unknown_type`。
+`bad_token`、`bad_code`、`offline`、`rate_limited`、`unknown_type`、
+`bad_request`、`bad_access`、`host_busy`、`rejected`、`approval_timeout`。
 
 - 默认每个 IP 在 60 秒内最多 10 次连接尝试。
+- 审批默认 30 秒超时；同一 Host 同时只保留一个待批准请求。
 - 令牌只保护信令入口；内置信令 TCP 本身不是 TLS。
 - 中继默认按每会话 `relay_mbps × 125000 B/s` 限速，允许 1 秒突发；超限数据报直接丢弃。
 
@@ -496,11 +516,13 @@ RLY1 (4 bytes) + tag u32 BE + PDTP packet
 
 ## 9. 安全边界
 
-- 9 位连接码就是会话的预共享秘密；知道码且网络可达的人可以尝试配对。
+- 9 位连接码就是会话的预共享秘密；知道码且网络可达的人可以尝试发起配对请求，但
+  服务端只在 Host 明确批准 `access=control` 后才下发配对信息并建立可握手的会话。
 - 服务端保存连接码摘要，不使用明文连接码注册；但能看到连接元数据、候选地址、
   流量大小和时序，也能丢包或阻断会话。
 - 中继只转发密文，不能解密媒体，但它不是匿名网络，也不能隐藏流量特征。
-- `--token` 只保护信令入口，不能替代传输加密，也不能阻止已获得连接码的人发起请求。
+- `--token` 只保护信令入口，不能替代传输加密，也不能阻止已获得连接码的人发起请求；
+  请求本身仍须经过 Host 逐次批准。
 - 公网部署应把明文 TCP 信令放在 TLS 终结代理或可信内网之后，并限制 UDP 入口暴露。
 - 被控端应只在可信网络中开放键鼠、剪贴板和文件接收权限。
 

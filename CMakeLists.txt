@@ -401,7 +401,7 @@ add_executable(peerdesk-ui-tests
 )
 set_target_properties(peerdesk-ui-tests PROPERTIES AUTOUIC OFF)
 target_link_libraries(peerdesk-ui-tests
-    PRIVATE peerdesk_ui Qt6::Test
+    PRIVATE peerdesk_ui peerdesk_server Qt6::Test
 )
 
 add_executable(peerdesk-logging-tests

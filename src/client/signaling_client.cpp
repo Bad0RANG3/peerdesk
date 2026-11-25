@@ -89,6 +89,7 @@ SignalingClient::SignalingClient(QObject *parent)
     reconnectTimer_.setSingleShot(true);
     pairRetryTimer_.setSingleShot(true);
     timeoutTimer_.setSingleShot(true);
+    approvalTimer_.setSingleShot(true);
 
     qRegisterMetaType<SignalRelay>();
     qRegisterMetaType<RegistrationInfo>();
@@ -112,6 +113,9 @@ SignalingClient::SignalingClient(QObject *parent)
     connect(
         &timeoutTimer_, &QTimer::timeout, this,
         [this] { onSocketTimeout(); });
+    connect(
+        &approvalTimer_, &QTimer::timeout, this,
+        [this] { onApprovalTimeout(); });
     connect(
         socket_.get(), &QTcpSocket::connected, this,
         [this] { onSocketConnected(); });
@@ -210,6 +214,7 @@ bool SignalingClient::start(
     cancelReconnect();
     cancelPairRetry();
     timeoutTimer_.stop();
+    approvalTimer_.stop();
     stopRequested_ = false;
     terminalError_ = false;
     lastError_.clear();
@@ -221,6 +226,12 @@ bool SignalingClient::start(
     peer_ = {};
     registration_ = {};
     relay_ = {};
+    pendingRequestId_.clear();
+    submittedRequestId_.clear();
+    pendingHostName_.clear();
+    pendingViewerName_.clear();
+    access_.clear();
+    requestOutcomeEmitted_ = false;
     pingPending_ = false;
     pairRetryAttempt_ = 0;
     lineBuffer_.clear();
@@ -238,14 +249,33 @@ bool SignalingClient::start(
 void SignalingClient::stop()
 {
     const bool wasConnected = connected();
+    const bool cancelling =
+        wasConnected && role_ == Role::Viewer
+        && state_ == State::WaitingApproval
+        && !pendingRequestId_.isEmpty();
     stopRequested_ = true;
     cancelReconnect();
     cancelPairRetry();
     timeoutTimer_.stop();
+    approvalTimer_.stop();
+
+    if (cancelling) {
+        QJsonObject cancel = baseMessage(QStringLiteral("cancel"));
+        cancel.insert(
+            QStringLiteral("request_id"), pendingRequestId_);
+        sendMessage(cancel);
+    }
+
     role_ = Role::None;
     peer_ = {};
     registration_ = {};
     relay_ = {};
+    pendingRequestId_.clear();
+    submittedRequestId_.clear();
+    pendingHostName_.clear();
+    pendingViewerName_.clear();
+    access_.clear();
+    requestOutcomeEmitted_ = false;
     pingPending_ = false;
     lineBuffer_.clear();
 
@@ -277,15 +307,21 @@ void SignalingClient::reconnectNow()
     connectSocket();
 }
 
-void SignalingClient::requestPairRetry()
+void SignalingClient::requestPairRetry(bool force)
 {
     if (role_ != Role::Viewer || !connected()
-        || stopRequested_ || terminalError_) {
+        || stopRequested_ || terminalError_
+        || (state_ == State::WaitingApproval && !force)
+        || (state_ == State::Paired && !force)) {
         return;
     }
     cancelPairRetry();
     pairRetryAttempt_ = 0;
-    schedulePairRetry();
+    if (force) {
+        sendHello();
+    } else {
+        schedulePairRetry();
+    }
 }
 
 void SignalingClient::updateCandidates(
@@ -335,6 +371,82 @@ bool SignalingClient::connected() const
         && socket_->state() == QAbstractSocket::ConnectedState;
 }
 
+bool SignalingClient::approveViewer(
+    const QString &requestId,
+    const QString &access)
+{
+    if (role_ != Role::Host
+        || state_ != State::ViewerRequest
+        || requestId.isEmpty()
+        || requestId != pendingRequestId_
+        || access != QStringLiteral("control")
+        || !connected()) {
+        return false;
+    }
+    QJsonObject message = baseMessage(QStringLiteral("approve"));
+    message.insert(QStringLiteral("request_id"), requestId);
+    message.insert(QStringLiteral("access"), access);
+    if (!sendMessage(message)) {
+        return false;
+    }
+    submittedRequestId_ = requestId;
+    clearPendingRequest();
+    approvalTimer_.stop();
+    setState(State::Ready);
+    emitViewerRequestClearedOnce(QStringLiteral("approved"));
+    return true;
+}
+
+bool SignalingClient::rejectViewer(
+    const QString &requestId,
+    const QString &reason)
+{
+    if (role_ != Role::Host
+        || state_ != State::ViewerRequest
+        || requestId.isEmpty()
+        || requestId != pendingRequestId_
+        || !connected()) {
+        return false;
+    }
+    QJsonObject message = baseMessage(QStringLiteral("reject"));
+    message.insert(QStringLiteral("request_id"), requestId);
+    if (!reason.trimmed().isEmpty()) {
+        message.insert(
+            QStringLiteral("reason"), reason.trimmed());
+    }
+    if (!sendMessage(message)) {
+        return false;
+    }
+    submittedRequestId_ = requestId;
+    clearPendingRequest();
+    approvalTimer_.stop();
+    setState(State::Ready);
+    emitViewerRequestClearedOnce(QStringLiteral("rejected"));
+    return true;
+}
+
+bool SignalingClient::cancelConnection()
+{
+    if (role_ != Role::Viewer
+        || state_ != State::WaitingApproval
+        || pendingRequestId_.isEmpty()
+        || !connected()) {
+        return false;
+    }
+    QJsonObject message = baseMessage(QStringLiteral("cancel"));
+    message.insert(
+        QStringLiteral("request_id"), pendingRequestId_);
+    if (!sendMessage(message)) {
+        return false;
+    }
+    submittedRequestId_ = pendingRequestId_;
+    clearPendingRequest();
+    approvalTimer_.stop();
+    setState(State::Negotiating);
+    emitViewerRequestClearedOnce(QStringLiteral("cancelled"));
+    return true;
+}
+
 void SignalingClient::connectSocket()
 {
     reconnectTimer_.stop();
@@ -378,6 +490,8 @@ void SignalingClient::schedulePairRetry()
 {
     if (role_ != Role::Viewer || !autoReconnect_ || !connected()
         || stopRequested_ || terminalError_
+        || state_ == State::WaitingApproval
+        || state_ == State::Paired
         || pairRetryTimer_.isActive()) {
         return;
     }
@@ -407,13 +521,22 @@ void SignalingClient::cancelPairRetry()
 
 void SignalingClient::resetSession()
 {
+    const bool hadRequest = !currentRequestId().isEmpty();
     if (!peer_.sid.isEmpty()) {
         peer_ = {};
         emit peerLeft(QStringLiteral("connection_lost"));
     }
+    clearPendingRequest();
+    submittedRequestId_.clear();
+    approvalTimer_.stop();
+    access_.clear();
     registration_ = {};
     relay_ = {};
     pingPending_ = false;
+    if (hadRequest) {
+        emitViewerRequestClearedOnce(
+            QStringLiteral("signaling_lost"));
+    }
 }
 
 void SignalingClient::setState(State state)
@@ -446,6 +569,7 @@ void SignalingClient::onSocketConnected()
 void SignalingClient::onSocketDisconnected()
 {
     timeoutTimer_.stop();
+    approvalTimer_.stop();
     cancelPairRetry();
     lineBuffer_.clear();
     emit serverDisconnected();
@@ -540,6 +664,24 @@ void SignalingClient::handleMessage(const QJsonObject &message)
     } else if (kind == QStringLiteral("peer_gone")
                || kind == QStringLiteral("viewer_gone")) {
         handlePeerLeft(QStringLiteral("gone"));
+    } else if (kind == QStringLiteral("viewer_request")) {
+        handleViewerRequest(message);
+    } else if (kind == QStringLiteral("waiting")) {
+        handleWaiting(message);
+    } else if (kind == QStringLiteral("access")) {
+        handleAccess(message);
+    } else if (kind == QStringLiteral("viewer_cancelled")
+               || kind == QStringLiteral("viewer_request_expired")) {
+        const QString requestId =
+            message.value(QStringLiteral("request_id")).toString();
+        if (requestId.isEmpty()
+            || requestId != currentRequestId()) {
+            return;
+        }
+        handleViewerRequestCleared(
+            kind == QStringLiteral("viewer_cancelled")
+                ? QStringLiteral("cancelled")
+                : QStringLiteral("timeout"));
     } else if (kind == QStringLiteral("error")) {
         handleServerError(message);
     } else if (kind == QStringLiteral("pong")) {
@@ -574,7 +716,10 @@ void SignalingClient::handleRegistered(const QJsonObject &message)
         relay_ = registration_.relay;
         emit relayChanged(relay_);
     }
-    setState(State::Ready);
+    if (state_ != State::ViewerRequest
+        && state_ != State::WaitingApproval) {
+        setState(State::Ready);
+    }
     emit registered(registration_);
 }
 
@@ -599,7 +744,11 @@ void SignalingClient::handlePeer(const QJsonObject &message)
         message.value(QStringLiteral("cands")));
     info.relay = parseRelay(
         message.value(QStringLiteral("relay")), mbps, tag);
+    const bool hadRequest = !currentRequestId().isEmpty();
     if (!peer_.sid.isEmpty() && peer_.sid == info.sid) {
+        approvalTimer_.stop();
+        clearPendingRequest();
+        submittedRequestId_.clear();
         peer_.name = info.name;
         peer_.candidates = info.candidates;
         peer_.relay = info.relay;
@@ -608,15 +757,27 @@ void SignalingClient::handlePeer(const QJsonObject &message)
             emit relayChanged(relay_);
         }
         emit peerCandidatesChanged(info.candidates);
+        if (state_ != State::Paired) {
+            setState(State::Paired);
+        }
+        if (hadRequest) {
+            emitViewerRequestClearedOnce(QStringLiteral("paired"));
+        }
         return;
     }
     peer_ = info;
+    approvalTimer_.stop();
+    clearPendingRequest();
+    submittedRequestId_.clear();
     if (info.relay.valid()) {
         relay_ = info.relay;
         emit relayChanged(relay_);
     }
     setState(State::Paired);
     emit peerJoined(info);
+    if (hadRequest) {
+        emitViewerRequestClearedOnce(QStringLiteral("paired"));
+    }
 }
 
 void SignalingClient::handlePeerCandidates(
@@ -634,8 +795,198 @@ void SignalingClient::handlePeerLeft(const QString &reason)
         return;
     }
     peer_ = {};
+    access_.clear();
+    clearPendingRequest();
+    submittedRequestId_.clear();
+    approvalTimer_.stop();
     setState(State::Ready);
     emit peerLeft(reason);
+}
+
+void SignalingClient::handleViewerRequest(
+    const QJsonObject &message)
+{
+    if (role_ != Role::Host) {
+        return;
+    }
+    const QString requestId =
+        message.value(QStringLiteral("request_id")).toString();
+    if (requestId.isEmpty()) {
+        return;
+    }
+    const QString viewerName =
+        message.value(QStringLiteral("name")).toString();
+    const int expiresMs = std::clamp(
+        message.value(QStringLiteral("expires_ms")).toInt(30000),
+        1, 300000);
+    timeoutTimer_.stop();
+    cancelPairRetry();
+
+    if (state_ == State::ViewerRequest
+        && pendingRequestId_ == requestId) {
+        pendingViewerName_ = viewerName;
+        emit viewerRequested(
+            requestId, viewerName, approvalRemainingMs());
+        return;
+    }
+
+    peer_ = {};
+    access_.clear();
+    clearPendingRequest();
+    requestOutcomeEmitted_ = false;
+    pendingRequestId_ = requestId;
+    pendingViewerName_ = viewerName;
+    approvalTimer_.start(expiresMs);
+    setState(State::ViewerRequest);
+    emit viewerRequested(
+        requestId, viewerName, approvalRemainingMs());
+    emitLog(
+        QStringLiteral("%1 请求远程控制")
+            .arg(viewerName.isEmpty()
+                     ? QStringLiteral("观看端")
+                     : viewerName));
+}
+
+void SignalingClient::handleWaiting(
+    const QJsonObject &message)
+{
+    if (role_ != Role::Viewer) {
+        return;
+    }
+    const QString requestId =
+        message.value(QStringLiteral("request_id")).toString();
+    if (requestId.isEmpty()) {
+        return;
+    }
+    const QString hostName =
+        message.value(QStringLiteral("name")).toString();
+    const int expiresMs = std::clamp(
+        message.value(QStringLiteral("expires_ms")).toInt(30000),
+        1, 300000);
+
+    timeoutTimer_.stop();
+    cancelPairRetry();
+    if (state_ == State::WaitingApproval
+        && pendingRequestId_ == requestId) {
+        pendingHostName_ = hostName;
+        emit waitingApproval(
+            requestId, hostName, approvalRemainingMs());
+        return;
+    }
+
+    peer_ = {};
+    access_.clear();
+    clearPendingRequest();
+    requestOutcomeEmitted_ = false;
+    pendingRequestId_ = requestId;
+    pendingHostName_ = hostName;
+    approvalTimer_.start(expiresMs);
+    setState(State::WaitingApproval);
+    emit waitingApproval(
+        requestId, hostName, approvalRemainingMs());
+    emitLog(
+        hostName.isEmpty()
+            ? QStringLiteral("等待对方确认连接")
+            : QStringLiteral("等待 %1 确认连接").arg(hostName));
+}
+
+void SignalingClient::handleAccess(
+    const QJsonObject &message)
+{
+    const QString access =
+        message.value(QStringLiteral("access")).toString().trimmed();
+    if (access != QStringLiteral("control")) {
+        emitLog(QStringLiteral("信令服务器忽略了无效的访问权限"));
+        return;
+    }
+    access_ = access;
+    emit accessChanged(access_);
+}
+
+void SignalingClient::handleViewerRequestCleared(
+    const QString &reason)
+{
+    if (role_ == Role::Host && state_ == State::ViewerRequest) {
+        const bool hadRequest = !currentRequestId().isEmpty();
+        clearPendingRequest();
+        submittedRequestId_.clear();
+        approvalTimer_.stop();
+        setState(State::Ready);
+        if (hadRequest) {
+            emitViewerRequestClearedOnce(reason);
+        }
+        return;
+    }
+    if (role_ == Role::Viewer
+        && state_ == State::WaitingApproval) {
+        const bool hadRequest = !currentRequestId().isEmpty();
+        clearPendingRequest();
+        submittedRequestId_.clear();
+        approvalTimer_.stop();
+        setState(State::Negotiating);
+        if (hadRequest) {
+            emitViewerRequestClearedOnce(reason);
+        }
+        return;
+    }
+}
+
+void SignalingClient::clearPendingRequest()
+{
+    pendingRequestId_.clear();
+    pendingHostName_.clear();
+    pendingViewerName_.clear();
+}
+
+void SignalingClient::emitViewerRequestClearedOnce(
+    const QString &reason)
+{
+    if (requestOutcomeEmitted_) {
+        return;
+    }
+    requestOutcomeEmitted_ = true;
+    emit viewerRequestCleared(reason);
+}
+
+QString SignalingClient::currentRequestId() const
+{
+    return pendingRequestId_.isEmpty()
+        ? submittedRequestId_
+        : pendingRequestId_;
+}
+
+int SignalingClient::approvalRemainingMs() const
+{
+    const int remaining = approvalTimer_.remainingTime();
+    return remaining > 0 ? remaining : 0;
+}
+
+void SignalingClient::onApprovalTimeout()
+{
+    if (pendingRequestId_.isEmpty()) {
+        return;
+    }
+    if (role_ == Role::Host
+        && state_ == State::ViewerRequest) {
+        clearPendingRequest();
+        submittedRequestId_.clear();
+        approvalTimer_.stop();
+        setState(State::Ready);
+        emitViewerRequestClearedOnce(QStringLiteral("timeout"));
+        emitLog(QStringLiteral("连接请求已超时"));
+        return;
+    }
+    if (role_ == Role::Viewer
+        && state_ == State::WaitingApproval) {
+        clearPendingRequest();
+        submittedRequestId_.clear();
+        approvalTimer_.stop();
+        cancelPairRetry();
+        emitViewerRequestClearedOnce(QStringLiteral("timeout"));
+        setError(
+            QStringLiteral("approval_timeout"),
+            QStringLiteral("对方未及时确认连接请求"));
+    }
 }
 
 void SignalingClient::handleServerError(const QJsonObject &message)
@@ -645,8 +996,61 @@ void SignalingClient::handleServerError(const QJsonObject &message)
             QStringLiteral("unknown"));
     const QString detail =
         message.value(QStringLiteral("text")).toString();
+    const QString requestId =
+        message.value(QStringLiteral("request_id")).toString();
+    if (!requestId.isEmpty()) {
+        if (requestId != currentRequestId()) {
+            emitLog(
+                QStringLiteral("忽略了非当前连接请求的错误：%1")
+                    .arg(reason));
+            return;
+        }
+        const bool hadRequest = !currentRequestId().isEmpty();
+        clearPendingRequest();
+        submittedRequestId_.clear();
+        approvalTimer_.stop();
+        if (role_ == Role::Host) {
+            setState(State::Ready);
+            if (hadRequest) {
+                emitViewerRequestClearedOnce(reason);
+            }
+            lastError_ = reason;
+            lastErrorText_ = detail.isEmpty()
+                ? QStringLiteral("连接请求处理失败")
+                : detail;
+            emitLog(lastErrorText_);
+            emit errorOccurred(lastError_, lastErrorText_);
+            return;
+        }
+        if (role_ == Role::Viewer) {
+            if (hadRequest) {
+                emitViewerRequestClearedOnce(reason);
+            }
+            if (reason == QStringLiteral("offline")
+                || reason == QStringLiteral("not_found")
+                || reason == QStringLiteral("host_busy")) {
+                lastError_ = reason;
+                lastErrorText_ = detail.isEmpty()
+                    ? QStringLiteral("远端设备暂时无法连接")
+                    : detail;
+                setState(State::Negotiating);
+                emitLog(lastErrorText_);
+                emit errorOccurred(lastError_, lastErrorText_);
+                schedulePairRetry();
+                return;
+            }
+            setError(
+                reason,
+                detail.isEmpty()
+                    ? QStringLiteral("连接请求未获批准")
+                    : detail);
+            return;
+        }
+        return;
+    }
     if (reason == QStringLiteral("offline")
-        || reason == QStringLiteral("not_found")) {
+        || reason == QStringLiteral("not_found")
+        || reason == QStringLiteral("host_busy")) {
         timeoutTimer_.stop();
         lastError_ = reason;
         lastErrorText_ = detail.isEmpty()

@@ -60,6 +60,16 @@ public:
     [[nodiscard]] bool fileBusy() const { return fileBusy_; }
     [[nodiscard]] int fileQueueSize() const { return fileQueue_.size(); }
     [[nodiscard]] bool fileQueuePaused() const { return fileQueue_.paused(); }
+    [[nodiscard]] QWidget *approvalCard() const { return approvalCard_; }
+    [[nodiscard]] QLabel *approvalName() const { return approvalName_; }
+    [[nodiscard]] QPushButton *approveButton() const
+    {
+        return approveButton_;
+    }
+    [[nodiscard]] QPushButton *rejectButton() const
+    {
+        return rejectButton_;
+    }
 
 public slots:
     void refreshFromController();
@@ -77,6 +87,7 @@ private:
     void buildUi();
     void connectSignals();
     void updateState();
+    void updateApprovalUi();
     void updatePeer();
     void updateMonitors(const QList<MonitorInfo> &monitors);
     void updateVideoSettings(const VideoSettings &settings);
@@ -108,6 +119,10 @@ private:
     QLabel *codeHint_ = nullptr;
     QLabel *statusText_ = nullptr;
     QLabel *pathText_ = nullptr;
+    QWidget *approvalCard_ = nullptr;
+    QLabel *approvalName_ = nullptr;
+    QPushButton *approveButton_ = nullptr;
+    QPushButton *rejectButton_ = nullptr;
     QLabel *fileStatus_ = nullptr;
     StatusDot *statusDot_ = nullptr;
     QPushButton *copyButton_ = nullptr;

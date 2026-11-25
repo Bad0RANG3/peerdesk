@@ -27,6 +27,7 @@ public:
     enum class State {
         Idle,
         Connecting,
+        WaitingApproval,
         Streaming,
         Reconnecting,
         Error,
@@ -64,6 +65,14 @@ public:
     [[nodiscard]] QString peerName() const { return peerName_; }
     [[nodiscard]] bool active() const { return active_; }
     [[nodiscard]] bool streaming() const;
+    [[nodiscard]] bool approvalPending() const
+    {
+        return approvalPending_;
+    }
+    [[nodiscard]] QString approvalHostName() const
+    {
+        return approvalHostName_;
+    }
     [[nodiscard]] QJsonObject info() const;
     [[nodiscard]] QJsonObject statistics() const { return statistics_; }
     [[nodiscard]] QJsonObject audioState() const;
@@ -150,6 +159,7 @@ signals:
     void outgoingFileInterrupted(const QString &id, const QString &reason);
     void logMessage(const QString &message);
     void sessionEnded(const QString &reason);
+    void approvalChanged();
 
 private:
     void connectComponents();
@@ -162,6 +172,7 @@ private:
     void stopSession(bool notify, const QString &reason = {});
     void beginRecovery();
     void ensureInitialDeadline();
+    void clearApproval();
 
     void onRegistered(const RegistrationInfo &info);
     void onPeerJoined(const PeerInfo &info);
@@ -169,6 +180,11 @@ private:
     void onPeerLeft(const QString &reason);
     void onSignalingError(const QString &reason, const QString &text);
     void onLinkState(const QString &state);
+    void onWaitingApproval(
+        const QString &requestId,
+        const QString &hostName,
+        int expiresMs);
+    void onViewerRequestCleared(const QString &reason);
     void onAudio(const QByteArray &pcm, quint32 sequence, quint32 timestampMs);
 
     std::shared_ptr<Preferences> preferences_;
@@ -200,7 +216,9 @@ private:
     bool hadLiveSession_ = false;
     bool recovering_ = false;
     bool recoveryHandshakeArmed_ = false;
+    bool approvalPending_ = false;
     int reconnectTimeoutMs_ = 30000;
+    QString approvalHostName_;
     State state_ = State::Idle;
     QJsonObject info_;
     QJsonObject statistics_;

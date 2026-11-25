@@ -63,6 +63,8 @@ public:
         Ready,
         Paired,
         Reconnecting,
+        WaitingApproval,
+        ViewerRequest,
         Error,
     };
     Q_ENUM(State)
@@ -92,11 +94,18 @@ public:
         const QList<Candidate> &candidates = {});
     void stop();
     void reconnectNow();
-    void requestPairRetry();
+    void requestPairRetry(bool force = false);
 
     void updateCandidates(const QList<Candidate> &candidates);
     bool sendMessage(const QJsonObject &message);
     bool sendPing();
+    bool approveViewer(
+        const QString &requestId,
+        const QString &access = QStringLiteral("control"));
+    bool rejectViewer(
+        const QString &requestId,
+        const QString &reason = {});
+    bool cancelConnection();
 
     [[nodiscard]] Role role() const { return role_; }
     [[nodiscard]] State state() const { return state_; }
@@ -106,6 +115,19 @@ public:
     [[nodiscard]] bool paired() const { return !peer_.sid.isEmpty(); }
     [[nodiscard]] QString lastError() const { return lastError_; }
     [[nodiscard]] QString lastErrorText() const { return lastErrorText_; }
+    [[nodiscard]] QString pendingRequestId() const
+    {
+        return pendingRequestId_;
+    }
+    [[nodiscard]] QString pendingHostName() const
+    {
+        return pendingHostName_;
+    }
+    [[nodiscard]] QString pendingViewerName() const
+    {
+        return pendingViewerName_;
+    }
+    [[nodiscard]] QString access() const { return access_; }
     [[nodiscard]] RegistrationInfo registration() const
     {
         return registration_;
@@ -126,6 +148,16 @@ signals:
     void peerCandidatesChanged(const QList<pd::Candidate> &candidates);
     void peerLeft(const QString &reason);
     void relayChanged(const pd::SignalRelay &relay);
+    void viewerRequested(
+        const QString &requestId,
+        const QString &name,
+        int expiresMs);
+    void waitingApproval(
+        const QString &requestId,
+        const QString &hostName,
+        int expiresMs);
+    void viewerRequestCleared(const QString &reason);
+    void accessChanged(const QString &access);
     void errorOccurred(
         const QString &reason,
         const QString &text);
@@ -153,7 +185,16 @@ private:
     void handlePeer(const QJsonObject &message);
     void handlePeerCandidates(const QJsonObject &message);
     void handlePeerLeft(const QString &reason);
+    void handleViewerRequest(const QJsonObject &message);
+    void handleWaiting(const QJsonObject &message);
+    void handleAccess(const QJsonObject &message);
+    void handleViewerRequestCleared(const QString &reason);
     void handleServerError(const QJsonObject &message);
+    void clearPendingRequest();
+    void emitViewerRequestClearedOnce(const QString &reason);
+    [[nodiscard]] QString currentRequestId() const;
+    void onApprovalTimeout();
+    [[nodiscard]] int approvalRemainingMs() const;
 
     bool start(
         Role role,
@@ -173,6 +214,7 @@ private:
     QTimer reconnectTimer_;
     QTimer pairRetryTimer_;
     QTimer timeoutTimer_;
+    QTimer approvalTimer_;
     QElapsedTimer pingClock_;
     QByteArray lineBuffer_;
 
@@ -190,6 +232,12 @@ private:
     SignalRelay relay_;
     QString lastError_;
     QString lastErrorText_;
+    QString pendingRequestId_;
+    QString submittedRequestId_;
+    QString pendingHostName_;
+    QString pendingViewerName_;
+    QString access_;
+    bool requestOutcomeEmitted_ = false;
 
     bool autoReconnect_ = true;
     bool stopRequested_ = false;

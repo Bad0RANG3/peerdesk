@@ -4295,6 +4295,18 @@ private slots:
             {QStringLiteral("name"), QStringLiteral("session-viewer")},
             {QStringLiteral("cands"), QJsonArray{}},
         });
+        const auto agentRequest =
+            agent.take(QStringLiteral("viewer_request"));
+        const auto viewerWaiting =
+            viewer.take(QStringLiteral("waiting"));
+        QVERIFY(agentRequest.has_value());
+        QVERIFY(viewerWaiting.has_value());
+        agent.send(QJsonObject{
+            {QStringLiteral("t"), QStringLiteral("approve")},
+            {QStringLiteral("request_id"),
+             agentRequest->value(QStringLiteral("request_id"))},
+            {QStringLiteral("access"), QStringLiteral("control")},
+        });
         const auto agentViewer = agent.take(QStringLiteral("viewer"));
         const auto viewerPeer = viewer.take(QStringLiteral("peer"));
         QVERIFY(agentViewer.has_value());

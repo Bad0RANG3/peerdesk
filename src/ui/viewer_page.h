@@ -3,6 +3,7 @@
 #include "core/protocol.h"
 #include "ui/outgoing_file_queue.h"
 
+#include <QColor>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -182,6 +183,7 @@ public:
         const QString &note = {});
     void showStreaming(const QString &peerName);
     void showReconnecting();
+    void showWaitingApproval(const QString &hostName = {});
     void showFailed(const QString &reason);
     void showEnded(const QString &reason);
     void resetSession();
@@ -236,6 +238,7 @@ public:
     }
     [[nodiscard]] QLabel *overlayTitle() const { return overlayTitle_; }
     [[nodiscard]] QLabel *overlayNote() const { return overlayNote_; }
+    [[nodiscard]] QColor overlayDotColor() const;
     [[nodiscard]] QLabel *peerLabel() const { return peerLabel_; }
     [[nodiscard]] QLabel *codeLabel() const { return codeLabel_; }
     [[nodiscard]] QLabel *resolutionLabel() const
@@ -286,6 +289,11 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    enum class OverlayTone {
+        Progress,
+        Error,
+    };
+
     void buildUi();
     void connectSignals();
     void buildQualityMenu();
@@ -300,7 +308,9 @@ private:
     void showOverlay(
         const QString &title,
         const QString &note,
-        bool showBack);
+        bool showBack,
+        const QString &backText = {},
+        OverlayTone tone = OverlayTone::Progress);
     void hideOverlay();
     void wakeToolbar();
     void scheduleToolbarHide();

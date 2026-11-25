@@ -56,6 +56,25 @@ void HostController::connectComponents()
         &HostController::onPeerJoined);
     connect(
         signaling_,
+        &SignalingClient::viewerRequested,
+        this,
+        &HostController::onViewerRequested);
+    connect(
+        signaling_,
+        &SignalingClient::viewerRequestCleared,
+        this,
+        &HostController::onViewerRequestCleared);
+    connect(
+        signaling_,
+        &SignalingClient::accessChanged,
+        this,
+        [this](const QString &access) {
+            if (access == QStringLiteral("control")) {
+                emit logMessage(QStringLiteral("观看端已获得控制权限"));
+            }
+        });
+    connect(
+        signaling_,
         &SignalingClient::peerCandidatesChanged,
         this,
         &HostController::onPeerCandidatesChanged);
@@ -352,6 +371,7 @@ void HostController::stop()
         link_->resetPeer();
     }
     signaling_->stop();
+    clearApproval();
     peerName_.clear();
     peerSid_.clear();
     statistics_ = {};
@@ -364,11 +384,12 @@ void HostController::stop()
 void HostController::resetPeerState()
 {
     stopping_ = true;
-    session_->suspend();
+    session_->stop();
     if (linkStarted_) {
         link_->resetPeer();
     }
     stopping_ = false;
+    clearApproval();
     peerName_.clear();
     peerSid_.clear();
     statistics_ = {};
@@ -395,6 +416,7 @@ bool HostController::regenerateCode(QString *error)
         link_->resetPeer();
     }
     signaling_->stop();
+    clearApproval();
     peerName_.clear();
     peerSid_.clear();
     statistics_ = {};
@@ -558,7 +580,14 @@ void HostController::onRegistered(const RegistrationInfo &info)
 
 void HostController::onPeerJoined(const PeerInfo &info)
 {
-    if (!info.sid.isEmpty() && info.sid == peerSid_) {
+    const QString linkState = link_->state();
+    const bool linkHealthy =
+        linkState == QStringLiteral("direct")
+        || linkState == QStringLiteral("relay")
+        || linkState == QStringLiteral("punching");
+    if (!info.sid.isEmpty() && info.sid == peerSid_
+        && linkHealthy && session_->running()) {
+        clearApproval();
         return;
     }
 
@@ -577,6 +606,7 @@ void HostController::onPeerJoined(const PeerInfo &info)
     (void)session_->start();
     peerSid_ = info.sid;
     peerName_ = info.name;
+    clearApproval();
     emit peerChanged(peerName_, true);
     setState(State::Connecting);
     link_->beginHandshake();
@@ -588,6 +618,22 @@ void HostController::onPeerCandidatesChanged(
     if (linkStarted_) {
         link_->addCandidates(candidates);
     }
+    if (!active_ || stopping_) {
+        return;
+    }
+    const PeerInfo info = signaling_->peer();
+    if (info.sid.isEmpty()) {
+        return;
+    }
+    const QString linkState = link_->state();
+    const bool linkHealthy =
+        linkState == QStringLiteral("direct")
+        || linkState == QStringLiteral("relay")
+        || linkState == QStringLiteral("punching");
+    if (info.sid == peerSid_ && linkHealthy && session_->running()) {
+        return;
+    }
+    onPeerJoined(info);
 }
 
 void HostController::onPeerLeft(const QString &reason)
@@ -612,7 +658,14 @@ void HostController::onSignalingError(
         ? QStringLiteral("信令错误：%1").arg(reason)
         : text;
     if (reason == QStringLiteral("network")
-        || reason == QStringLiteral("timeout")) {
+        || reason == QStringLiteral("timeout")
+        || reason == QStringLiteral("rate_limited")
+        || reason == QStringLiteral("bad_request")
+        || reason == QStringLiteral("bad_access")
+        || reason == QStringLiteral("host_busy")
+        || reason == QStringLiteral("approval_timeout")
+        || reason == QStringLiteral("offline")
+        || reason == QStringLiteral("not_found")) {
         emit logMessage(message);
         return;
     }
@@ -639,6 +692,90 @@ void HostController::onLinkState(const QString &state)
         setState(State::Waiting);
         emit logMessage(QStringLiteral("观看端链路已关闭，等待重新接入"));
     }
+}
+
+void HostController::onViewerRequested(
+    const QString &requestId,
+    const QString &name,
+    int)
+{
+    if (stopping_ || !active_ || requestId.isEmpty()) {
+        return;
+    }
+    if (requestId == pendingRequestId_) {
+        const QString viewerName = name.trimmed();
+        if (viewerName != pendingViewerName_) {
+            pendingViewerName_ = viewerName;
+            emit approvalChanged();
+        }
+        return;
+    }
+    if (!peerSid_.isEmpty() || session_->running()) {
+        resetPeerState();
+        emit peerChanged({}, false);
+    }
+    pendingRequestId_ = requestId;
+    pendingViewerName_ = name.trimmed();
+    setState(State::Waiting);
+    emit approvalChanged();
+    emit logMessage(
+        pendingViewerName_.isEmpty()
+            ? QStringLiteral("有设备请求远程控制，等待本机确认")
+            : QStringLiteral("%1 请求远程控制，等待本机确认")
+                  .arg(pendingViewerName_));
+}
+
+void HostController::onViewerRequestCleared(const QString &reason)
+{
+    const bool wasPending = approvalPending();
+    clearApproval();
+    if (!wasPending) {
+        return;
+    }
+    if (reason == QStringLiteral("rejected")) {
+        emit logMessage(QStringLiteral("已拒绝远程控制请求"));
+    } else if (reason == QStringLiteral("timeout")) {
+        emit logMessage(QStringLiteral("远程控制请求已超时"));
+    }
+}
+
+void HostController::clearApproval()
+{
+    if (pendingRequestId_.isEmpty()
+        && pendingViewerName_.isEmpty()) {
+        return;
+    }
+    pendingRequestId_.clear();
+    pendingViewerName_.clear();
+    emit approvalChanged();
+}
+
+bool HostController::approveViewer()
+{
+    if (!active_ || stopping_ || pendingRequestId_.isEmpty()) {
+        return false;
+    }
+    const QString requestId = pendingRequestId_;
+    if (!signaling_->approveViewer(requestId)) {
+        emit logMessage(QStringLiteral("无法批准连接请求，请重试"));
+        return false;
+    }
+    clearApproval();
+    return true;
+}
+
+bool HostController::rejectViewer(const QString &reason)
+{
+    if (!active_ || stopping_ || pendingRequestId_.isEmpty()) {
+        return false;
+    }
+    const QString requestId = pendingRequestId_;
+    if (!signaling_->rejectViewer(requestId, reason)) {
+        emit logMessage(QStringLiteral("无法拒绝连接请求，请重试"));
+        return false;
+    }
+    clearApproval();
+    return true;
 }
 
 void HostController::onSessionEvent(const QJsonObject &message)
@@ -694,7 +831,7 @@ bool HostController::cancelFile()
 
 void HostController::failActive(const QString &message)
 {
-    if (stopping_) {
+    if (stopping_ || !active_) {
         return;
     }
     stopping_ = true;
@@ -704,6 +841,7 @@ void HostController::failActive(const QString &message)
         link_->resetPeer();
     }
     signaling_->stop();
+    clearApproval();
     peerName_.clear();
     peerSid_.clear();
     statistics_ = {};

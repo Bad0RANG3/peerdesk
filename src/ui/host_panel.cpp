@@ -299,6 +299,67 @@ void HostPanel::buildUi()
     pathText_->setStyleSheet(QStringLiteral("color: #69728a;"));
     statusLayout->addWidget(pathText_, 0);
     layout->addWidget(statusRail);
+
+    auto *approvalCard = new QFrame(card);
+    approvalCard->setObjectName(QStringLiteral("approvalCard"));
+    approvalCard->setStyleSheet(QStringLiteral(
+        "QFrame#approvalCard {"
+        "  background: rgba(240, 179, 76, 0.09);"
+        "  border: 1px solid rgba(240, 179, 76, 0.38);"
+        "  border-radius: 11px;"
+        "}"));
+    auto *approvalLayout = new QVBoxLayout(approvalCard);
+    approvalLayout->setContentsMargins(14, 12, 14, 12);
+    approvalLayout->setSpacing(8);
+    auto *approvalHeading = new QLabel(
+        QStringLiteral("远程控制请求"), approvalCard);
+    approvalHeading->setFont(uiFont(8, QFont::DemiBold));
+    approvalHeading->setStyleSheet(QStringLiteral("color: #f0b34c;"));
+    approvalLayout->addWidget(approvalHeading);
+    approvalName_ = new QLabel(QString(), approvalCard);
+    approvalName_->setObjectName(QStringLiteral("approvalName"));
+    approvalName_->setFont(uiFont(10, QFont::DemiBold));
+    approvalName_->setStyleSheet(QStringLiteral("color: #f5f8ff;"));
+    approvalName_->setWordWrap(true);
+    approvalLayout->addWidget(approvalName_);
+    auto *approvalHint = new QLabel(
+        QStringLiteral("对方请求控制本机，批准后才会建立远程会话。"),
+        approvalCard);
+    approvalHint->setFont(uiFont(8));
+    approvalHint->setStyleSheet(QStringLiteral("color: #9aa5b8;"));
+    approvalHint->setWordWrap(true);
+    approvalLayout->addWidget(approvalHint);
+    auto *approvalActions = new QHBoxLayout;
+    approvalActions->setContentsMargins(0, 0, 0, 0);
+    approvalActions->setSpacing(8);
+    rejectButton_ = new QPushButton(
+        QStringLiteral("拒绝"), approvalCard);
+    rejectButton_->setObjectName(QStringLiteral("rejectButton"));
+    rejectButton_->setCursor(Qt::PointingHandCursor);
+    rejectButton_->setMinimumHeight(32);
+    approvalActions->addWidget(rejectButton_);
+    approveButton_ = new QPushButton(
+        QStringLiteral("允许控制"), approvalCard);
+    approveButton_->setObjectName(QStringLiteral("approveButton"));
+    approveButton_->setCursor(Qt::PointingHandCursor);
+    approveButton_->setMinimumHeight(32);
+    approveButton_->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  padding: 5px 14px;"
+        "  border-radius: 8px;"
+        "  background: #3d7bfd;"
+        "  color: #ffffff;"
+        "  border: 1px solid #5a8fff;"
+        "  font-weight: 600;"
+        "}"
+        "QPushButton:hover { background: #4f88ff; }"
+        "QPushButton:pressed { background: #2f68e0; }"));
+    approvalActions->addWidget(approveButton_);
+    approvalActions->addStretch(1);
+    approvalLayout->addLayout(approvalActions);
+    approvalCard->hide();
+    approvalCard_ = approvalCard;
+    layout->addWidget(approvalCard);
     layout->addSpacing(20);
 
     auto *sectionTitle = new QLabel(QStringLiteral("画面与性能"), card);
@@ -513,6 +574,24 @@ void HostPanel::connectSignals()
             startHosting();
         }
     });
+    connect(approveButton_, &QPushButton::clicked, this, [this]() {
+        if (!controller_->approveViewer()) {
+            appendLog(QStringLiteral("批准连接请求失败"));
+            emit toastRequested(QStringLiteral("批准连接请求失败"));
+            return;
+        }
+        appendLog(QStringLiteral("已批准远程控制请求"));
+        emit toastRequested(QStringLiteral("已批准远程控制请求"));
+    });
+    connect(rejectButton_, &QPushButton::clicked, this, [this]() {
+        if (!controller_->rejectViewer()) {
+            appendLog(QStringLiteral("拒绝连接请求失败"));
+            emit toastRequested(QStringLiteral("拒绝连接请求失败"));
+            return;
+        }
+        appendLog(QStringLiteral("已拒绝远程控制请求"));
+        emit toastRequested(QStringLiteral("已拒绝远程控制请求"));
+    });
     connect(sendFileButton_, &QPushButton::clicked, this, [this]() {
         if (fileBusy_) {
             if (!controller_->cancelFile()) {
@@ -606,6 +685,14 @@ void HostPanel::connectSignals()
             peerName_ = connected ? name : QString();
             updateState();
             updatePeer();
+        });
+    connect(
+        controller_,
+        &HostController::approvalChanged,
+        this,
+        [this] {
+            updateApprovalUi();
+            updateState();
         });
     connect(
         controller_,
@@ -893,8 +980,24 @@ void HostPanel::refreshFromController()
     updateMonitors(controller_->monitors());
     updateVideoSettings(controller_->videoSettings());
     updateStatistics(controller_->statistics());
+    updateApprovalUi();
     updateState();
     updatePeer();
+}
+
+void HostPanel::updateApprovalUi()
+{
+    const bool pending = controller_->approvalPending();
+    approvalCard_->setVisible(pending);
+    if (!pending) {
+        approvalName_->clear();
+        return;
+    }
+    const QString name = controller_->pendingViewerName();
+    approvalName_->setText(
+        name.isEmpty()
+            ? QStringLiteral("有新的设备请求控制本机")
+            : QStringLiteral("%1 请求控制本机").arg(name));
 }
 
 void HostPanel::updateState()
@@ -922,11 +1025,22 @@ void HostPanel::updateState()
         powerButton_->setText(QStringLiteral("停止被控"));
         break;
     case HostController::State::Waiting:
-        pillText = QStringLiteral("在线");
-        status = QStringLiteral("等待控制端输入连接码");
-        hint = QStringLiteral("本机已上线，可以接受远程协助");
-        accent = green();
-        tone = PillLabel::Tone::Green;
+        if (controller_->approvalPending()) {
+            pillText = QStringLiteral("请求接入");
+            status = controller_->pendingViewerName().isEmpty()
+                ? QStringLiteral("有设备请求远程控制")
+                : QStringLiteral("%1 请求远程控制")
+                      .arg(controller_->pendingViewerName());
+            hint = QStringLiteral("批准后对方才能查看并控制本机");
+            accent = amber();
+            tone = PillLabel::Tone::Amber;
+        } else {
+            pillText = QStringLiteral("在线");
+            status = QStringLiteral("等待控制端输入连接码");
+            hint = QStringLiteral("本机已上线，可以接受远程协助");
+            accent = green();
+            tone = PillLabel::Tone::Green;
+        }
         powerButton_->setText(QStringLiteral("停止被控"));
         break;
     case HostController::State::Streaming:

@@ -98,6 +98,17 @@ void configureViewerPreferences(
     preferences->setViewer(value);
 }
 
+void approveViewerRequestsAutomatically(HostController &host)
+{
+    QObject::connect(
+        &host, &HostController::approvalChanged, &host,
+        [&host]() {
+            if (host.approvalPending()) {
+                host.approveViewer();
+            }
+        });
+}
+
 class FakeInputSink final : public IInputSink {
 public:
     struct Snapshot {
@@ -316,6 +327,7 @@ private slots:
         host.setPreferences(hostPreferences);
         host.setBindAddress(QStringLiteral("127.0.0.1"));
         host.setDeviceId(QStringLiteral("controller-host"));
+        approveViewerRequestsAutomatically(host);
 
         auto screen =
             std::make_shared<SyntheticScreenSource>(1280, 720, true);
@@ -907,6 +919,7 @@ private slots:
         host.setPreferences(hostPreferences);
         host.setBindAddress(QStringLiteral("127.0.0.1"));
         host.setDeviceId(QStringLiteral("recovery-host"));
+        approveViewerRequestsAutomatically(host);
         host.setScreenSource(
             std::make_shared<SyntheticScreenSource>(640, 360, false));
         host.setAudioSource(std::make_shared<ToneAudioSource>());
@@ -1005,6 +1018,7 @@ private slots:
         host.setPreferences(hostPreferences);
         host.setBindAddress(QStringLiteral("127.0.0.1"));
         host.setDeviceId(QStringLiteral("timeout-host"));
+        approveViewerRequestsAutomatically(host);
         host.setScreenSource(
             std::make_shared<SyntheticScreenSource>(640, 360, false));
         host.setAudioSource(std::make_shared<ToneAudioSource>());
@@ -1115,6 +1129,352 @@ private slots:
         QCOMPARE(quietSessionEnds.count(), 0);
     }
 
+    void viewerRejectAndApprovalTimeoutEndSilently()
+    {
+        SignalingServer::Options options;
+        options.host = QStringLiteral("127.0.0.1");
+        options.port = 0;
+        options.udpPort = 0;
+        options.connectMax = 1000;
+        options.connectWindow = 60.0;
+        options.approvalTimeoutMs = 300;
+        SignalingServer server(options);
+        QString serverError;
+        QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+        const QString address = serverAddress(server);
+        const QString code = QStringLiteral("161803398");
+        QTemporaryDir hostConfig;
+        QTemporaryDir viewerConfig;
+        QTemporaryDir timeoutConfig;
+        QVERIFY(hostConfig.isValid());
+        QVERIFY(viewerConfig.isValid());
+        QVERIFY(timeoutConfig.isValid());
+
+        HostController host;
+        auto hostPreferences = std::make_shared<Preferences>(
+            hostConfig.filePath(QStringLiteral("host.ini")));
+        configureHostPreferences(hostPreferences, address, code);
+        host.setPreferences(hostPreferences);
+        host.setBindAddress(QStringLiteral("127.0.0.1"));
+        host.setDeviceId(QStringLiteral("approval-host"));
+        host.setScreenSource(
+            std::make_shared<SyntheticScreenSource>(640, 360, false));
+        host.setAudioSource(std::make_shared<ToneAudioSource>());
+        host.setInputSink(std::make_shared<FakeInputSink>());
+        host.setClipboard(std::make_shared<FakeClipboard>());
+
+        QString error;
+        QVERIFY2(host.start(&error), qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() { return host.state() == HostController::State::Waiting; },
+            5000));
+
+        ViewerController rejectedViewer;
+        auto rejectedPreferences = std::make_shared<Preferences>(
+            viewerConfig.filePath(QStringLiteral("viewer.ini")));
+        configureViewerPreferences(rejectedPreferences, address);
+        rejectedViewer.setPreferences(rejectedPreferences);
+        rejectedViewer.setBindAddress(QStringLiteral("127.0.0.1"));
+        rejectedViewer.setAudioPlayback(
+            std::make_shared<FakeAudioPlayback>());
+        rejectedViewer.setReconnectTimeoutMs(2500);
+        QSignalSpy rejectedEnds(
+            &rejectedViewer, &ViewerController::sessionEnded);
+        QVERIFY2(
+            rejectedViewer.connectTo(
+                code,
+                address,
+                {},
+                QStringLiteral("rejected-viewer"),
+                &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.approvalPending()
+                    && rejectedViewer.state()
+                        == ViewerController::State::WaitingApproval
+                    && rejectedViewer.active();
+            },
+            5000));
+        QCOMPARE(
+            host.pendingViewerName(),
+            QStringLiteral("rejected-viewer"));
+        QVERIFY(host.rejectViewer());
+        QVERIFY(waitUntil(
+            [&]() {
+                return rejectedViewer.state()
+                        == ViewerController::State::Error
+                    && !rejectedViewer.active();
+            },
+            5000));
+        QCOMPARE(rejectedEnds.count(), 0);
+
+        ViewerController timedOutViewer;
+        auto timedOutPreferences = std::make_shared<Preferences>(
+            timeoutConfig.filePath(QStringLiteral("viewer.ini")));
+        configureViewerPreferences(timedOutPreferences, address);
+        timedOutViewer.setPreferences(timedOutPreferences);
+        timedOutViewer.setBindAddress(QStringLiteral("127.0.0.1"));
+        timedOutViewer.setAudioPlayback(
+            std::make_shared<FakeAudioPlayback>());
+        timedOutViewer.setReconnectTimeoutMs(2500);
+        QSignalSpy timedOutEnds(
+            &timedOutViewer, &ViewerController::sessionEnded);
+        QVERIFY2(
+            timedOutViewer.connectTo(
+                code,
+                address,
+                {},
+                QStringLiteral("timed-out-viewer"),
+                &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.approvalPending()
+                    && timedOutViewer.state()
+                        == ViewerController::State::WaitingApproval
+                    && timedOutViewer.active();
+            },
+            5000));
+        QVERIFY(waitUntil(
+            [&]() {
+                return timedOutViewer.state()
+                        == ViewerController::State::Error
+                    && !timedOutViewer.active();
+            },
+            4000));
+        QCOMPARE(timedOutEnds.count(), 0);
+        QVERIFY(waitUntil(
+            [&]() { return !host.approvalPending(); },
+            3000));
+
+        host.stop();
+    }
+
+    void viewerHangUpWhileAwaitingApprovalStaysIdle()
+    {
+        SignalingServer::Options options;
+        options.host = QStringLiteral("127.0.0.1");
+        options.port = 0;
+        options.udpPort = 0;
+        options.connectMax = 1000;
+        options.connectWindow = 60.0;
+        options.approvalTimeoutMs = 700;
+        SignalingServer server(options);
+        QString serverError;
+        QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+        const QString address = serverAddress(server);
+        const QString code = QStringLiteral("141421356");
+        QTemporaryDir hostConfig;
+        QTemporaryDir viewerConfig;
+        QVERIFY(hostConfig.isValid());
+        QVERIFY(viewerConfig.isValid());
+
+        HostController host;
+        auto hostPreferences = std::make_shared<Preferences>(
+            hostConfig.filePath(QStringLiteral("host.ini")));
+        configureHostPreferences(hostPreferences, address, code);
+        host.setPreferences(hostPreferences);
+        host.setBindAddress(QStringLiteral("127.0.0.1"));
+        host.setScreenSource(
+            std::make_shared<SyntheticScreenSource>(640, 360, false));
+        host.setAudioSource(std::make_shared<ToneAudioSource>());
+        host.setInputSink(std::make_shared<FakeInputSink>());
+        host.setClipboard(std::make_shared<FakeClipboard>());
+
+        QString error;
+        QVERIFY2(host.start(&error), qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() { return host.state() == HostController::State::Waiting; },
+            5000));
+
+        ViewerController viewer;
+        auto viewerPreferences = std::make_shared<Preferences>(
+            viewerConfig.filePath(QStringLiteral("viewer.ini")));
+        configureViewerPreferences(viewerPreferences, address);
+        viewer.setPreferences(viewerPreferences);
+        viewer.setBindAddress(QStringLiteral("127.0.0.1"));
+        viewer.setAudioPlayback(std::make_shared<FakeAudioPlayback>());
+        viewer.setReconnectTimeoutMs(2500);
+        QSignalSpy sessionEnds(
+            &viewer, &ViewerController::sessionEnded);
+        QVERIFY2(
+            viewer.connectTo(
+                code,
+                address,
+                {},
+                QStringLiteral("cancelling-viewer"),
+                &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.approvalPending()
+                    && viewer.state()
+                        == ViewerController::State::WaitingApproval;
+            },
+            5000));
+
+        viewer.hangUp();
+        QCOMPARE(viewer.state(), ViewerController::State::Idle);
+        QVERIFY(!viewer.active());
+        pumpEvents(1100);
+        QCOMPARE(viewer.state(), ViewerController::State::Idle);
+        QVERIFY(viewer.lastError().isEmpty());
+        QCOMPARE(sessionEnds.count(), 0);
+        QVERIFY(waitUntil(
+            [&]() { return !host.approvalPending(); },
+            3000));
+        host.stop();
+    }
+
+    void viewerRecoveryRequiresFreshApproval()
+    {
+        SignalingServer::Options options;
+        options.host = QStringLiteral("127.0.0.1");
+        options.port = 0;
+        options.udpPort = 0;
+        options.connectMax = 1000;
+        options.connectWindow = 60.0;
+        options.approvalTimeoutMs = 5000;
+        SignalingServer server(options);
+        QString serverError;
+        QVERIFY2(server.start(&serverError), qPrintable(serverError));
+
+        const QString address = serverAddress(server);
+        const QString code = QStringLiteral("173205080");
+        QTemporaryDir hostConfig;
+        QTemporaryDir viewerConfig;
+        QVERIFY(hostConfig.isValid());
+        QVERIFY(viewerConfig.isValid());
+
+        HostController host;
+        auto hostPreferences = std::make_shared<Preferences>(
+            hostConfig.filePath(QStringLiteral("host.ini")));
+        configureHostPreferences(hostPreferences, address, code);
+        host.setPreferences(hostPreferences);
+        host.setBindAddress(QStringLiteral("127.0.0.1"));
+        host.setDeviceId(QStringLiteral("reapproval-host"));
+        host.setScreenSource(
+            std::make_shared<SyntheticScreenSource>(640, 360, false));
+        host.setAudioSource(std::make_shared<ToneAudioSource>());
+        host.setInputSink(std::make_shared<FakeInputSink>());
+        host.setClipboard(std::make_shared<FakeClipboard>());
+        bool autoApprove = true;
+        QObject::connect(
+            &host,
+            &HostController::approvalChanged,
+            &host,
+            [&]() {
+                if (autoApprove && host.approvalPending()) {
+                    host.approveViewer();
+                }
+            });
+
+        ViewerController viewer;
+        auto viewerPreferences = std::make_shared<Preferences>(
+            viewerConfig.filePath(QStringLiteral("viewer.ini")));
+        configureViewerPreferences(viewerPreferences, address);
+        viewer.setPreferences(viewerPreferences);
+        viewer.setBindAddress(QStringLiteral("127.0.0.1"));
+        viewer.setAudioPlayback(std::make_shared<FakeAudioPlayback>());
+        viewer.setReconnectTimeoutMs(8000);
+
+        QSignalSpy releaseRequests(
+            &viewer, &ViewerController::inputReleaseRequested);
+        QSignalSpy sessionEnds(
+            &viewer, &ViewerController::sessionEnded);
+
+        QString error;
+        QVERIFY2(host.start(&error), qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() { return host.state() == HostController::State::Waiting; },
+            5000));
+        QVERIFY2(
+            viewer.connectTo(
+                code,
+                address,
+                {},
+                QStringLiteral("reapproval-viewer"),
+                &error),
+            qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.state() == HostController::State::Streaming
+                    && viewer.state() == ViewerController::State::Streaming
+                    && viewer.streaming();
+            },
+            10000));
+
+        autoApprove = false;
+        host.stop();
+        QVERIFY(waitUntil(
+            [&]() {
+                return viewer.state()
+                    == ViewerController::State::Reconnecting;
+            },
+            5000));
+        QVERIFY(viewer.active());
+        QCOMPARE(releaseRequests.count(), 1);
+        QCOMPARE(sessionEnds.count(), 0);
+
+        QVERIFY2(host.start(&error), qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.state() == HostController::State::Waiting
+                    && host.approvalPending()
+                    && viewer.state()
+                        == ViewerController::State::Reconnecting
+                    && viewer.approvalPending()
+                    && viewer.active();
+            },
+            8000));
+        QCOMPARE(releaseRequests.count(), 1);
+        QCOMPARE(sessionEnds.count(), 0);
+        QVERIFY(host.approveViewer());
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.state() == HostController::State::Streaming
+                    && viewer.state() == ViewerController::State::Streaming
+                    && viewer.streaming();
+            },
+            10000));
+        QCOMPARE(releaseRequests.count(), 1);
+        QCOMPARE(sessionEnds.count(), 0);
+
+        host.stop();
+        QVERIFY(waitUntil(
+            [&]() {
+                return viewer.state()
+                    == ViewerController::State::Reconnecting;
+            },
+            5000));
+        QCOMPARE(releaseRequests.count(), 2);
+        QCOMPARE(sessionEnds.count(), 0);
+        QVERIFY2(host.start(&error), qPrintable(error));
+        QVERIFY(waitUntil(
+            [&]() {
+                return host.state() == HostController::State::Waiting
+                    && host.approvalPending()
+                    && viewer.state()
+                        == ViewerController::State::Reconnecting
+                    && viewer.approvalPending();
+            },
+            8000));
+        QVERIFY(host.rejectViewer());
+        QVERIFY(waitUntil(
+            [&]() {
+                return viewer.state() == ViewerController::State::Error
+                    && !viewer.active();
+            },
+            5000));
+        QCOMPARE(releaseRequests.count(), 2);
+        QCOMPARE(sessionEnds.count(), 1);
+
+        host.stop();
+    }
+
     void invalidParametersAndTokenRecovery()
     {
         SignalingServer::Options options;
@@ -1143,6 +1503,7 @@ private slots:
             QStringLiteral("test-token"));
         host.setPreferences(hostPreferences);
         host.setBindAddress(QStringLiteral("127.0.0.1"));
+        approveViewerRequestsAutomatically(host);
         host.setScreenSource(
             std::make_shared<SyntheticScreenSource>(640, 360, false));
         host.setAudioSource(std::make_shared<ToneAudioSource>());

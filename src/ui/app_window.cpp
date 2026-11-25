@@ -438,6 +438,11 @@ void AppWindow::connectSignals()
         });
     connect(
         viewer_,
+        &ViewerController::approvalChanged,
+        this,
+        [this] { updateViewerState(); });
+    connect(
+        viewer_,
         &ViewerController::peerChanged,
         this,
         [this](const QString &, bool) {
@@ -842,6 +847,21 @@ void AppWindow::updateViewerState()
                     : viewer_->peerName());
         }
         break;
+    case ViewerController::State::WaitingApproval:
+        connectionPage_->setConnected(false);
+        connectionPage_->setBusy(true);
+        connectionPage_->setStatus(
+            viewer_->approvalHostName().isEmpty()
+                ? QStringLiteral("等待对方确认连接…")
+                : QStringLiteral("等待 %1 确认连接…")
+                      .arg(viewer_->approvalHostName()),
+            PillLabel::Tone::Amber);
+        viewerPage_->showWaitingApproval(
+            viewer_->approvalHostName());
+        if (stack_->currentWidget() == connectionPage_) {
+            showViewerPage();
+        }
+        break;
     case ViewerController::State::Streaming:
         connectionPage_->setConnected(true, viewer_->peerName());
         if (!viewerPage_->sessionLive()) {
@@ -858,9 +878,16 @@ void AppWindow::updateViewerState()
         break;
     case ViewerController::State::Reconnecting:
         connectionPage_->setStatus(
-            QStringLiteral("连接中断，正在恢复…"),
+            viewer_->approvalPending()
+                ? QStringLiteral("连接中断，正在等待对方重新确认…")
+                : QStringLiteral("连接中断，正在恢复…"),
             PillLabel::Tone::Amber);
-        viewerPage_->showReconnecting();
+        if (viewer_->approvalPending()) {
+            viewerPage_->showWaitingApproval(
+                viewer_->approvalHostName());
+        } else {
+            viewerPage_->showReconnecting();
+        }
         if (stack_->currentWidget() == connectionPage_) {
             showViewerPage();
         }

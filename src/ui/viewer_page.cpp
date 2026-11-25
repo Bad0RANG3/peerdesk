@@ -1709,15 +1709,34 @@ void ViewerPage::connectSignals()
                 showStreaming(
                     peerName_.isEmpty() ? controller_->peerName() : peerName_);
             } else if (state == ViewerController::State::Reconnecting) {
-                showReconnecting();
-            } else if (state == ViewerController::State::Connecting
-                       && live_) {
-                if (!overlay_->isVisible() || demoMode_) {
-                    showConnecting(
-                        peerName_.isEmpty()
-                            ? QStringLiteral("远端设备")
-                            : peerName_);
+                if (controller_->approvalPending()) {
+                    showWaitingApproval(controller_->approvalHostName());
+                } else {
+                    showReconnecting();
                 }
+            } else if (state == ViewerController::State::Connecting
+                       && live_
+                       && !demoMode_
+                       && !controller_->approvalPending()) {
+                showConnecting(
+                    peerName_.isEmpty()
+                        ? QStringLiteral("远端设备")
+                        : peerName_);
+            } else if (state
+                       == ViewerController::State::WaitingApproval) {
+                showWaitingApproval(controller_->approvalHostName());
+            }
+        });
+    connect(
+        controller_,
+        &ViewerController::approvalChanged,
+        this,
+        [this] {
+            if (controller_->approvalPending()) {
+                showWaitingApproval(controller_->approvalHostName());
+            } else if (controller_->state()
+                       == ViewerController::State::Reconnecting) {
+                showReconnecting();
             }
         });
     connect(
@@ -2463,17 +2482,28 @@ void ViewerPage::updateGameMouseAvailability()
 void ViewerPage::showOverlay(
     const QString &title,
     const QString &note,
-    bool showBack)
+    bool showBack,
+    const QString &backText,
+    OverlayTone tone)
 {
     overlayTitle_->setText(title);
     overlayNote_->setText(note);
     backButton_->setVisible(showBack);
-    overlayDot_->setColor(showBack ? red() : amber());
+    backButton_->setText(
+        backText.trimmed().isEmpty()
+            ? QStringLiteral("返回连接页")
+            : backText);
+    overlayDot_->setColor(tone == OverlayTone::Error ? red() : amber());
     overlay_->setGeometry(rect());
     overlay_->show();
     overlay_->raise();
     hideToolbarImmediately();
     toolbarTimer_->stop();
+}
+
+QColor ViewerPage::overlayDotColor() const
+{
+    return overlayDot_->color();
 }
 
 void ViewerPage::hideOverlay()
@@ -2861,6 +2891,52 @@ void ViewerPage::showReconnecting()
     updateToolbarVisibility();
 }
 
+void ViewerPage::showWaitingApproval(const QString &hostName)
+{
+    const QString named = hostName.trimmed();
+    if (!live_ || demoMode_) {
+        beginSession(
+            named,
+            controller_->code());
+    }
+    live_ = true;
+    demoMode_ = false;
+    demoBadge_->hide();
+    if (!named.isEmpty()) {
+        peerName_ = named;
+    }
+    if (sessionCode_.isEmpty()) {
+        sessionCode_ = controller_->code();
+    }
+    dragActive_ = false;
+    dropOverlay_->hide();
+    textOverlay_->hide();
+    fileQueue_.pause();
+    fileQueue_.interruptActive(QStringLiteral("interrupted"));
+    transferLabel_->hide();
+    fileCancelButton_->hide();
+    fileRetryButton_->hide();
+    canvas_->setRelativeMouseMode(false);
+    canvas_->setInputEnabled(false);
+    canvas_->clearRemoteCursor();
+    canvas_->releaseInputs();
+    linkState_ = QStringLiteral("waiting");
+    updateLinkUi();
+    updateAudioUi();
+    const QString target = named.isEmpty()
+        ? QStringLiteral("对方")
+        : named;
+    showOverlay(
+        named.isEmpty()
+            ? QStringLiteral("等待对方确认连接…")
+            : QStringLiteral("等待 %1 确认连接…").arg(target),
+        QStringLiteral(
+            "连接请求已发送，对方同意后将自动建立加密通道。"),
+        true,
+        QStringLiteral("取消连接"));
+    updateToolbarVisibility();
+}
+
 void ViewerPage::showFailed(const QString &reason)
 {
     live_ = false;
@@ -2882,7 +2958,9 @@ void ViewerPage::showFailed(const QString &reason)
         reason.isEmpty()
             ? QStringLiteral("连接已中断，请返回后重试。")
             : reason,
-        true);
+        true,
+        {},
+        OverlayTone::Error);
 }
 
 void ViewerPage::showEnded(const QString &reason)
@@ -2909,7 +2987,9 @@ void ViewerPage::showEnded(const QString &reason)
         reason.isEmpty()
             ? QStringLiteral("传输通道已关闭，请返回连接页重新连接。")
             : reason,
-        true);
+        true,
+        {},
+        OverlayTone::Error);
 }
 
 void ViewerPage::resetSession()
