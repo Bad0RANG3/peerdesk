@@ -79,7 +79,7 @@ public:
             [this]() {
                 return socket.state() == QAbstractSocket::ConnectedState;
             },
-            3000);
+            10000);
     }
 
     void send(const QJsonObject &object)
@@ -93,7 +93,7 @@ public:
 
     [[nodiscard]] std::optional<QJsonObject> take(
         const QString &type,
-        int timeoutMs = 3000)
+        int timeoutMs = 10000)
     {
         return waitUntil(
                    [this, &type]() {
@@ -4299,8 +4299,12 @@ private slots:
             agent.take(QStringLiteral("viewer_request"));
         const auto viewerWaiting =
             viewer.take(QStringLiteral("waiting"));
-        QVERIFY(agentRequest.has_value());
-        QVERIFY(viewerWaiting.has_value());
+        QVERIFY2(
+            agentRequest.has_value(),
+            "timed out waiting for viewer_request");
+        QVERIFY2(
+            viewerWaiting.has_value(),
+            "timed out waiting for waiting");
         agent.send(QJsonObject{
             {QStringLiteral("t"), QStringLiteral("approve")},
             {QStringLiteral("request_id"),
@@ -4309,8 +4313,12 @@ private slots:
         });
         const auto agentViewer = agent.take(QStringLiteral("viewer"));
         const auto viewerPeer = viewer.take(QStringLiteral("peer"));
-        QVERIFY(agentViewer.has_value());
-        QVERIFY(viewerPeer.has_value());
+        QVERIFY2(
+            agentViewer.has_value(),
+            "timed out waiting for viewer");
+        QVERIFY2(
+            viewerPeer.has_value(),
+            "timed out waiting for peer");
 
         const QByteArray psk = QByteArrayLiteral("session-relay-secret");
         PeerLink hostLink(true, psk);

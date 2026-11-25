@@ -450,6 +450,8 @@ add_test(NAME peerdesk-logging COMMAND peerdesk-logging-tests)
 add_test(NAME peerdesk-discovery COMMAND peerdesk-discovery-tests)
 set_tests_properties(peerdesk-single-instance PROPERTIES
     ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1")
+set_tests_properties(peerdesk-session PROPERTIES
+    ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1")
 set_tests_properties(peerdesk-ui PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(WIN32)
