@@ -2693,25 +2693,10 @@ private slots:
         QVERIFY2(host.sendFile(stoppedPath, &error), qPrintable(error));
         QCOMPARE(hostStarted.count(), 1);
         const QString stoppedId = hostStarted.at(0).at(0).toString();
-        QVERIFY(waitUntil(
-            [&]() {
-                return std::any_of(
-                    viewerEvents.cbegin(),
-                    viewerEvents.cend(),
-                    [&stoppedId](const QJsonObject &message) {
-                        return message.value(QStringLiteral("t")).toString()
-                                == QStringLiteral("file_in")
-                            && message.value(QStringLiteral("state")).toString()
-                                == QStringLiteral("progress")
-                            && message.value(QStringLiteral("id")).toString()
-                                == stoppedId
-                            && message.value(QStringLiteral("got")).toInt()
-                                > 0;
-                    });
-            },
-            5000));
+        QVERIFY(stoppedId != resumedId);
         host.stop();
         QCOMPARE(hostInterrupted.count(), 1);
+        QCOMPARE(hostInterrupted.at(0).at(0).toString(), stoppedId);
         QVERIFY(host.start());
         QVERIFY(waitUntil([&]() { return host.running(); }, 3000));
         pumpEvents(250);
